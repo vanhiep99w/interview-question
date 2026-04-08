@@ -14,21 +14,31 @@ description: "Incident response thực tế: triage, mitigate, communicate trên
 ## Dành cho level
 
 <Tabs items={["Mid", "Senior", "Staff"]}>
+
 <Tab value="Mid">
+
 Interviewer expect bạn biết **quy trình cơ bản**: xác nhận sự cố, alert team, rollback nếu có deploy gần đây, theo dõi logs. Không cần dẫn dắt — cần thực hiện được khi được giao việc.
 
 Điểm cộng: biết dùng `kubectl`, đọc được Prometheus metrics, không panic.
+
 </Tab>
+
 <Tab value="Senior">
+
 Interviewer expect bạn **tự dẫn dắt toàn bộ incident**: assign IC, triage parallel, quyết định mitigate hay rollback, communicate liên tục với stakeholders. Biết phân biệt các loại lỗi (OOMKilled vs HikariCP vs Kafka lag).
 
 Điểm cộng: nhắc đến controlled ramp-up sau restore, blameless post-mortem, SLA impact.
+
 </Tab>
+
 <Tab value="Staff">
+
 Interviewer expect bạn nghĩ ở tầng **process và prevention**: runbook đã có chưa, on-call rotation được thiết kế thế nào, chaos engineering phát hiện được class of problems này không, tại sao alert không kích hoạt sớm hơn.
 
 Điểm cộng: đề xuất cải tiến hệ thống alert, thiết kế game day drill, giảm MTTR cho toàn team.
+
 </Tab>
+
 </Tabs>
 
 ---
