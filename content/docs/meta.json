@@ -1,0 +1,11 @@
+{
+  "pages": [
+    "index",
+    "javascript",
+    "react",
+    "nodejs",
+    "database",
+    "system-design",
+    "behavioral"
+  ]
+}
