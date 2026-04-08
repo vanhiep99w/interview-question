@@ -29,8 +29,10 @@ content/docs/
 ├── meta.json                 # Root sidebar order (list active categories only)
 ├── {category}/
 │   ├── meta.json             # { "title": "...", "pages": ["01-easy", "02-medium", "03-hard"] }
-│   └── NN-question-slug.md   # Each question = 1 file, 1 category
+│   └── NN-question-slug.mdx  # Each question = 1 file, 1 category — dùng .mdx, KHÔNG dùng .md
 ```
+
+> **Bắt buộc dùng `.mdx`** cho tất cả câu hỏi. File `.md` không parse JSX — các component như `<Tabs>`, `<Steps>`, `<Callout>` sẽ render ra raw text thay vì UI.
 
 **Active categories:** thêm category vào `meta.json` khi đã có ít nhất 1 câu hỏi. Xoá khỏi `meta.json` nếu category rỗng.
 

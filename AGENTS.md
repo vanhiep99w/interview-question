@@ -24,7 +24,9 @@ npm run deploy   # Build + push to Cloudflare Pages
 
 ## File Naming
 
-- Format: `NN-slug.md` — số `NN` phản ánh độ khó tương đối (01 = dễ nhất)
+- Format: `NN-slug.mdx` — **bắt buộc dùng `.mdx`**, không dùng `.md`
+- File `.md` không parse JSX → `<Tabs>`, `<Steps>`, `<Callout>` render ra raw text
+- Số `NN` phản ánh độ khó tương đối (01 = dễ nhất)
 - Khi thêm câu hỏi mới, chèn đúng vị trí độ khó, không append cuối.
 
 ## meta.json Safety
