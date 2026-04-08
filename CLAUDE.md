@@ -112,30 +112,94 @@ Khi viết ví dụ, code snippet, hoặc scenario cụ thể — **luôn dùng 
 ---
 
 ## Câu trả lời mẫu
-Đoạn văn 5-8 câu, giọng tự nhiên như đang kể trong phỏng vấn.
-Không phải bullet point — phải nghe như người thật nói chuyện thật.
+> Luôn dùng blockquote `>`. Xem chi tiết "Câu trả lời mẫu — interview feel" bên dưới.
 
 ---
 
 ## Phân tích chi tiết
-[Diagram Mermaid + các section giải thích, commands, code, bảng so sánh]
+> Xem chi tiết "Phân tích chi tiết — flow và narrative" bên dưới.
 
 ---
 
 ## Bẫy thường gặp
-Những câu trả lời nghe có vẻ đúng nhưng khiến interviewer trừ điểm.
-Mỗi bẫy: [Câu trả lời sai] → [Tại sao sai] → [Câu đúng].
+> Format bắt buộc — xem "Format thống nhất" bên dưới.
 
 ---
 
 ## Câu hỏi follow-up
-1-4 câu interviewer hay hỏi tiếp, mỗi câu kèm gợi ý trả lời ngắn.
+> Format bắt buộc — xem "Format thống nhất" bên dưới.
 
 ---
 
 ## Xem thêm
-Link đến các câu hỏi liên quan trong project.
+- Link đến câu hỏi liên quan **đã tồn tại** trong project.
+- **Không để placeholder** ("thêm khi có nội dung mới"). Nếu chưa có doc liên quan, bỏ trống section.
 ```
+
+### Câu trả lời mẫu — interview feel
+
+Đoạn văn 5-8 câu, **dùng blockquote `>`**, giọng tự nhiên như đang kể trong phỏng vấn. Phải nghe như Senior engineer kể kinh nghiệm thật — không phải student đọc sách.
+
+**Anti-patterns (CẤM):**
+- ❌ Mở bằng định nghĩa: *"X là Y, Z là W, Off-heap là..."* → đây là textbook, không phải interview
+- ❌ Liệt kê tính năng: *"Redis có List, Set, Hash, Stream..."* → interviewer đã biết, họ muốn nghe trade-off
+- ❌ Chỉ nói lý thuyết mà không anchor vào kinh nghiệm hoặc quyết định cụ thể
+
+**Patterns đúng:**
+- ✅ Mở bằng insight/mindset: *"Việc đầu tiên tôi làm không phải là mở terminal..."*
+- ✅ Mở bằng approach: *"Đây là bài toán upsert quy mô lớn — điều đầu tiên tôi tránh là..."*
+- ✅ Mở bằng systematic thinking: *"Tôi sẽ không đoán nguyên nhân mà bắt đầu bằng đo lường..."*
+- ✅ Có ít nhất 1 tín hiệu kinh nghiệm: trade-off đã chọn, sai lầm đã gặp, hoặc quyết định đã ra trong production
+
+**Litmus test:** đọc to lên — nếu nghe như đang đọc documentation hoặc Wikipedia thì rewrite.
+
+### Phân tích chi tiết — flow và narrative
+
+Không chỉ liệt kê code + diagram — phải có **dẫn dắt** giữa các section.
+
+**Quy tắc:**
+1. **Sắp xếp theo mức quan trọng trong interview**, không theo thứ tự sách giáo khoa. Ví dụ: Heap (90% vấn đề) → Off-heap (bug khó) → Stack (ít gặp), không phải Stack → Heap → Off-heap.
+2. **Câu hỏi knowledge/concept: mở bằng production scenario** rồi dẫn dắt lý thuyết qua lens debug. Ví dụ: *"Pod bị OOMKill, heap usage chỉ 40% — chuyện gì đang xảy ra?"* → từ đó giải thích 3 vùng nhớ.
+3. **Narrative giữa các section**: không nhảy code block → code block. Mỗi code block/config phải có paragraph giải thích TẠI SAO, không chỉ WHAT.
+4. **Mọi "magic number" phải giải thích nguồn gốc**: batch 10K rows — tại sao 10K? Pool size 10 — công thức từ đâu? TTL 60s — trade-off gì?
+5. **Transition**: khi chuyển sang section mới, 1-2 câu giải thích tại sao section này tiếp theo là logic (ví dụ: "Sau khi load xong staging, bước tiếp theo là merge — nhưng merge 1 triệu rows trong 1 transaction sẽ lock quá lâu, nên phải batch.").
+
+### Loại câu hỏi và approach
+
+Mỗi loại câu hỏi cần cách tiếp cận khác nhau cho sample answer và phân tích chi tiết:
+
+| Loại | Câu trả lời mẫu mở bằng | Phân tích chi tiết |
+|------|-------------------------|-------------------|
+| **Behavioral / Incident** | Mindset trước, action sau: *"Việc đầu tiên không phải mở terminal..."* | Timeline → scenario branches → commands → communicate |
+| **Knowledge / Concept** | Scenario production làm hook: *"Tuần trước pod bị kill dù heap 40%..."* | Production problem → giải thích theory qua debug → code minh hoạ |
+| **System Design** | Systematic thinking: *"Tôi sẽ không đoán mà bắt đầu bằng đo lường..."* | Measure → identify bottleneck → solve đúng tầng → monitor |
+| **So sánh (A vs B)** | Use case thực tế của team: *"Chúng tôi chọn X vì project cần..."* | Team's use case → comparison table → khi nào đối thủ thắng → licensing/ops |
+
+### Format thống nhất
+
+**Bẫy thường gặp** — mỗi bẫy dùng format này, ngăn cách bằng `---`:
+
+```markdown
+❌ **"Câu trả lời sai phổ biến"**
+→ Tại sao sai: [giải thích]
+✅ Đúng hơn: [câu trả lời đúng]
+
+---
+```
+
+**Câu hỏi follow-up** — dùng `###` header + paragraph 3-5 câu:
+
+```markdown
+### 1. Câu hỏi follow-up đầu tiên?
+
+Paragraph trả lời 3-5 câu, đủ chi tiết để người đọc biết hướng trả lời mà không cần đọc thêm tài liệu khác.
+```
+
+### Code accuracy
+
+- **Verify annotation/API tồn tại** trước khi dùng: ví dụ `@RedisListener` không có trong Spring Data Redis — phải dùng `MessageListenerAdapter` + `RedisMessageListenerContainer`.
+- **Format string đúng framework**: SLF4J dùng `{}`, không phải Python `{:.1f}`.
+- **Class/method phải thật**: không bịa tên method. Nếu không chắc, check javadoc hoặc ghi rõ là pseudo-code.
 
 ### Level mapping
 

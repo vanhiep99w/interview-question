@@ -150,6 +150,10 @@ WHERE status NOT IN ('PENDING', 'PAID', 'CANCELLED', 'REFUNDED');
 
 ### Bước 3: Batch Merge từ Staging → Main Table
 
+Sau khi staging table đã sẵn sàng, bước tiếp theo là merge vào main table. Nhưng merge 1 triệu rows trong 1 transaction sẽ giữ lock quá lâu — production queries bị block, và nếu fail thì rollback toàn bộ. Vì vậy phải chia thành batch nhỏ.
+
+**Tại sao batch 5.000–20.000 rows?** Quá nhỏ (100 rows) → overhead commit/transaction quá nhiều, tốc độ chậm. Quá lớn (500K rows) → lock duration dài, ảnh hưởng production. 10K là sweet spot phổ biến — mỗi batch merge trong 1–3 giây, lock vừa đủ ngắn để production queries xen vào giữa các batch. Con số cụ thể tuỳ hardware — bắt đầu 10K rồi adjust dựa trên lock wait time thực tế.
+
 #### SQL Upsert pattern (PostgreSQL)
 
 ```sql
@@ -194,8 +198,9 @@ public class BulkMergeService {
             batchNum++;
 
             if (batchNum % 10 == 0) {
-                log.info("Progress: {}/{} rows processed ({:.1f}%)",
-                    offset, totalRows, 100.0 * offset / totalRows);
+                log.info("Progress: {}/{} rows processed ({}%)",
+                    offset, totalRows,
+                    String.format("%.1f", 100.0 * offset / totalRows));
             }
 
             Thread.sleep(BATCH_DELAY_MS); // throttle
@@ -368,51 +373,67 @@ SELECT * FROM pg_stat_bgwriter;
 
 ## Bẫy thường gặp
 
-**"Dùng `INSERT ON CONFLICT` trực tiếp từ app, 1 row 1 request"** → Row-by-row là pattern chậm nhất: 1 triệu rows × 1 round-trip = hàng giờ, và lock mỗi row một lần riêng → không efficient. Luôn batch.
+❌ **"Dùng `INSERT ON CONFLICT` trực tiếp từ app, 1 row 1 request"**
+→ Tại sao sai: Row-by-row là pattern chậm nhất: 1 triệu rows × 1 round-trip = hàng giờ, lock mỗi row riêng lẻ.
+✅ Đúng hơn: Luôn batch. COPY vào staging trước, merge theo batch 5K–20K rows/transaction.
 
-**"Một transaction cho toàn bộ 1 triệu rows"** → Giữ lock trên hàng triệu rows trong hàng chục phút. Production queries bị block. Nếu fail → rollback toàn bộ, mất công từ đầu. Batch nhỏ + commit thường xuyên là bắt buộc.
+---
 
-**"Chạy nhiều thread merge song song để nhanh hơn"** → Nguy hiểm nếu không có consistent ordering. Hai thread lock cùng rows theo thứ tự khác nhau → deadlock. Nếu muốn song song, phải partition staging table theo key range không overlap, mỗi thread xử lý range riêng biệt.
+❌ **"Một transaction cho toàn bộ 1 triệu rows"**
+→ Tại sao sai: Giữ lock trên hàng triệu rows trong hàng chục phút. Production queries bị block. Fail → rollback toàn bộ, mất công từ đầu.
+✅ Đúng hơn: Batch nhỏ + commit thường xuyên. Mỗi batch là 1 transaction, fail chỉ mất 1 batch.
 
-**"Không cần staging table, đọc file rồi upsert luôn"** → Mất khả năng validate trước, không có checkpoint để resume nếu fail, và đọc file chậm hơn COPY nhiều lần. Staging table là checkpoint thiết yếu.
+---
 
-**"Drop toàn bộ index để tăng tốc"** → Không drop PRIMARY KEY — `ON CONFLICT` cần nó để xác định conflict. Chỉ drop secondary indexes trong maintenance window.
+❌ **"Chạy nhiều thread merge song song để nhanh hơn"**
+→ Tại sao sai: Hai thread lock cùng rows theo thứ tự khác nhau → deadlock.
+✅ Đúng hơn: Nếu muốn song song, partition staging table theo key range không overlap — mỗi thread xử lý range riêng biệt.
+
+---
+
+❌ **"Không cần staging table, đọc file rồi upsert luôn"**
+→ Tại sao sai: Mất khả năng validate trước, không có checkpoint để resume nếu fail, và đọc file chậm hơn COPY nhiều lần.
+✅ Đúng hơn: Staging table là checkpoint thiết yếu — tách giai đoạn load và merge, retry an toàn.
+
+---
+
+❌ **"Drop toàn bộ index để tăng tốc"**
+→ Tại sao sai: `ON CONFLICT` cần PRIMARY KEY để xác định conflict — drop PK thì merge không chạy được.
+✅ Đúng hơn: Chỉ drop **secondary** indexes trong maintenance window. Giữ PK luôn.
 
 ---
 
 ## Câu hỏi follow-up
 
-**1. Nếu file CSV có thể có duplicate order_id (cùng một order xuất hiện nhiều lần trong file)?**
+### 1. Nếu file CSV có thể có duplicate order_id (cùng một order xuất hiện nhiều lần trong file)?
 
-> Deduplicate trong staging trước khi merge:
-> ```sql
-> DELETE FROM orders_staging a USING orders_staging b
-> WHERE a.ctid < b.ctid AND a.order_id = b.order_id;
-> -- Hoặc dùng DISTINCT ON:
-> CREATE TABLE orders_staging_dedup AS
-> SELECT DISTINCT ON (order_id) *
-> FROM orders_staging ORDER BY order_id, updated_at DESC;
-> ```
+Deduplicate trong staging trước khi merge — bắt buộc, không bỏ qua. Có 2 cách: dùng `DELETE ... USING` để xoá duplicate giữ lại row mới nhất, hoặc tạo bảng dedup riêng bằng `DISTINCT ON`. Cách thứ 2 an toàn hơn vì không sửa staging table gốc — có thể audit lại nếu cần.
 
-**2. Làm sao tính được số row thực sự INSERT vs UPDATE?**
+```sql
+CREATE TABLE orders_staging_dedup AS
+SELECT DISTINCT ON (order_id) *
+FROM orders_staging ORDER BY order_id, updated_at DESC;
+```
 
-> `ON CONFLICT DO UPDATE` không phân biệt trong affected rows count. Dùng `xmax` để detect:
-> ```sql
-> INSERT INTO orders (...)
-> SELECT ... FROM orders_staging
-> ON CONFLICT (order_id) DO UPDATE SET ...
-> RETURNING order_id,
->     (xmax = 0) AS is_insert,  -- xmax=0 → mới insert; xmax>0 → update
->     (xmax != 0) AS is_update;
-> ```
+### 2. Làm sao tính được số row thực sự INSERT vs UPDATE?
 
-**3. Nếu bảng đích đang có write traffic cao trong lúc merge thì sao?**
+`ON CONFLICT DO UPDATE` không phân biệt insert/update trong affected rows count. Trick: dùng `xmax` system column trong `RETURNING` — `xmax = 0` nghĩa là row mới insert, `xmax > 0` nghĩa là row đã update. Đây là PostgreSQL internal — hoạt động tốt nhưng không portable sang database khác.
 
-> Tăng delay giữa batch (throttle), giảm batch size xuống 1.000–2.000 rows. Monitor `pg_stat_activity` để xem lock wait time. Nếu merge không khẩn cấp, schedule vào giờ thấp điểm. Với AWS RDS Aurora, có thể route read-check query sang Read Replica để giảm tải primary.
+```sql
+INSERT INTO orders (...) SELECT ... FROM orders_staging
+ON CONFLICT (order_id) DO UPDATE SET ...
+RETURNING order_id,
+    (xmax = 0) AS is_insert,
+    (xmax != 0) AS is_update;
+```
 
-**4. Nếu cần làm điều này thường xuyên (daily batch)?**
+### 3. Nếu bảng đích đang có write traffic cao trong lúc merge thì sao?
 
-> Cân nhắc chuyển sang CDC (Change Data Capture) với Kafka + Debezium: thay vì batch file hàng ngày, stream changes real-time → upsert liên tục với batch nhỏ. Giảm peak load, tăng data freshness.
+Tăng delay giữa batch (throttle 200ms+), giảm batch size xuống 1.000–2.000 rows. Monitor `pg_stat_activity` liên tục để xem lock wait time — nếu > 1 giây, giảm batch size tiếp. Nếu merge không khẩn cấp, schedule vào giờ thấp điểm. Với AWS RDS Aurora, route read-check query sang Read Replica để giảm tải primary.
+
+### 4. Nếu cần làm điều này thường xuyên (daily batch)?
+
+Cân nhắc chuyển sang CDC (Change Data Capture) với Kafka + Debezium: thay vì batch file hàng ngày, stream changes real-time → upsert liên tục với batch nhỏ. Giảm peak load, tăng data freshness, và không cần maintenance window. Trade-off: thêm complexity ops (Debezium connector, Kafka cluster), chỉ worth nếu batch frequency > 1 lần/ngày.
 
 ---
 

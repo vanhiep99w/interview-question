@@ -62,34 +62,52 @@ description: "Mô tả ngắn 1 dòng"
 ---
 
 ## Câu trả lời mẫu
-Đoạn văn 5-8 câu, giọng tự nhiên như đang nói trong phỏng vấn.
-KHÔNG dùng bullet point ở section này — phải nghe như người thật kể chuyện thật.
+Luôn dùng blockquote `>`. 5-8 câu, giọng Senior engineer kể kinh nghiệm thật.
+**CẤM** mở bằng định nghĩa ("X là Y") hoặc liệt kê tính năng.
+**ĐÚNG**: mở bằng insight/mindset/approach, có ≥1 tín hiệu kinh nghiệm production.
+Litmus test: đọc to lên — nghe như docs thì rewrite.
 
 ---
 
 ## Phân tích chi tiết
-Diagram Mermaid minh hoạ luồng + các section giải thích chi tiết:
-commands thực tế, code Java 17, bảng so sánh, Prometheus metrics...
+Sắp xếp theo **mức quan trọng interview**, không theo thứ tự sách giáo khoa.
+Câu hỏi knowledge: **mở bằng production scenario** → lý thuyết qua lens debug.
+Mọi magic number (batch size, pool size, TTL) phải giải thích TẠI SAO.
+Narrative giữa các section — không nhảy code block → code block.
 
 ---
 
 ## Bẫy thường gặp
-Những câu trả lời nghe có vẻ đúng nhưng khiến interviewer trừ điểm.
-Format mỗi bẫy:
-❌ [Câu trả lời sai phổ biến]
+Format mỗi bẫy, ngăn cách bằng `---`:
+❌ **"Câu trả lời sai phổ biến"**
 → Tại sao sai: ...
 ✅ Đúng hơn: ...
 
 ---
 
 ## Câu hỏi follow-up
-1-4 câu interviewer hay hỏi tiếp. Mỗi câu kèm gợi ý trả lời ngắn (2-5 dòng).
+Dùng `### N. Tiêu đề` + paragraph 3-5 câu. Không dùng `**bold**` cho tiêu đề.
 
 ---
 
 ## Xem thêm
-- Link câu hỏi liên quan trong project
+- Link câu hỏi liên quan **đã tồn tại**. Không để placeholder.
 ```
+
+## Loại câu hỏi và approach
+
+| Loại | Sample answer mở bằng | Phân tích chi tiết |
+|------|----------------------|-------------------|
+| Behavioral/Incident | Mindset trước, action sau | Timeline → scenarios → commands → communicate |
+| Knowledge/Concept | Production scenario làm hook | Problem → theory qua debug → code |
+| System Design | Systematic: "đo trước khi làm" | Measure → identify → solve đúng tầng → monitor |
+| So sánh (A vs B) | Use case thực tế của team | Team's case → comparison → khi nào đối thủ thắng |
+
+## Code Accuracy
+
+- Verify annotation/API tồn tại trước khi dùng (ví dụ: `@RedisListener` không có trong Spring)
+- Format string đúng framework: SLF4J dùng `{}`, không phải Python `{:.1f}`
+- Class/method phải thật — nếu không chắc, ghi rõ là pseudo-code
 
 ## Research trước khi viết
 

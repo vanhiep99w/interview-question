@@ -338,33 +338,47 @@ aws cloudwatch get-metric-statistics \
 
 ## Bẫy thường gặp
 
-**"Bật CDN là xong"** → CDN chỉ giúp nếu content thực sự được cache. Nếu response có `Cache-Control: no-cache` hoặc `Set-Cookie`, CloudFront vẫn origin pull từ Singapore cho mỗi request. Phải verify cache hit ratio theo region, không assume.
+❌ **"Bật CDN là xong"**
+→ Tại sao sai: CDN chỉ giúp nếu content thực sự được cache. `Cache-Control: no-cache` hoặc `Set-Cookie` → CloudFront vẫn origin pull từ Singapore cho mỗi request.
+✅ Đúng hơn: Verify cache hit ratio theo region sau khi bật CDN. `X-Cache: Miss` = chưa xong.
 
-**"Tăng server spec để fix latency"** → Latency địa lý là do tốc độ ánh sáng, không phải server power. Server mạnh hơn giúp giảm processing time (thường chỉ vài ms) nhưng không giải quyết 150ms RTT xuyên đại dương. Fix đúng là đưa server gần user hơn.
+---
 
-**"Chỉ test bằng Postman từ máy local"** → Postman từ Singapore sẽ thấy nhanh. Phải test từ đúng location có vấn đề — dùng WebPageTest chọn location US, hoặc EC2 us-east-1, hoặc VPN.
+❌ **"Tăng server spec để fix latency"**
+→ Tại sao sai: Latency địa lý là do tốc độ ánh sáng, không phải server power. Server mạnh hơn giảm processing time (vài ms) nhưng không giải quyết 150ms RTT xuyên đại dương.
+✅ Đúng hơn: Đưa server gần user — multi-region origin hoặc edge compute.
 
-**"Vấn đề là database chậm"** → Có thể đúng, nhưng database query chạy trong cùng datacenter Singapore không bị ảnh hưởng bởi RTT US. Nếu TTFB từ US cao, trace xem latency nằm ở network trước server hay trong server processing.
+---
+
+❌ **"Chỉ test bằng Postman từ máy local"**
+→ Tại sao sai: Postman từ Singapore sẽ thấy nhanh vì server cùng region. Không reproduce được vấn đề user Mỹ gặp.
+✅ Đúng hơn: Test từ đúng location có vấn đề — WebPageTest chọn location US, EC2 us-east-1, hoặc VPN.
+
+---
+
+❌ **"Vấn đề là database chậm"**
+→ Tại sao sai: Database query chạy trong cùng datacenter Singapore — không bị ảnh hưởng bởi RTT US. DB chậm sẽ ảnh hưởng cả SG lẫn US.
+✅ Đúng hơn: Nếu TTFB từ US cao nhưng SG bình thường, trace network latency trước — CDN miss hoặc serial calls là suspect chính.
 
 ---
 
 ## Câu hỏi follow-up
 
-**1. Nếu content là dynamic và authenticated (không cache được), làm sao giảm latency?**
+### 1. Nếu content là dynamic và authenticated (không cache được), làm sao giảm latency?
 
-> Ba hướng: (1) Multi-region origin + Route 53 Latency Routing — user Mỹ hit server Mỹ; (2) Edge compute — dùng Lambda@Edge hoặc Cloudflare Workers để xử lý một phần logic tại edge gần user; (3) HTTP/2 Push hoặc pre-fetch dữ liệu dự đoán trước khi user cần.
+Ba hướng: (1) Multi-region origin + Route 53 Latency Routing — user Mỹ hit server Mỹ, latency giảm từ 6s về ~60ms; (2) Edge compute — Lambda@Edge hoặc Cloudflare Workers xử lý một phần logic tại edge gần user (auth check, personalization nhẹ); (3) Pre-fetch — dùng `<link rel="prefetch">` hoặc service worker dự đoán request tiếp theo và fetch trước khi user cần.
 
-**2. Nếu thêm region US-East thì data consistency xử lý như thế nào?**
+### 2. Nếu thêm region US-East thì data consistency xử lý như thế nào?
 
-> Tùy loại data: read-heavy data (profile, catalog) → RDS Read Replica tại US-East, chấp nhận replication lag vài giây; write operations → vẫn route về Singapore primary; data cần strong consistency (payment, inventory) → không cache, luôn về primary. Đây là trade-off CAP theorem trong thực tế.
+Tùy loại data: read-heavy data (profile, catalog) → RDS Read Replica tại US-East, chấp nhận replication lag vài giây; write operations → vẫn route về Singapore primary. Data cần strong consistency (payment, inventory) → không cache, luôn về primary, chấp nhận latency cao hơn cho consistency. Đây là trade-off CAP theorem trong thực tế — không có giải pháp nào giải quyết tất cả.
 
-**3. Làm sao phát hiện sớm vấn đề này trước khi user báo cáo?**
+### 3. Làm sao phát hiện sớm vấn đề này trước khi user báo cáo?
 
-> Synthetic monitoring: dùng CloudWatch Synthetics hoặc Datadog Synthetic Tests chạy canary từ nhiều location (US-East, EU-West, AP-Southeast) mỗi 1 phút. Alert khi p95 latency từ bất kỳ region nào vượt ngưỡng. Đừng chỉ monitor từ Singapore nơi server đặt.
+Synthetic monitoring: CloudWatch Synthetics hoặc Datadog Synthetic Tests chạy canary từ nhiều location (US-East, EU-West, AP-Southeast) mỗi 1 phút. Alert khi p95 latency từ bất kỳ region nào vượt ngưỡng. Quan trọng: đừng chỉ monitor từ Singapore nơi server đặt — bạn sẽ không bao giờ thấy vấn đề mà user ở US đang gặp.
 
-**4. HTTP/3 có giải quyết được không?**
+### 4. HTTP/3 có giải quyết được không?
 
-> Phần nào. HTTP/3 dùng QUIC (UDP) thay TCP, giảm handshake còn 0-RTT cho connection cũ và 1-RTT cho connection mới — tốt hơn TLS 1.2/TCP. Nhưng vẫn không vượt qua được 150ms RTT vật lý. HTTP/3 giúp nhiều nhất trong môi trường packet loss cao (mobile, WiFi kém) — trong trường hợp Singapore→US thì multi-region vẫn là fix chính.
+Phần nào. HTTP/3 dùng QUIC (UDP) thay TCP, giảm handshake còn 0-RTT cho connection cũ và 1-RTT cho connection mới — tốt hơn TLS 1.2/TCP. Nhưng vẫn không vượt qua được 150ms RTT vật lý — tốc độ ánh sáng là hard limit. HTTP/3 giúp nhiều nhất trong môi trường packet loss cao (mobile, WiFi kém). Trong case Singapore→US, multi-region origin vẫn là fix chính.
 
 ---
 

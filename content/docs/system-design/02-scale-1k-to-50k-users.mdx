@@ -55,7 +55,7 @@ Interviewer expect bạn **thiết kế scaling roadmap cho team**: không chỉ
 
 ## Câu trả lời mẫu
 
-"Trước hết tôi sẽ không thêm infra theo phản xạ mà bắt đầu bằng đo lường — xem bottleneck hiện tại ở đâu: CPU, memory, database connection pool, hay slow queries. Ở mức 1K users, nhiều khả năng hệ thống chưa dùng hết capacity, nên bước đầu tiên có thể chỉ đơn giản là vertical scaling — nâng spec server lên, thêm RAM, SSD nhanh hơn. Khi traffic thật sự quá tải cho 1 server, tôi chuyển sang horizontal scaling cho app tier: triển khai stateless server phía sau load balancer, chuyển session sang Redis. Tiếp theo nhìn database — ở 50K users thường read nhiều hơn write, nên tôi thêm read replica và route read traffic sang đó. Song song, tôi bật caching layer với Redis cho hot data — user profile, product listing, config — nhắm cache hit rate trên 90% để giảm 10x load cho database. Cuối cùng, những task nặng như gửi email, generate report, process image tôi đẩy sang message queue với Kafka hoặc Sidekiq, không để user chờ. Toàn bộ quá trình này tôi sẽ không đụng đến sharding hay microservices — ở 50K users đó là premature optimization. Instagram từng scale đến 30 triệu users mà vẫn trên PostgreSQL monolith với 3 engineers."
+> "Trước hết tôi sẽ không thêm infra theo phản xạ mà bắt đầu bằng đo lường — xem bottleneck hiện tại ở đâu: CPU, memory, database connection pool, hay slow queries. Ở mức 1K users, nhiều khả năng hệ thống chưa dùng hết capacity, nên bước đầu tiên có thể chỉ đơn giản là vertical scaling — nâng spec server lên, thêm RAM, SSD nhanh hơn. Khi traffic thật sự quá tải cho 1 server, tôi chuyển sang horizontal scaling cho app tier: triển khai stateless server phía sau load balancer, chuyển session sang Redis. Tiếp theo nhìn database — ở 50K users thường read nhiều hơn write, nên tôi thêm read replica và route read traffic sang đó. Song song, tôi bật caching layer với Redis cho hot data — user profile, product listing, config — nhắm cache hit rate trên 90% để giảm 10x load cho database. Cuối cùng, những task nặng như gửi email, generate report, process image tôi đẩy sang message queue với Kafka hoặc Sidekiq, không để user chờ. Toàn bộ quá trình này tôi sẽ không đụng đến sharding hay microservices — ở 50K users đó là premature optimization. Instagram từng scale đến 30 triệu users mà vẫn trên PostgreSQL monolith với 3 engineers."
 
 ---
 
@@ -484,21 +484,21 @@ groups:
 
 ## Câu hỏi follow-up
 
-**1. Ở 50K users, connection pool của database nên config bao nhiêu?**
+### 1. Ở 50K users, connection pool của database nên config bao nhiêu?
 
-> Rule of thumb: `connections = (core_count * 2) + effective_spindle_count`. Với db.r6g.xlarge (4 vCPU): ~10 connections optimal per pool. Nếu có 5 app pods → tổng 50 connections. PostgreSQL default max_connections = 100 → vẫn thoải mái. Nếu cần nhiều hơn, dùng PgBouncer connection pooling thay vì tăng max_connections (mỗi connection tốn ~10MB RAM).
+Rule of thumb: `connections = (core_count * 2) + effective_spindle_count`. Với db.r6g.xlarge (4 vCPU): ~10 connections optimal per pool. 5 app pods → tổng 50 connections — PostgreSQL default max_connections = 100 nên vẫn thoải mái. Quan trọng: nếu cần tăng thêm, dùng PgBouncer connection pooling thay vì tăng `max_connections` — mỗi PostgreSQL connection tốn ~10 MB RAM, 500 connections = 5 GB chỉ cho connection overhead.
 
-**2. Cache invalidation xử lý như thế nào khi user update data?**
+### 2. Cache invalidation xử lý như thế nào khi user update data?
 
-> Ba chiến lược: (1) **TTL-based** — set TTL 60s, chấp nhận stale data tối đa 60s, đơn giản nhất; (2) **Write-through** — khi write vào DB thì đồng thời update cache, consistent nhưng phức tạp hơn; (3) **Cache-aside + evict on write** — khi write thì xoá cache entry, request tiếp theo sẽ cache miss và rebuild. Phổ biến nhất là (3) — dùng `@CacheEvict` trong Spring Boot.
+Ba chiến lược phổ biến: (1) **TTL-based** — set TTL 60s, chấp nhận stale data tối đa 60s, đơn giản nhất và đủ cho hầu hết use case; (2) **Write-through** — write vào DB đồng thời update cache, consistent nhưng phức tạp hơn; (3) **Cache-aside + evict on write** — write thì xoá cache entry, request tiếp theo cache miss và rebuild. Phổ biến nhất là (3) — dùng `@CacheEvict` trong Spring Boot. Chọn chiến lược nào phụ thuộc vào mức độ stale data chấp nhận được — product listing stale 60s OK, account balance thì không.
 
-**3. Nếu tiếp tục scale lên 500K users thì bước tiếp theo là gì?**
+### 3. Nếu tiếp tục scale lên 500K users thì bước tiếp theo là gì?
 
-> CDN cho static assets (JS, CSS, images) → giảm bandwidth và latency. Database: thêm read replica thứ 2, partitioning bảng lớn (orders by month). Caching: nâng Redis lên cluster mode. Nếu team > 20 engineers → bắt đầu tách 1-2 bounded context thành service riêng (payment, notification) — nhưng vẫn không phải "full microservices".
+CDN cho static assets (JS, CSS, images) → giảm bandwidth và latency đáng kể. Database: thêm read replica thứ 2, partitioning bảng lớn (orders by month). Caching: nâng Redis lên cluster mode để sharding data qua nhiều node. Nếu team > 20 engineers → bắt đầu tách 1-2 bounded context thành service riêng (payment, notification) — nhưng vẫn không phải "full microservices". Mỗi bước phải có data justify: đo bottleneck trước khi thêm infra.
 
-**4. Làm sao biết monolith đã đến giới hạn và cần tách service?**
+### 4. Làm sao biết monolith đã đến giới hạn và cần tách service?
 
-> Hai tín hiệu chính: (1) **Organizational** — team > 30 engineers, merge conflict liên tục, deploy phải coordinate quá nhiều team; (2) **Technical** — có component cần scale khác biệt hoàn toàn (ví dụ image processing cần GPU mà API thì không). Nếu chưa có 2 tín hiệu này → monolith vẫn là lựa chọn đúng.
+Hai tín hiệu chính: (1) **Organizational** — team > 30 engineers, merge conflict liên tục, deploy phải coordinate quá nhiều team, release cycle chậm vì phụ thuộc chéo; (2) **Technical** — có component cần scale khác biệt hoàn toàn (image processing cần GPU mà API thì không, hoặc 1 module chiếm 80% CPU). Nếu chưa có cả 2 tín hiệu → monolith vẫn là lựa chọn đúng. Đừng tách service vì "best practice" — tách vì pain thật.
 
 ---
 

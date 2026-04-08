@@ -142,9 +142,27 @@ Với Memcached: phải serialize toàn bộ Java object → lưu string → đ�
 redisTemplate.convertAndSend("cache:invalidate:product", productId.toString());
 
 // Subscriber: mỗi service instance tự clear local cache
-@RedisListener(channel = "cache:invalidate:product")
-public void onInvalidate(String productId) {
-    localCaffeineCache.invalidate(productId);
+@Component
+public class CacheInvalidationSubscriber implements MessageListener {
+    private final Cache<String, Product> localCaffeineCache;
+
+    @Override
+    public void onMessage(Message message, byte[] pattern) {
+        String productId = new String(message.getBody());
+        localCaffeineCache.invalidate(productId);
+    }
+}
+
+// Config: đăng ký subscriber với Redis channel
+@Bean
+RedisMessageListenerContainer listenerContainer(
+        RedisConnectionFactory factory,
+        CacheInvalidationSubscriber subscriber) {
+    var container = new RedisMessageListenerContainer();
+    container.setConnectionFactory(factory);
+    container.addMessageListener(subscriber,
+        new ChannelTopic("cache:invalidate:product"));
+    return container;
 }
 ```
 
