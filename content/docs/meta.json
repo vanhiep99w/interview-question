@@ -1,10 +1,5 @@
 {
   "pages": [
-    "javascript",
-    "react",
-    "nodejs",
-    "database",
-    "system-design",
     "behavioral"
   ]
 }

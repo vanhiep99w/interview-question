@@ -20,42 +20,48 @@ Next.js 15 (static export) + Fumadocs + Cloudflare Pages.
 - `src/app/[[...slug]]/layout.tsx` — DocsLayout wrapper (sidebar + nav)
 - `src/app/[[...slug]]/page.tsx` — single catch-all route; renders all doc pages
 - `src/components/mermaid.tsx` — client component for mermaid diagrams (lazy-loaded)
+- `public/_redirects` — Cloudflare Pages redirect: `/` → first content page
 
 ## Content Structure
 
 ```
 content/docs/
-├── meta.json                 # Root sidebar order (list categories by folder name)
-├── index.md                  # Landing page
+├── meta.json                 # Root sidebar order (list active categories only)
 ├── {category}/
-│   ├── meta.json             # { "title": "...", "pages": ["01-foo", "02-bar"] }
-│   └── 01-question-name.md   # Each question = 1 file
+│   ├── meta.json             # { "title": "...", "pages": ["01-easy", "02-medium", "03-hard"] }
+│   └── NN-question-slug.md   # Each question = 1 file, 1 category
 ```
 
-**Current categories:** `javascript`, `react`, `nodejs`, `database`, `system-design`, `behavioral`
+**Active categories:** thêm category vào `meta.json` khi đã có ít nhất 1 câu hỏi. Xoá khỏi `meta.json` nếu category rỗng.
+
+## Category & Ordering Rules
+
+- Mỗi câu hỏi thuộc **đúng 1 category** — không đặt cùng câu hỏi ở nhiều nơi.
+- Thứ tự file trong `pages` array = **dễ → khó**: câu hỏi khái niệm cơ bản trước, tình huống phức tạp sau.
+- Prefix `NN-` phản ánh độ khó tương đối trong category, không phải thứ tự thêm vào.
+- Khi thêm câu hỏi mới, chèn vào đúng vị trí độ khó — không append cuối mù quáng.
 
 ## Adding a New Question
 
-1. Create `content/docs/{category}/NN-question-slug.md` with frontmatter:
-   ```yaml
-   ---
-   title: "Câu hỏi..."
-   description: "Mô tả ngắn"
-   ---
-   ```
-2. Add `"NN-question-slug"` to `pages` array in `content/docs/{category}/meta.json` — order = sidebar order.
+1. Xác định category phù hợp (chỉ 1).
+2. Tạo `content/docs/{category}/NN-question-slug.md` với đầy đủ 8 sections (xem template bên dưới).
+3. Thêm vào `pages` array trong `{category}/meta.json` đúng vị trí độ khó.
+4. Nếu category mới: tạo folder + `meta.json`, thêm vào root `meta.json`.
+5. Cập nhật `public/_redirects` nếu đây là câu hỏi đầu tiên của toàn site.
+6. `npm run build` để verify trước khi commit.
 
 ## Adding a New Category
 
-1. Create folder `content/docs/{new-category}/`
-2. Create `content/docs/{new-category}/meta.json` with `title` and `pages`
-3. Add `"{new-category}"` to `pages` array in `content/docs/meta.json`
+1. Tạo folder `content/docs/{new-category}/`
+2. Tạo `content/docs/{new-category}/meta.json` với `title` và `pages`
+3. Thêm `"{new-category}"` vào `pages` array trong root `content/docs/meta.json`
+4. **Chỉ thêm khi đã có ít nhất 1 câu hỏi** — không tạo category rỗng.
 
 ## meta.json Rules
 
 - **Never overwrite** an existing `meta.json` — always read first, then patch.
 - `"pages"` array controls sidebar order; files not listed won't appear.
-- Use sequential prefix `01-`, `02-`, ... in filenames for predictable ordering.
+- Use sequential prefix `01-`, `02-`, ... reflecting difficulty order (easy → hard).
 
 ## Default Tech Stack cho câu hỏi
 
@@ -77,61 +83,69 @@ Khi viết ví dụ, code snippet, hoặc scenario cụ thể — **luôn dùng 
 | Team communication | Microsoft Teams |
 | Container registry | Amazon ECR |
 
-**Nguyên tắc khi viết ví dụ:**
-- Code snippet dùng Java 17 syntax (records, sealed classes, text blocks nếu phù hợp)
-- Command dùng `kubectl`, `aws cli`, `kafka-topics.sh`, `redis-cli`
-- Monitoring dùng Prometheus metrics + Grafana dashboard + CloudWatch
-- Alert dùng Prometheus Alertmanager hoặc CloudWatch Alarms → Teams webhook
-- Pipeline: GitHub (source) → GitHub Actions (lint/test) → Jenkins (build/deploy) → ECR → EKS
-- Tracing: OpenTelemetry → Jaeger hoặc AWS X-Ray
+**Nguyên tắc:** code snippet dùng Java 17, commands dùng `kubectl`/`aws`/`kafka-topics.sh`/`redis-cli`, alert → Teams webhook.
 
 ## Question Content Guidelines
 
-### Câu hỏi tình huống thực tế (incident, system design, behavioral)
+### Research trước khi viết (câu hỏi tình huống thực tế)
 
-**Bắt buộc tìm kiếm thực tế trước khi viết.** Dùng `WebSearch` để tìm:
-- Bài blog engineering từ các công ty lớn (Netflix, Uber, Cloudflare, GitHub...)
-- Post-mortem thực tế (postmortem.wtf, srebook.io, các engineering blog)
-- Kinh nghiệm chia sẻ trên Medium, DEV.to, Hacker News
+**Bắt buộc dùng `WebSearch`** để tìm engineering blog, post-mortem thực tế (Netflix, Uber, Cloudflare, Google SRE...) trước khi viết câu hỏi dạng incident/system design/behavioral. Mục tiêu: câu trả lời phản ánh thực tế production, không phải lý thuyết.
 
-Mục tiêu: câu trả lời phản ánh **thực tế ngoài sản xuất**, không phải lý thuyết sách giáo khoa.
-
-### Cấu trúc bắt buộc của mỗi câu hỏi
+### Template bắt buộc — 8 sections theo thứ tự
 
 ```markdown
-## Câu hỏi        ← câu hỏi gốc
+## Câu hỏi
+> Câu hỏi gốc
 
 ---
 
-## Cốt lõi cần nhớ   ← 2-3 dòng tóm tắt insight quan trọng nhất
+## Dành cho level
+[Mid / Senior / Staff — expectations khác nhau ở mỗi level]
 
 ---
 
-## [Nội dung trả lời chi tiết]
+## Cốt lõi cần nhớ
+2-3 dòng insight quan trọng nhất interviewer muốn nghe.
 
 ---
 
-## Câu hỏi follow-up   ← 1-4 câu interviewer hay hỏi tiếp
-```
+## Câu trả lời mẫu
+Đoạn văn 5-8 câu, giọng tự nhiên như đang kể trong phỏng vấn.
+Không phải bullet point — phải nghe như người thật nói chuyện thật.
 
-### Câu hỏi follow-up
+---
 
-Mỗi file **bắt buộc có section `## Câu hỏi follow-up`** ở cuối, gồm 1–4 câu mà interviewer thường hỏi tiếp. Mỗi câu follow-up phải có câu trả lời gợi ý ngắn (2-5 dòng), không để trống.
+## Phân tích chi tiết
+[Diagram Mermaid + các section giải thích, commands, code, bảng so sánh]
 
-Ví dụ:
-```markdown
+---
+
+## Bẫy thường gặp
+Những câu trả lời nghe có vẻ đúng nhưng khiến interviewer trừ điểm.
+Mỗi bẫy: [Câu trả lời sai] → [Tại sao sai] → [Câu đúng].
+
+---
+
 ## Câu hỏi follow-up
+1-4 câu interviewer hay hỏi tiếp, mỗi câu kèm gợi ý trả lời ngắn.
 
-### 1. Làm sao bạn biết đây là lúc cần escalate?
-...câu trả lời gợi ý...
+---
 
-### 2. Nếu rollback không được thì sao?
-...câu trả lời gợi ý...
+## Xem thêm
+Link đến các câu hỏi liên quan trong project.
 ```
 
-## Mermaid Diagrams
+### Level mapping
 
-Use fenced code blocks with `mermaid` language tag — the `remarkMermaid` plugin in `source.config.ts` transforms them to `<MermaidDiagram>` at build time.
+| Level | Interviewer expect |
+|-------|--------------------|
+| Mid | Biết quy trình cơ bản, thực hiện được khi có hướng dẫn |
+| Senior | Dẫn dắt được incident, quyết định trade-off, communicate tốt |
+| Staff | Thiết kế process/runbook cho cả team, ngăn ngừa class of problems |
+
+### Diagram
+
+Dùng Mermaid cho flow/timeline, ASCII art cho architecture tĩnh. Mỗi câu hỏi tình huống nên có ít nhất 1 diagram minh hoạ luồng xử lý.
 
 ## Fumadocs Components (no import needed)
 
@@ -139,4 +153,4 @@ Use fenced code blocks with `mermaid` language tag — the `remarkMermaid` plugi
 
 ## Language
 
-Nội dung câu hỏi và câu trả lời viết bằng **tiếng Việt**. Giữ tiếng Anh cho tên kỹ thuật, code, config.
+Nội dung viết bằng **tiếng Việt**. Giữ tiếng Anh cho tên kỹ thuật, code, config.

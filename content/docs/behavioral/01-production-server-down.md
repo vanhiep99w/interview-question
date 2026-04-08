@@ -11,17 +11,85 @@ description: "Incident response thực tế: triage, mitigate, communicate trên
 
 ---
 
+## Dành cho level
+
+<Tabs items={["Mid", "Senior", "Staff"]}>
+<Tab value="Mid">
+Interviewer expect bạn biết **quy trình cơ bản**: xác nhận sự cố, alert team, rollback nếu có deploy gần đây, theo dõi logs. Không cần dẫn dắt — cần thực hiện được khi được giao việc.
+
+Điểm cộng: biết dùng `kubectl`, đọc được Prometheus metrics, không panic.
+</Tab>
+<Tab value="Senior">
+Interviewer expect bạn **tự dẫn dắt toàn bộ incident**: assign IC, triage parallel, quyết định mitigate hay rollback, communicate liên tục với stakeholders. Biết phân biệt các loại lỗi (OOMKilled vs HikariCP vs Kafka lag).
+
+Điểm cộng: nhắc đến controlled ramp-up sau restore, blameless post-mortem, SLA impact.
+</Tab>
+<Tab value="Staff">
+Interviewer expect bạn nghĩ ở tầng **process và prevention**: runbook đã có chưa, on-call rotation được thiết kế thế nào, chaos engineering phát hiện được class of problems này không, tại sao alert không kích hoạt sớm hơn.
+
+Điểm cộng: đề xuất cải tiến hệ thống alert, thiết kế game day drill, giảm MTTR cho toàn team.
+</Tab>
+</Tabs>
+
+---
+
 ## Cốt lõi cần nhớ
 
 **Mitigate trước, root cause sau.** Đừng cố hiểu hết rồi mới hành động — bleeding phải dừng trước.
 
-**Một người chỉ huy, không ai "freelance".** Khi nhiều engineer tự ý thay đổi production song song mà không báo nhau, outage thường kéo dài gấp đôi. (Google SRE gọi đây là "freelancing".)
+**Một người chỉ huy, không ai "freelance".** Khi nhiều engineer tự ý thay đổi production song song, outage kéo dài gấp đôi. (Google SRE gọi đây là "freelancing".)
 
 **Im lặng là sai lầm lớn nhất.** Alert team ngay từ phút đầu, dù chưa biết gì.
 
 ---
 
-## Tech Stack trong ví dụ này
+## Câu trả lời mẫu
+
+Khi interviewer hỏi câu này, đừng vội liệt kê các bước — hãy mở đầu bằng mindset, rồi mới đi vào action. Nghe tự nhiên hơn và cho thấy bạn đã từng xử lý thật sự:
+
+> "Việc đầu tiên tôi làm không phải là mở terminal — mà là xác nhận sự cố có thật không, vì false alarm lúc 2h sáng thì tốn công hơn là nó đáng. Tôi check error rate trên Grafana và pod status trên kubectl trong vòng 1-2 phút. Nếu confirm down, tôi lập tức tạo incident channel trên Teams, tag on-call và assign một người làm Incident Commander — người này chỉ coordinate, không tự tay sửa gì. Tôi sẽ nhìn vào `kubectl describe` để biết pod chết vì lý do gì: OOMKilled, CrashLoopBackOff hay connection timeout — mỗi cái có cách xử lý khác nhau. Nếu vừa có deployment trong vài giờ qua, rollback là hành động đầu tiên tôi làm mà không cần suy nghĩ nhiều. Trong khi chờ rollback, tôi update team mỗi 10-15 phút dù chưa có kết quả — im lặng trong incident còn tệ hơn là nói 'tôi chưa biết'. Sau khi service ổn định, mới ngồi tìm root cause và viết post-mortem — tuyệt đối không làm việc đó lúc 3h sáng."
+
+---
+
+## Phân tích chi tiết
+
+### Luồng xử lý tổng quan
+
+```mermaid
+sequenceDiagram
+    participant Alert as PagerDuty/Teams
+    participant IC as Incident Commander
+    participant Ops as Ops Engineer
+    participant Lead as Tech Lead
+    participant SP as Status Page
+
+    Alert->>IC: 2:00 AM — Production down alert
+    IC->>Ops: Assign: investigate + mitigate
+    IC->>Lead: Notify (không cần wake up nếu < 15 phút)
+    IC->>SP: Update: "Investigating"
+
+    Ops->>Ops: kubectl describe → xác định loại lỗi
+    Ops->>IC: Report: OOMKilled / HikariCP / Kafka lag / Redis eviction
+
+    alt Có deployment gần đây
+        Ops->>Ops: kubectl rollout undo
+    else Không có deploy
+        Ops->>Ops: Scale out / kill slow queries / restart
+    end
+
+    Ops->>IC: Mitigation applied
+    IC->>SP: Update: "Mitigating"
+    IC->>Lead: Update mỗi 10-15 phút
+
+    Ops->>Ops: Monitor 10 phút sau mitigation
+    Ops->>IC: Service stable
+    IC->>SP: Update: "Resolved"
+    IC->>Lead: Notify resolved + schedule post-mortem
+```
+
+---
+
+### Tech stack trong ví dụ
 
 ```
 Backend   : Spring Boot 3.x (Java 17) trên AWS EKS
@@ -32,127 +100,100 @@ Messaging : Apache Kafka (MSK)
 Monitoring: Prometheus + Grafana + CloudWatch
 Tracing   : OpenTelemetry → AWS X-Ray
 Alerting  : Prometheus Alertmanager → Microsoft Teams webhook
-CI/CD     : GitHub Actions → Jenkins → Amazon ECR → EKS (ArgoCD)
-Tracking  : Jira
+CI/CD     : GitHub Actions → Jenkins → Amazon ECR → EKS
+Tracking  : Jira (INC ticket tạo ngay khi confirm incident)
 ```
 
 ---
-
-## Quy trình xử lý tổng quát
 
 ### Giai đoạn 1 — Xác nhận sự cố (0–2 phút)
 
-PagerDuty / Teams alert đến → kiểm tra ngay:
-
 ```bash
-# 1. Xem pod nào đang crash
+# Pod status
 kubectl get pods -n production --sort-by='.status.startTime'
 
-# 2. Error rate trên Grafana
-# Prometheus query:
+# Error rate (Prometheus)
 sum(rate(http_server_requests_seconds_count{status=~"5.."}[1m])) /
 sum(rate(http_server_requests_seconds_count[1m]))
 
-# 3. ALB Target health
-aws elbv2 describe-target-health \
-  --target-group-arn arn:aws:elasticloadbalancing:...
+# ALB target health
+aws elbv2 describe-target-health --target-group-arn $TG_ARN
 ```
 
-Đồng thời kiểm tra:
-- **AWS Health Dashboard** — có incident ở region không?
-- **MSK/ElastiCache status** — dependency ngoài còn sống không?
-- **Có deployment nào vừa xong không?** → Jenkins/GitHub Actions history
+Đồng thời: check **AWS Health Dashboard** (infra hay code?), check Jenkins/GitHub Actions history (có deploy gần đây không?).
 
 > [!IMPORTANT]
-> Alert nên đo **trải nghiệm người dùng**: error rate p99, latency — không phải CPU/RAM. CPU spike chưa chắc là incident; user nhận lỗi 500 mới là incident.
+> Alert phải đo **trải nghiệm người dùng** (error rate, latency p99) — không phải CPU/RAM. CPU spike chưa chắc là incident; user nhận 500 mới là incident.
 
 ---
 
-### Giai đoạn 2 — Alert team + Assign IC (song song)
+### Giai đoạn 2 — Alert team + Assign IC (song song với giai đoạn 1)
 
 ```
 🚨 [INCIDENT] Production API down — 2:03 AM
 Impact  : ~10,000 users, error rate 87%
 Symptoms: Pods CrashLoopBackOff / health check failing
 Status  : Investigating
-IC      : @nam
-Ops     : @hung
-Jira    : INC-2024-0408 (tạo ngay)
+IC      : @nam (coordinate only, không sửa code)
+Ops     : @hung (hands-on)
+Jira    : INC-2024-0408
 ```
 
-- Tag vào Teams channel `#incident-prod`
-- IC **không sửa code** — tập trung điều phối, update stakeholder mỗi 10–15 phút
-- Kỹ sư Ops chịu trách nhiệm tay chân: chạy lệnh, rollback, scale
+IC **không sửa code** — 100% tập trung điều phối, update mỗi 10–15 phút, quyết định go/no-go cho mọi thay đổi production.
 
 ---
 
-### Giai đoạn 3 — Triage nhanh (2–10 phút)
+### Giai đoạn 3 — Triage (2–10 phút)
 
 ```bash
-# Xem lý do pod chết
+# Lý do pod chết
 kubectl describe pod <pod-name> -n production | grep -A5 "Last State"
 
-# Xem events gần nhất
+# Events gần nhất
 kubectl get events -n production --sort-by='.lastTimestamp' | tail -20
 
-# Log tail
+# Log trước khi crash
 kubectl logs <pod-name> -n production --previous --tail=100
 ```
 
-Kết quả `kubectl describe` sẽ chỉ thẳng vào 1 trong 4 scenario phổ biến nhất bên dưới.
+`kubectl describe` sẽ chỉ thẳng vào một trong 4 scenario bên dưới.
 
 ---
 
-## Scenario 1 — OOMKilled: Pod bị kill do hết memory
+### Scenario 1 — OOMKilled: Spring Boot JVM vượt memory limit
 
-### Nhận diện
-
+**Nhận diện:**
 ```bash
 kubectl describe pod <pod> -n production
-# Output:
-# Last State: Terminated
-#   Reason: OOMKilled
-#   Exit Code: 137
+# Last State: Terminated | Reason: OOMKilled | Exit Code: 137
 
 kubectl top pods -n production
-# NAME              CPU    MEMORY
-# api-server-xxx    120m   1.9Gi/2Gi   ← sát limit
+# api-server-xxx   120m   1.9Gi/2Gi  ← sát limit
 
 # Prometheus:
 container_memory_working_set_bytes{pod=~"api-server.*"}
-```
-
-Grafana alert đã kích hoạt:
-```
 jvm_memory_used_bytes{area="heap"} / jvm_memory_max_bytes{area="heap"} > 0.85
 ```
 
-### Nguyên nhân phổ biến
+**Nguyên nhân phổ biến:**
+- Thiếu `-XX:+UseContainerSupport` → JVM đọc RAM node (32GB) thay vì container limit (2GB) → heap vượt limit → kernel kill
+- Session object tích lũy (~2MB/session), không expire
+- Query trả về 100k+ rows load toàn bộ vào heap
 
-- **JVM không biết container limit**: thiếu flag `-XX:+UseContainerSupport`, JVM đọc RAM của node (ví dụ 32GB) thay vì container limit (2GB) → heap lớn hơn limit → OOMKilled.
-- **Session object tích lũy**: session không expire, mỗi session ~2MB, dưới load cao heap bão hòa.
-- **Query trả về quá nhiều row**: load toàn bộ 100k+ records vào heap.
-
-### Mitigate ngay
-
+**Mitigate ngay:**
 ```bash
-# 1. Rollback deployment nếu vừa deploy
+# Rollback nếu có deploy gần đây
 kubectl rollout undo deployment/api-server -n production
-kubectl rollout status deployment/api-server -n production
 
-# 2. Nếu không rollback được — tăng memory limit tạm thời
-kubectl set resources deployment/api-server \
-  -n production \
-  --limits=memory=4Gi
+# Tăng limit tạm thời nếu cần thêm thời gian
+kubectl set resources deployment/api-server -n production --limits=memory=4Gi
 
-# 3. Scale thêm pod để giảm tải mỗi instance
+# Scale thêm pod để giảm tải mỗi instance
 kubectl scale deployment/api-server --replicas=10 -n production
 ```
 
-### Fix đúng (sau khi ổn định)
-
+**Fix đúng:**
 ```yaml
-# deployment.yaml — JVM flags đúng
 env:
   - name: JAVA_OPTS
     value: >-
@@ -161,225 +202,169 @@ env:
       -XX:+HeapDumpOnOutOfMemoryError
       -XX:HeapDumpPath=/tmp/heapdump.hprof
       -XX:+ExitOnOutOfMemoryError
-```
-
-```yaml
 resources:
   requests:
     memory: "1Gi"
   limits:
-    memory: "2Gi"   # JVM heap = 75% = ~1.5Gi, còn 0.5Gi cho Metaspace + threads
+    memory: "2Gi"   # JVM heap ≈ 1.5Gi, còn 0.5Gi cho Metaspace + threads
 ```
 
 > [!TIP]
-> Mount `emptyDir` volume vào `/tmp` để lấy heap dump trước khi pod bị xóa:
+> Lấy heap dump trước khi pod restart:
 > ```bash
 > kubectl cp production/<pod>:/tmp/heapdump.hprof ./heapdump.hprof
 > ```
-> Dùng Eclipse MAT hoặc VisualVM để phân tích.
+> Phân tích bằng Eclipse MAT hoặc VisualVM để tìm memory leak.
 
 ---
 
-## Scenario 2 — HikariCP Connection Pool Exhausted
+### Scenario 2 — HikariCP Connection Pool Exhausted
 
-### Nhận diện
-
-Log Spring Boot:
+**Nhận diện:**
 ```
+# Spring Boot log:
 HikariPool-1 - Connection is not available, request timed out after 30000ms
 ```
 
 ```bash
-# Prometheus metrics
-hikaricp_connections_active        # số connection đang dùng
-hikaricp_connections_pending       # thread đang chờ — nếu > 0 liên tục = báo động
-hikaricp_connection_timeout_total  # tăng = đang exhausted
-hikaricp_connection_acquire_seconds_bucket  # p99 acquisition time
+# Prometheus
+hikaricp_connections_pending       # > 0 liên tục = đang exhausted
+hikaricp_connection_timeout_total  # đang tăng
+hikaricp_connections_active        # so với maximumPoolSize
 
-# Kiểm tra RDS connection thực tế
-aws rds describe-db-instances --query 'DBInstances[*].DBInstanceClass'
-# Sau đó vào RDS Console → Monitoring → DatabaseConnections
+# Connections thực tế trên RDS
+SELECT count(*), state FROM pg_stat_activity GROUP BY state;
 ```
 
-Hoặc query thẳng vào RDS:
+**Nguyên nhân phổ biến:**
+- Default `maximumPoolSize=10`, 20 pods = 200 connections → vượt RDS `db.t3.medium` max (~170)
+- `maxLifetime` trùng với TCP timeout RDS → connection "active" nhưng đã dead
+- Slow query giữ connection suốt thời gian RDS Multi-AZ failover (30–60s)
+
+**Mitigate ngay:**
 ```sql
-SELECT count(*), state, wait_event_type, wait_event
-FROM pg_stat_activity
-GROUP BY state, wait_event_type, wait_event
-ORDER BY count DESC;
-```
-
-### Nguyên nhân phổ biến
-
-- **Pool size quá nhỏ**: default HikariCP `maximumPoolSize=10`, với 20 pods = 200 connections. RDS `db.t3.medium` chỉ chịu ~170 connections.
-- **`maxLifetime` khớp với TCP timeout phía RDS**: RDS kill TCP connection server-side đúng lúc HikariCP đang hand off → connection "active" nhưng thực chất dead.
-- **Slow query giữ connection**: RDS Multi-AZ failover (~30–60s) khiến toàn bộ connections bị hold trong thời gian failover.
-
-### Mitigate ngay
-
-```bash
-# 1. Kill slow queries đang block trên RDS
-# Vào RDS Performance Insights → tìm query đang hold lâu nhất
+-- Kill slow queries đang block
 SELECT pg_terminate_backend(pid)
 FROM pg_stat_activity
 WHERE state = 'active'
   AND query_start < NOW() - INTERVAL '30 seconds'
   AND query NOT LIKE '%pg_stat_activity%';
-
-# 2. Restart pods để reset connection pool
+```
+```bash
 kubectl rollout restart deployment/api-server -n production
 
-# 3. Tạm thời giảm traffic vào service đang bị
+# Giảm pod count tạm thời → giảm tổng connections đến RDS
 kubectl scale deployment/api-server --replicas=3 -n production
-# Giảm số pod → giảm tổng connections đến RDS
 ```
 
-### Fix đúng
-
+**Fix đúng:**
 ```yaml
-# application.yml
 spring:
   datasource:
     hikari:
-      maximum-pool-size: 10          # tính toán: (RDS_max_conn - 10) / pod_count
-      minimum-idle: 5
-      connection-timeout: 3000       # fail fast sau 3s thay vì queue mãi
-      max-lifetime: 270000           # 270s — ít hơn 30s so với RDS wait_timeout=300s
-      keepalive-time: 60000          # giữ connection alive, tránh bị RDS kill
-      idle-timeout: 120000
+      maximum-pool-size: 10       # = (RDS_max_conn - 10) / pod_count
+      connection-timeout: 3000    # fail fast 3s, không queue mãi
+      max-lifetime: 270000        # 270s < RDS wait_timeout (300s) 30 giây
+      keepalive-time: 60000       # tránh RDS kill idle connection
       connection-test-query: SELECT 1
 ```
 
 > [!IMPORTANT]
-> Công thức tính `maximum-pool-size`:
-> ```
-> pool_size_per_pod = (RDS_max_connections - reserved_10) / number_of_pods
-> ```
-> Ví dụ: RDS max 170, 15 pods → `(170 - 10) / 15 = 10` connections/pod.
+> Công thức: `pool_size = (RDS_max_connections - 10) / số_pod`
+> Ví dụ: RDS max 170, 15 pods → `(170 - 10) / 15 = ~10` mỗi pod.
 
 ---
 
-## Scenario 3 — Kafka Consumer Lag Spike
+### Scenario 3 — Kafka Consumer Lag Spike
 
-### Nhận diện
-
+**Nhận diện:**
 ```bash
-# Xem lag theo consumer group
 kubectl exec -it kafka-client -n production -- \
   kafka-consumer-groups.sh \
-    --bootstrap-server kafka-broker:9092 \
-    --describe \
-    --group order-processing-group
-
-# Output:
-# TOPIC          PARTITION  CURRENT-OFFSET  LOG-END-OFFSET  LAG
-# order-events   0          1234500         1289300         54800   ← lag cao
-# order-events   1          1234500         1289300         54800
+    --bootstrap-server $KAFKA_BROKER \
+    --describe --group order-processing-group
+# LAG: 54800  ← và tăng nhanh, consumer ở trạng thái REBALANCING
 ```
 
-Prometheus alert:
 ```
+# Prometheus alert:
 kafka_consumergroup_lag{consumergroup="order-processing-group"} > 10000
 ```
 
-Grafana thấy lag tăng đột biến, kết hợp với consumer pod ở trạng thái `REBALANCING`.
+**Nguyên nhân phổ biến:**
+- Consumer không gọi `poll()` trong `max.poll.interval.ms` (default 5 phút) → Kafka kick khỏi group → rebalance storm → lag tăng không xử lý được
+- Deploy thêm HTTP call chậm không có timeout → processing time tăng 50ms → 3s/message → lag tích lũy
+- Số partitions ít hơn traffic yêu cầu
 
-### Nguyên nhân phổ biến
-
-- **Rebalance storm**: consumer không gọi `poll()` trong `max.poll.interval.ms` (default 5 phút) → Kafka broker kick consumer khỏi group → rebalance liên tục → lag tăng mà không có consumer nào xử lý.
-- **Processing chậm sau deploy**: thêm HTTP call ra ngoài không có timeout → mỗi message mất 2–3s thay vì 50ms → lag tích lũy.
-- **Partition quá ít**: chỉ có 3 partitions nhưng traffic tăng 10x.
-
-### Mitigate ngay
-
+**Mitigate ngay:**
 ```bash
-# 1. Scale consumer pods (tối đa = số partitions)
+# Scale consumers = số partitions (max parallelism)
 kubectl scale deployment/order-consumer --replicas=6 -n production
-# Lưu ý: replicas > partition count không giúp gì thêm
 
-# 2. Nếu lag quá lớn và dữ liệu cũ không còn giá trị (ví dụ: notification)
-# Reset offset về latest — BỎ QUA toàn bộ backlog
-kubectl exec -it kafka-client -n production -- \
-  kafka-consumer-groups.sh \
-    --bootstrap-server kafka-broker:9092 \
-    --group order-processing-group \
-    --topic order-events \
-    --reset-offsets --to-latest --execute
-
-# 3. Nếu cần giữ lại tất cả message — tăng throughput trước
-# Điều chỉnh max.poll.records để xử lý batch lớn hơn
+# Nếu backlog không còn business value (notification, analytics)
+# Reset offset → bỏ qua backlog — phải có Product Owner sign-off
+kafka-consumer-groups.sh --reset-offsets --to-latest \
+  --group order-processing-group --topic order-events --execute
 ```
 
-### Fix đúng
-
+**Fix đúng:**
 ```yaml
-# application.yml
 spring:
   kafka:
     consumer:
-      max-poll-records: 50               # giảm nếu processing nặng
+      max-poll-records: 50
       properties:
-        max.poll.interval.ms: 60000      # 60s — đủ cho logic xử lý
+        max.poll.interval.ms: 60000   # đủ cho logic xử lý
         session.timeout.ms: 30000
         heartbeat.interval.ms: 10000
 ```
 
 ```java
-// Offload heavy processing ra async thread pool
-// Không xử lý trực tiếp trong @KafkaListener nếu chậm
 @KafkaListener(topics = "order-events", groupId = "order-processing-group")
 public void consume(OrderEvent event) {
-    // Chỉ validate + enqueue vào internal queue
-    processingQueue.offer(event);  // non-blocking
+    // Enqueue ngay, không xử lý nặng trong listener thread
+    processingQueue.offer(event); // non-blocking
 }
 ```
 
 > [!TIP]
-> Dùng **KEDA** để autoscale consumer pod dựa trên Kafka lag:
+> Dùng **KEDA** autoscale consumer theo lag:
 > ```yaml
-> apiVersion: keda.sh/v1alpha1
-> kind: ScaledObject
-> spec:
->   triggers:
->     - type: kafka
->       metadata:
->         topic: order-events
->         consumerGroup: order-processing-group
->         lagThreshold: "1000"
+> triggers:
+>   - type: kafka
+>     metadata:
+>       topic: order-events
+>       consumerGroup: order-processing-group
+>       lagThreshold: "1000"
 > ```
 
 ---
 
-## Scenario 4 — Redis Eviction Storm / Cache Miss Flood
+### Scenario 4 — Redis Eviction Storm / Cache Miss Flood
 
-### Nhận diện
-
+**Nhận diện:**
 ```bash
-# Redis CLI
-redis-cli -h elasticache-endpoint info stats | grep -E "evicted_keys|keyspace_hits|keyspace_misses"
-# evicted_keys:15420   ← tăng nhanh = đang evict
-# keyspace_hits:1200
-# keyspace_misses:8900  ← hit ratio = 1200/(1200+8900) = 11.9% — thảm họa
-
-# Prometheus
-redis_evicted_keys_total            # rate spike
-redis_keyspace_hits_total
-redis_keyspace_misses_total
-# Hit ratio alert: rate(hits[1m]) / (rate(hits[1m]) + rate(misses[1m])) < 0.90
+redis-cli -h $REDIS_HOST info stats | grep -E "evicted_keys|keyspace_hits|keyspace_misses"
+# evicted_keys:15420  ← tăng nhanh
+# keyspace_hits:1200 / keyspace_misses:8900  → hit ratio 11.9% — thảm họa
 ```
 
-Đồng thời RDS CPU và connections tăng vọt — vì mọi cache miss đều hit thẳng DB.
+```
+# Prometheus alert:
+rate(redis_keyspace_hits_total[1m]) /
+(rate(redis_keyspace_hits_total[1m]) + rate(redis_keyspace_misses_total[1m])) < 0.90
+```
 
-### Nguyên nhân phổ biến
+RDS CPU và connections tăng vọt đồng thời — mọi cache miss hit thẳng DB.
 
-- **Redis đầy, evict hot key**: `maxmemory-policy allkeys-lru` silently evict hot keys dưới memory pressure. Một cache miss = 200ms DB query thay vì 1ms Redis read.
-- **Cache stampede sau deploy**: deploy tăng memory usage → Redis quá `maxmemory` → evict đồng loạt nhiều key → tất cả pods miss cùng lúc và query DB song song.
-- **TTL đồng loạt**: tất cả cache key set cùng một TTL → expire cùng lúc → thundering herd.
+**Nguyên nhân phổ biến:**
+- `maxmemory-policy allkeys-lru` evict hot key silently khi Redis đầy → cache miss = 200ms DB thay vì 1ms Redis
+- Deploy tăng memory consumption → Redis vượt `maxmemory` → evict đồng loạt → tất cả pods miss cùng lúc
+- TTL đồng loạt: tất cả key expire cùng thời điểm → thundering herd (đây là lý do 1 outage 14 giờ được ghi lại trên Medium)
 
-### Mitigate ngay
-
+**Mitigate ngay:**
 ```bash
-# 1. Kiểm tra ElastiCache memory
+# Kiểm tra ElastiCache memory usage
 aws cloudwatch get-metric-statistics \
   --namespace AWS/ElastiCache \
   --metric-name DatabaseMemoryUsagePercentage \
@@ -387,85 +372,58 @@ aws cloudwatch get-metric-statistics \
   --start-time $(date -u -d '1 hour ago' +%Y-%m-%dT%H:%M:%S) \
   --end-time $(date -u +%Y-%m-%dT%H:%M:%S)
 
-# 2. Nếu Redis OOM — restart và warm cache dần
-# Scale Redis (ElastiCache) lên node lớn hơn qua console
-
-# 3. Giảm tải DB trong lúc cache miss cao
-# Tạm thời bật read replica (nếu chưa bật)
-aws rds modify-db-instance --db-instance-identifier prod-db \
-  --no-multi-az  # không làm cái này — chỉ promote read replica
-
-# 4. Kích hoạt circuit breaker tạm
-# Return cached fallback/stale data thay vì hit DB
+# Scale ElastiCache lên node lớn hơn qua AWS Console (vài phút)
+# Trong lúc chờ: bật read replica RDS để hấp thụ cache miss load
 ```
 
-### Fix đúng
-
+**Fix đúng:**
 ```java
-// Jitter TTL để tránh đồng loạt expire
-int baseTtl = 3600; // 1 giờ
-int jitter = new Random().nextInt(baseTtl / 10); // ±10%
-redisTemplate.expire(key, baseTtl + jitter, TimeUnit.SECONDS);
-
-// L1 cache (Caffeine) trước Redis — hấp thụ stampede
-@Bean
-public CacheManager cacheManager(RedisConnectionFactory cf) {
-    // Caffeine L1: 500 entries, 30s TTL (in-process)
-    // Redis L2: distributed, 1h TTL
-}
+// Jitter TTL — tránh đồng loạt expire
+int base = 3600;
+int jitter = ThreadLocalRandom.current().nextInt(base / 10); // ±10%
+redisTemplate.expire(key, Duration.ofSeconds(base + jitter));
 ```
 
 ```yaml
-# Redis config — maxmemory 75% RAM, không phải 100%
-maxmemory 3gb          # cho 4GB node
-maxmemory-policy allkeys-lru
-
-# Sau khi Redis recover — warm cache trước khi mở full traffic
+# ElastiCache config
+maxmemory: 3gb          # 75% RAM của node 4GB — không để 100%
+maxmemory-policy: allkeys-lru
 ```
 
 > [!IMPORTANT]
-> **Cache stampede sau restore**: khi Redis vừa phục hồi, đừng mở toàn bộ traffic ngay. Warm cache dần với rate-limited preloader, sau đó mới shift traffic vào. Mở đột ngột = tái diễn thundering herd.
+> **Controlled ramp-up sau restore**: khi Redis vừa phục hồi, warm cache dần với rate-limited preloader trước khi mở full traffic. Mở đột ngột = thundering herd tái diễn.
+> Bài học từ Cloudflare 2023: flood reconnecting clients overload hệ thống vừa recover.
 
 ---
 
-## Phân biệt lỗi của mình vs lỗi infra
+### Phân biệt lỗi của mình vs lỗi infra
 
 | Dấu hiệu | Khả năng |
 |----------|----------|
 | Lỗi xảy ra đúng sau deployment | Code của mình |
 | Nhiều service không liên quan cùng sập | Infra (AWS, network) |
-| `kubectl describe` → OOMKilled / CrashLoopBackOff | Code/config của mình |
-| Error: `connection refused`, `timeout` đến RDS/Redis | Infra hoặc pool exhausted |
-| AWS Health Dashboard có incident | Infra AWS |
+| `OOMKilled` / `CrashLoopBackOff` | Code/config của mình |
+| `connection refused`, `timeout` đến RDS/Redis | Infra hoặc pool exhausted |
+| AWS Health Dashboard có incident active | Infra AWS |
 | Chỉ 1 AZ bị, AZ khác bình thường | Infra AZ failure |
 
 ```bash
-# Kiểm tra nhanh các dependency còn sống không
-# RDS
-psql -h $RDS_HOST -U $DB_USER -c "SELECT 1"
-
-# Redis
-redis-cli -h $REDIS_HOST ping
-
-# Kafka
-kafka-topics.sh --bootstrap-server $KAFKA_BROKER --list
-
-# ALB target health
+psql -h $RDS_HOST -U $DB_USER -c "SELECT 1"   # RDS còn sống?
+redis-cli -h $REDIS_HOST ping                  # Redis còn sống?
+kafka-topics.sh --bootstrap-server $BROKER --list  # Kafka còn sống?
 aws elbv2 describe-target-health --target-group-arn $TG_ARN
 ```
 
 ---
 
-## Communicate trong suốt incident
-
-Cập nhật Teams `#incident-prod` mỗi **10–15 phút**:
+### Communicate trong suốt incident
 
 ```
-[UPDATE 02:15] Xác định: OOMKilled do heap thiếu JVM flag.
-Đang rollback về v2.3.0. ETA: 5 phút.
+[UPDATE 02:15] Xác định OOMKilled do thiếu JVM flag.
+Đang rollback về v2.3.0. ETA 5 phút.
 
 [UPDATE 02:22] Rollback xong. Error rate về 2%, pods stable.
-Monitoring thêm 10 phút trước khi declare resolved.
+Monitor thêm 10 phút.
 
 [RESOLVED 02:35] Service ổn định. Downtime: 32 phút.
 Root cause: -XX:+UseContainerSupport thiếu trong deploy v2.3.1.
@@ -474,19 +432,15 @@ Jira: INC-2024-0408. Post-mortem: thứ 2, 10h sáng.
 
 ---
 
-## Checklist 2h sáng
+### Checklist 2h sáng
 
 ```
-□ Xác nhận sự cố thật (error rate, pod status, ALB health)
+□ Confirm sự cố thật (error rate, pod status, ALB health)
 □ Check AWS Health Dashboard — infra hay code?
-□ Tạo Jira INC ticket + Teams incident channel
-□ Assign IC (coordinator) + Ops (hands-on)
-□ kubectl describe → tìm OOMKilled / CrashLoopBackOff / pending
-□ Có deployment vừa xong? → Rollback ngay
-□ OOMKilled? → tăng memory limit + fix JVM flags
-□ HikariCP timeout? → kill slow queries + restart pods
-□ Kafka lag? → scale consumers + check rebalancing
-□ Redis miss cao? → kiểm tra eviction + scale Redis
+□ Tạo Jira INC + Teams channel
+□ Assign IC (coordinate) + Ops (hands-on)
+□ kubectl describe → OOMKilled / HikariCP / Kafka lag / Redis?
+□ Có deploy gần đây? → Rollback ngay
 □ Update team mỗi 10-15 phút
 □ Confirm stable → declare resolved
 □ Schedule post-mortem (không làm 3h sáng)
@@ -494,20 +448,58 @@ Jira: INC-2024-0408. Post-mortem: thứ 2, 10h sáng.
 
 ---
 
+## Bẫy thường gặp
+
+❌ **"Tôi sẽ check logs trước để tìm nguyên nhân"**
+→ Tại sao sai: logs giúp tìm root cause, không giúp service recover nhanh hơn. Trong khi bạn đọc logs, 10,000 users vẫn đang bị ảnh hưởng.
+✅ Đúng hơn: rollback hoặc scale out trước, đọc logs song song hoặc sau.
+
+---
+
+❌ **"Tôi sẽ tự xử lý, không cần wake up ai lúc 2h sáng"**
+→ Tại sao sai: nếu bạn bị block hoặc cần thông tin mà người khác biết, incident kéo dài hơn. Không ai muốn bị gọi lúc 2h, nhưng tất cả đều đồng ý đây là đúng khi có SLA.
+✅ Đúng hơn: alert team ngay, ít nhất là thông báo — để họ quyết định có tham gia không.
+
+---
+
+❌ **"Restart server là xong"**
+→ Tại sao sai: restart giải quyết triệu chứng, không giải quyết nguyên nhân. Pod sẽ OOMKilled lại sau vài phút nếu không fix JVM config.
+✅ Đúng hơn: restart là mitigation tạm thời, phải theo sau bởi root cause investigation.
+
+---
+
+❌ **"Tôi báo cáo sau khi resolve xong"**
+→ Tại sao sai: stakeholders cần biết đang xảy ra gì để quyết định (delay launch, thông báo khách hàng, escalate). Im lặng 45 phút rồi báo "xong rồi" là tệ hơn nhiều so với update liên tục.
+✅ Đúng hơn: update mỗi 10–15 phút, kể cả khi chỉ nói "vẫn đang điều tra".
+
+---
+
+❌ **"Reset Kafka offset về latest để giải quyết lag"**
+→ Tại sao sai: với order/payment topics, reset = mất data, business loss có thể lớn hơn downtime.
+✅ Đúng hơn: quyết định reset phải có Product Owner sign-off, chỉ áp dụng với non-critical topics (notification, analytics).
+
+---
+
 ## Câu hỏi follow-up
 
-### 1. Làm sao bạn biết đây là lúc cần escalate lên leadership?
+### 1. Làm sao bạn biết lúc nào cần escalate lên leadership?
 
-Escalate khi: incident kéo dài > 30 phút mà chưa có mitigation rõ ràng, hoặc impact vượt ngưỡng SLA (revenue loss, data loss risk). Đừng chờ "chắc chắn" — thà escalate sớm và update "false alarm" còn hơn để leadership bị bất ngờ. Với Jira INC ticket đã tạo từ đầu, leadership tự theo dõi được status.
+Escalate khi: incident kéo dài > 30 phút chưa có mitigation rõ ràng, hoặc impact vượt ngưỡng SLA (revenue loss, data loss risk, số user bị ảnh hưởng lớn). Nguyên tắc: thà escalate sớm rồi update "đã ổn" còn hơn để leadership bị bất ngờ. Jira INC ticket đã tạo từ đầu giúp leadership tự theo dõi được status mà không cần hỏi.
 
-### 2. Nếu không rollback được thì sao?
+### 2. Nếu rollback không được thì sao?
 
-Chuyển sang mitigation thay thế theo thứ tự: feature flag kill switch → tắt tính năng bị lỗi qua config → maintenance mode (trả 503 + thông báo) → scale out để giảm error rate. Bắt đầu hotfix song song nhưng không deploy cho đến khi test đầy đủ trên staging với load test.
+Theo thứ tự: feature flag kill switch → tắt tính năng bị lỗi qua config (không cần deploy) → maintenance mode (503 + thông báo) → scale out để giảm error rate từng pod. Bắt đầu hotfix song song nhưng không deploy cho đến khi test kỹ trên staging với load test mô phỏng production traffic.
 
-### 3. Kafka consumer lag quá lớn — bỏ qua hay xử lý hết?
+### 3. Kafka consumer lag quá lớn — bỏ qua backlog hay xử lý hết?
 
-Phụ thuộc vào business: notification/analytics → reset offset về latest, bỏ backlog. Order/payment → phải xử lý hết, scale consumers + tăng throughput. Quyết định này phải có sign-off từ Product Owner, không tự ý reset offset trên critical topics.
+Phụ thuộc hoàn toàn vào business: notification/analytics/recommendation → reset offset về latest, bỏ backlog (dữ liệu cũ không còn giá trị). Order/payment/inventory → phải xử lý hết, scale consumers + tăng throughput. Quyết định phải có Product Owner sign-off — kỹ sư không tự reset offset trên critical topics.
 
-### 4. Sau incident, bạn làm post-mortem như thế nào?
+### 4. Post-mortem của bạn trông như thế nào?
 
-Blameless post-mortem trong Confluence/Jira: timeline chi tiết (từng phút), root cause (5 Whys), contributing factors, impact measurement, action items cụ thể có owner + deadline. Không đổ lỗi cá nhân — hỏi "hệ thống/process nào đã thất bại" thay vì "ai đã làm sai". Action items phải có ticket Jira và giao cho người cụ thể, không để chung chung.
+Blameless post-mortem trong Confluence trong vòng 48 giờ sau incident: timeline từng phút, root cause (5 Whys), contributing factors, impact measurement (users bị ảnh hưởng, revenue loss ước tính, SLA breach). Action items phải cụ thể — có owner, có deadline, có Jira ticket — không để chung chung "cần cải thiện monitoring". Câu hỏi cốt lõi: "Hệ thống/process nào đã thất bại?" — không phải "Ai đã làm sai?".
+
+---
+
+## Xem thêm
+
+- Thêm câu hỏi liên quan khi có nội dung mới về system design, on-call culture, SRE practices.
