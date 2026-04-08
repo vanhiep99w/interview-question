@@ -50,6 +50,50 @@ Files not in `pages` array will not appear in the sidebar.
 2. Add new entry to the correct position in `pages` array
 3. Preserve all existing fields
 
+## Question Structure (bắt buộc)
+
+Mỗi file câu hỏi phải có đủ các section sau theo thứ tự:
+
+```markdown
+## Câu hỏi
+
+> Câu hỏi gốc viết ở đây
+
+---
+
+## Cốt lõi cần nhớ
+
+2-3 dòng insight quan trọng nhất — đây là thứ interviewer muốn nghe.
+
+---
+
+## [Nội dung trả lời chi tiết]
+
+...các section giải thích, diagram, checklist...
+
+---
+
+## Câu hỏi follow-up
+
+### 1. [Câu follow-up]
+...câu trả lời gợi ý ngắn (2-5 dòng)...
+
+### 2. [Câu follow-up]
+...
+```
+
+**Section `## Câu hỏi follow-up` là bắt buộc** — 1 đến 4 câu, mỗi câu kèm gợi ý trả lời ngắn.
+
+## Research trước khi viết (câu hỏi tình huống thực tế)
+
+Với câu hỏi dạng incident, system design, behavioral — **bắt buộc dùng `WebSearch` tìm kiếm thực tế trước**:
+
+- Engineering blog của các công ty lớn (Netflix, Uber, Cloudflare, GitHub, Shopify...)
+- Post-mortem thực tế
+- Kinh nghiệm chia sẻ trên Medium, DEV.to, Hacker News
+
+Mục tiêu: câu trả lời dựa trên **kinh nghiệm thực tế ngoài sản xuất**, không phải lý thuyết.
+
 ## Content Language
 
 - Questions and answers: **tiếng Việt**

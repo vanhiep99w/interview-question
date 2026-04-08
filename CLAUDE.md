@@ -17,6 +17,7 @@ Next.js 15 (static export) + Fumadocs + Cloudflare Pages.
 
 - `source.config.ts` — Fumadocs MDX config; defines `docs` loader pointing at `content/docs/`
 - `src/lib/source.ts` — wraps the loader with `baseUrl: '/'`
+- `src/app/[[...slug]]/layout.tsx` — DocsLayout wrapper (sidebar + nav)
 - `src/app/[[...slug]]/page.tsx` — single catch-all route; renders all doc pages
 - `src/components/mermaid.tsx` — client component for mermaid diagrams (lazy-loaded)
 
@@ -55,6 +56,50 @@ content/docs/
 - **Never overwrite** an existing `meta.json` — always read first, then patch.
 - `"pages"` array controls sidebar order; files not listed won't appear.
 - Use sequential prefix `01-`, `02-`, ... in filenames for predictable ordering.
+
+## Question Content Guidelines
+
+### Câu hỏi tình huống thực tế (incident, system design, behavioral)
+
+**Bắt buộc tìm kiếm thực tế trước khi viết.** Dùng `WebSearch` để tìm:
+- Bài blog engineering từ các công ty lớn (Netflix, Uber, Cloudflare, GitHub...)
+- Post-mortem thực tế (postmortem.wtf, srebook.io, các engineering blog)
+- Kinh nghiệm chia sẻ trên Medium, DEV.to, Hacker News
+
+Mục tiêu: câu trả lời phản ánh **thực tế ngoài sản xuất**, không phải lý thuyết sách giáo khoa.
+
+### Cấu trúc bắt buộc của mỗi câu hỏi
+
+```markdown
+## Câu hỏi        ← câu hỏi gốc
+
+---
+
+## Cốt lõi cần nhớ   ← 2-3 dòng tóm tắt insight quan trọng nhất
+
+---
+
+## [Nội dung trả lời chi tiết]
+
+---
+
+## Câu hỏi follow-up   ← 1-4 câu interviewer hay hỏi tiếp
+```
+
+### Câu hỏi follow-up
+
+Mỗi file **bắt buộc có section `## Câu hỏi follow-up`** ở cuối, gồm 1–4 câu mà interviewer thường hỏi tiếp. Mỗi câu follow-up phải có câu trả lời gợi ý ngắn (2-5 dòng), không để trống.
+
+Ví dụ:
+```markdown
+## Câu hỏi follow-up
+
+### 1. Làm sao bạn biết đây là lúc cần escalate?
+...câu trả lời gợi ý...
+
+### 2. Nếu rollback không được thì sao?
+...câu trả lời gợi ý...
+```
 
 ## Mermaid Diagrams
 
