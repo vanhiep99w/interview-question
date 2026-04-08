@@ -1,6 +1,6 @@
 import { source } from '@/lib/source';
 import { DocsPage, DocsBody, DocsTitle, DocsDescription } from 'fumadocs-ui/page';
-import { notFound, redirect } from 'next/navigation';
+import { notFound } from 'next/navigation';
 import defaultMdxComponents from 'fumadocs-ui/mdx';
 import { MermaidDiagram } from '@/components/mermaid';
 import { Callout } from 'fumadocs-ui/components/callout';
@@ -17,8 +17,7 @@ export default async function Page({
   params: Promise<{ slug?: string[] }>;
 }) {
   const { slug } = await params;
-  if (!slug) redirect('/index/');
-  const page = source.getPage(slug);
+  const page = source.getPage(slug ?? []);
   if (!page) notFound();
 
   const MDX = page.data.body;
@@ -49,7 +48,7 @@ export default async function Page({
 }
 
 export async function generateStaticParams() {
-  return [{ slug: [] as string[] }, ...source.generateParams()];
+  return source.generateParams();
 }
 
 export async function generateMetadata({
@@ -58,8 +57,8 @@ export async function generateMetadata({
   params: Promise<{ slug?: string[] }>;
 }): Promise<Metadata> {
   const { slug } = await params;
-  const page = source.getPage(slug);
-  if (!page) notFound();
+  const page = source.getPage(slug ?? []);
+  if (!page) return {};
   return {
     title: page.data.title,
     description: page.data.description,
