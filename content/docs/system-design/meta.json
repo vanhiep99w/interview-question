@@ -1,4 +1,4 @@
 {
   "title": "System Design",
-  "pages": ["01-geo-latency-60ms-vs-6s"]
+  "pages": ["01-geo-latency-60ms-vs-6s", "02-scale-1k-to-50k-users"]
 }
