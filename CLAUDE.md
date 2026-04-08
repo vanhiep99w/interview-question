@@ -57,6 +57,34 @@ content/docs/
 - `"pages"` array controls sidebar order; files not listed won't appear.
 - Use sequential prefix `01-`, `02-`, ... in filenames for predictable ordering.
 
+## Default Tech Stack cho câu hỏi
+
+Khi viết ví dụ, code snippet, hoặc scenario cụ thể — **luôn dùng tech stack này** trừ khi user chỉ định khác:
+
+| Layer | Technology |
+|-------|-----------|
+| Backend | Spring Boot 3.x, Java 17 |
+| Frontend | React (TypeScript) |
+| Container/Orchestration | Kubernetes (AWS EKS) |
+| Messaging | Apache Kafka |
+| Cache | Redis (AWS ElastiCache) |
+| Cloud | AWS (EKS, RDS, S3, ALB, CloudWatch) |
+| Monitoring & Alerting | Prometheus + Grafana, AWS CloudWatch |
+| Observability | OpenTelemetry (tracing, metrics, logs) |
+| CI/CD | Jenkins + GitHub Actions |
+| Source control | GitHub |
+| Incident/Task tracking | Jira |
+| Team communication | Microsoft Teams |
+| Container registry | Amazon ECR |
+
+**Nguyên tắc khi viết ví dụ:**
+- Code snippet dùng Java 17 syntax (records, sealed classes, text blocks nếu phù hợp)
+- Command dùng `kubectl`, `aws cli`, `kafka-topics.sh`, `redis-cli`
+- Monitoring dùng Prometheus metrics + Grafana dashboard + CloudWatch
+- Alert dùng Prometheus Alertmanager hoặc CloudWatch Alarms → Teams webhook
+- Pipeline: GitHub (source) → GitHub Actions (lint/test) → Jenkins (build/deploy) → ECR → EKS
+- Tracing: OpenTelemetry → Jaeger hoặc AWS X-Ray
+
 ## Question Content Guidelines
 
 ### Câu hỏi tình huống thực tế (incident, system design, behavioral)

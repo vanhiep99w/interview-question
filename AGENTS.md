@@ -50,6 +50,28 @@ Files not in `pages` array will not appear in the sidebar.
 2. Add new entry to the correct position in `pages` array
 3. Preserve all existing fields
 
+## Default Tech Stack
+
+Khi viết ví dụ, commands, hoặc scenario — **luôn dùng stack này** trừ khi user chỉ định khác:
+
+| Layer | Technology |
+|-------|-----------|
+| Backend | Spring Boot 3.x, Java 17 |
+| Frontend | React (TypeScript) |
+| Container/Orchestration | Kubernetes trên AWS EKS |
+| Messaging | Apache Kafka |
+| Cache | Redis (AWS ElastiCache) |
+| Cloud | AWS (EKS, RDS, S3, ALB, CloudWatch) |
+| Monitoring | Prometheus + Grafana + AWS CloudWatch |
+| Observability | OpenTelemetry (traces, metrics, logs) |
+| CI/CD | Jenkins + GitHub Actions |
+| Source control | GitHub |
+| Task tracking | Jira |
+| Communication | Microsoft Teams |
+| Container registry | Amazon ECR |
+
+**Khi viết code snippet:** Java 17. **Khi viết commands:** `kubectl`, `aws`, `kafka-topics.sh`, `redis-cli`. **Khi viết alert/notification:** Prometheus Alertmanager hoặc CloudWatch Alarms → Teams webhook.
+
 ## Question Structure (bắt buộc)
 
 Mỗi file câu hỏi phải có đủ các section sau theo thứ tự:
