@@ -2,6 +2,7 @@
   "pages": [
     "behavioral",
     "caching",
+    "database",
     "java",
     "system-design"
   ]
