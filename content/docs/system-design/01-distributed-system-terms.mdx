@@ -1,0 +1,1661 @@
+---
+title: "Cluster, Sharding, Replication, Primary/Replica là gì?"
+description: "Giải thích bản chất các thuật ngữ distributed system: cluster, node, shard, partition, replica, primary/replica, leader/follower, quorum, failover và trade-off."
+---
+
+# Cluster, Sharding, Replication, Primary/Replica là gì?
+
+## Câu hỏi
+
+> Khi làm việc với distributed system, tôi thường nghe các từ khoá như `cluster`, `sharding`, `master/slave`, `replica`, `partition`, `node`, `quorum`, `failover`... Chúng là gì, giống và khác nhau như thế nào?
+
+---
+
+## Dành cho level
+
+**Mid / Senior / Staff** — Mid cần hiểu đúng từng thuật ngữ và không nhầm sharding với replication. Senior cần giải thích được trade-off giữa scale, availability, consistency, latency và operational complexity. Staff cần nhìn được failure mode, migration, rebalancing, multi-region, runbook failover và cách chọn architecture theo invariant của hệ thống.
+
+---
+
+## Cốt lõi cần nhớ
+
+- **Cluster** là một nhóm machine/process cùng chạy một hệ thống. **Sharding** là chia dữ liệu ra nhiều phần để scale. **Replication** là copy dữ liệu ra nhiều bản để tăng availability/read throughput/durability.
+- `master/slave` là cách gọi cũ; trong production hiện đại nên dùng **primary/replica** hoặc **leader/follower**. Primary thường nhận write, replica copy data và có thể phục vụ read.
+- Sharding giải quyết bài toán **một node không chứa/xử lý nổi toàn bộ data/traffic**. Replication giải quyết bài toán **một node chết thì hệ thống vẫn sống**. Hai thứ này thường đi cùng nhau nhưng không thay thế nhau.
+
+---
+
+## Câu trả lời mẫu
+
+> Tôi thường tách các thuật ngữ này thành hai nhóm: nhóm nói về cách hệ thống được triển khai và nhóm nói về cách dữ liệu được chia/copy. `Cluster` là tập nhiều node cùng phục vụ một hệ thống, ví dụ một Redis cluster, Kafka cluster hoặc Kubernetes cluster. Trong cluster đó, `node` là một instance/machine/pod/process tham gia vào hệ thống. `Sharding` là chia dữ liệu theo key thành nhiều shard, mỗi shard giữ một phần dữ liệu để scale storage và write/read throughput. `Replication` là copy cùng một dữ liệu ra nhiều node để nếu một node chết vẫn còn bản khác, hoặc để tăng read throughput.
+>
+> Với mô hình primary/replica, primary thường là nơi nhận write, replica nhận bản sao từ primary và có thể phục vụ read. Cách gọi `master/slave` là thuật ngữ cũ; tôi sẽ dùng `primary/replica` hoặc `leader/follower`. Điểm dễ nhầm là sharding và replication khác mục tiêu: sharding chia data khác nhau ra nhiều node, còn replication copy cùng data ra nhiều node. Trong production, một shard thường có nhiều replica: ví dụ shard 1 có primary ở node A và replica ở node B/C. Khi primary chết, cluster cần failover bầu/chọn replica lên làm primary mới. Phần khó không nằm ở định nghĩa, mà nằm ở consistency, replication lag, hot shard, split-brain, rebalancing và cách ứng dụng xử lý lỗi trong lúc failover.
+
+---
+
+## Phân tích chi tiết
+
+### 1. Vì sao distributed system sinh ra nhiều thuật ngữ như vậy?
+
+Khi hệ thống còn nhỏ, một database instance có thể làm mọi thứ:
+
+```txt
+Application -> Database
+```
+
+Một máy chứa toàn bộ data, nhận toàn bộ read/write, backup đơn giản, query đơn giản. Nhưng khi production lớn dần, một máy bắt đầu gặp giới hạn:
+
+```txt
+Storage: 1 máy không chứa nổi toàn bộ data
+CPU: 1 máy không xử lý nổi toàn bộ query
+Memory: working set lớn hơn RAM
+Network: throughput quá cao
+Availability: 1 máy chết là toàn hệ thống chết
+Latency: user ở xa region đọc chậm
+Maintenance: upgrade 1 máy gây downtime
+```
+
+Distributed system là cách dùng nhiều machine để vượt qua các giới hạn này. Nhưng đổi lại, ta phải trả giá bằng complexity:
+
+```txt
+- Dữ liệu nằm ở đâu?
+- Node nào chịu trách nhiệm key nào?
+- Nếu node chết thì ai thay?
+- Nếu hai node đều nghĩ mình là primary thì sao?
+- Replica có kịp data mới nhất không?
+- Khi thêm node mới, dữ liệu chuyển thế nào?
+- Nếu network split, hệ thống chọn consistency hay availability?
+```
+
+Các thuật ngữ như cluster, shard, replica, leader, quorum, failover chính là ngôn ngữ để mô tả các quyết định này.
+
+---
+
+### 2. Cluster là gì?
+
+**Cluster** là một nhóm node phối hợp với nhau để chạy cùng một hệ thống hoặc cùng một logical service.
+
+Ví dụ:
+
+```txt
+PostgreSQL cluster
+- 1 primary
+- 2 read replicas
+
+Kafka cluster
+- 3 brokers
+- topic partitions distributed across brokers
+
+Redis Cluster
+- nhiều Redis nodes
+- keyspace chia theo hash slots
+
+Kubernetes cluster
+- nhiều worker nodes
+- control plane quản lý scheduling/networking
+```
+
+Cluster không nói rõ data được chia hay copy thế nào. Nó chỉ nói: **đây là một tập node hoạt động như một hệ thống chung**.
+
+Hình dung đơn giản:
+
+```txt
+                 ┌──────────────┐
+Client/API ─────▶│ Load Balancer│
+                 └──────┬───────┘
+                        │
+        ┌───────────────┼───────────────┐
+        ▼               ▼               ▼
+   ┌─────────┐     ┌─────────┐     ┌─────────┐
+   │ Node A  │     │ Node B  │     │ Node C  │
+   └─────────┘     └─────────┘     └─────────┘
+
+                 Một cluster 3 node
+```
+
+Tùy hệ thống, các node có thể ngang hàng hoặc có vai trò khác nhau.
+
+- Trong stateless application cluster, node A/B/C có thể giống nhau.
+- Trong database cluster, có thể có primary và replica.
+- Trong Kafka cluster, broker nào cũng là broker nhưng mỗi partition có leader riêng.
+- Trong Kubernetes cluster, control plane và worker node có vai trò khác.
+
+Điểm quan trọng: **cluster là container khái niệm**, không tự động đồng nghĩa với high availability hay horizontal scale. Một cluster cấu hình sai vẫn có thể có single point of failure.
+
+---
+
+### 3. Node là gì?
+
+**Node** là một đơn vị tham gia trong cluster. Nó có thể là:
+
+- Một physical server.
+- Một virtual machine EC2.
+- Một container/pod.
+- Một database process.
+- Một broker process.
+
+Ví dụ trong Kafka:
+
+```txt
+Kafka cluster = 3 brokers
+broker-1 = node
+broker-2 = node
+broker-3 = node
+```
+
+Ví dụ trong Kubernetes:
+
+```txt
+Kubernetes cluster = control plane + worker nodes
+worker node = EC2 instance chạy kubelet/container runtime
+pod không hẳn là node; pod chạy trên node
+```
+
+Trong interview, nên hỏi lại context vì từ `node` có thể khác nhau theo system. `Redis node`, `Kubernetes node`, `Elasticsearch node`, `Cassandra node` không hoàn toàn giống nhau về responsibility.
+
+---
+
+### 4. Replication là gì?
+
+**Replication** là việc lưu nhiều bản sao của cùng một dữ liệu trên nhiều node.
+
+Mục tiêu chính:
+
+1. **High availability**: một node chết vẫn còn bản khác.
+2. **Read scalability**: có thể đọc từ nhiều replica.
+3. **Durability**: mất một disk/node không mất data.
+4. **Geo latency**: copy data tới region gần user hơn.
+
+Ví dụ một database có primary và 2 replicas:
+
+```txt
+                 write
+App ────────────────▶ Primary
+                        │
+                        │ replicate
+                        ▼
+                 ┌─────────────┐
+                 │             │
+                 ▼             ▼
+              Replica 1     Replica 2
+                read          read
+```
+
+Nếu primary chứa order `ord_123`, replica cũng sẽ có order `ord_123` sau khi replication chạy xong. Đây là điểm khác sharding: replication copy cùng data, không chia data.
+
+#### Synchronous replication
+
+Primary chỉ báo write thành công sau khi replica xác nhận đã nhận/ghi data.
+
+```txt
+Client -> Primary -> Replica
+                wait ACK
+Client <- success sau khi replica ACK
+```
+
+Ưu điểm:
+
+- Ít nguy cơ mất data khi primary chết ngay sau commit.
+- Consistency tốt hơn.
+
+Nhược điểm:
+
+- Latency write cao hơn vì phải chờ replica.
+- Nếu replica/network chậm, write bị chậm hoặc fail.
+- Cross-region synchronous replication rất đắt latency.
+
+#### Asynchronous replication
+
+Primary báo success ngay sau khi ghi local, rồi gửi data sang replica sau.
+
+```txt
+Client -> Primary
+Client <- success
+Primary -> Replica sau đó
+```
+
+Ưu điểm:
+
+- Write latency thấp.
+- Primary ít bị phụ thuộc vào replica.
+
+Nhược điểm:
+
+- Có replication lag.
+- Nếu primary chết trước khi replica nhận data, có thể mất một số committed writes.
+- Read từ replica có thể thấy data cũ.
+
+Trong production, nhiều hệ thống dùng async replication cho read replica vì trade-off latency tốt hơn, nhưng phải chấp nhận stale read.
+
+---
+
+### 5. Primary/Replica là gì? Master/Slave là gì?
+
+`Master/slave` là thuật ngữ cũ để chỉ mô hình một node chính điều phối/nhận write và các node phụ copy theo. Hiện nay nên dùng:
+
+- **Primary/replica**
+- **Leader/follower**
+- **Writer/reader**
+
+Ý tưởng cơ bản:
+
+```txt
+              writes
+Application ─────────▶ Primary
+                         │
+                         │ replication stream
+                         ▼
+             ┌─────────────────────┐
+             ▼                     ▼
+          Replica A             Replica B
+          reads                 reads
+```
+
+Primary thường chịu trách nhiệm:
+
+- Nhận write.
+- Quyết định order của writes.
+- Gửi log/change stream sang replica.
+- Là source authoritative trong thời điểm bình thường.
+
+Replica thường:
+
+- Nhận data từ primary.
+- Apply log/change.
+- Có thể phục vụ read.
+- Có thể được promote thành primary khi failover.
+
+#### Tại sao không cho mọi node cùng write?
+
+Nếu mọi replica đều nhận write độc lập, hệ thống phải giải quyết conflict.
+
+Ví dụ:
+
+```txt
+Region A: user.email = "a@example.com"
+Region B: user.email = "b@example.com"
+Cả hai write xảy ra cùng lúc khi network split
+```
+
+Khi network nối lại, giá trị nào thắng? Có mất update không? Có cần merge không?
+
+Primary/replica đơn giản hóa bài toán bằng cách nói: **mọi write đi qua một primary để có thứ tự rõ ràng**. Giá phải trả là primary có thể thành bottleneck hoặc single write region.
+
+---
+
+### 6. Leader/Follower và Primary/Replica khác gì nhau?
+
+Trong nhiều tài liệu, hai cặp này gần như tương đương, nhưng sắc thái khác nhau:
+
+| Thuật ngữ | Thường dùng ở đâu | Ý nghĩa chính |
+|---|---|---|
+| Primary/Replica | Database như PostgreSQL/MySQL/Redis | Primary nhận write, replica copy data |
+| Leader/Follower | Consensus/log systems như Kafka, Raft | Leader quyết định order log/partition, follower replicate |
+| Writer/Reader | Cloud managed DB như Aurora/RDS UI | Writer endpoint nhận write, reader endpoint phục vụ read |
+| Master/Slave | Thuật ngữ cũ | Nên tránh dùng trong tài liệu mới |
+
+Ví dụ Kafka không có một leader cho toàn cluster. Mỗi partition có leader riêng:
+
+```txt
+Topic: orders
+Partition 0 leader: broker-1
+Partition 1 leader: broker-2
+Partition 2 leader: broker-3
+```
+
+Vậy broker-1 có thể là leader của partition 0 nhưng là follower của partition 1. Đây là lý do cần hiểu context, không chỉ nhớ từ khóa.
+
+---
+
+### 7. Sharding là gì?
+
+**Sharding** là chia dữ liệu thành nhiều phần nhỏ gọi là shard, rồi phân tán các shard lên nhiều node.
+
+Mục tiêu chính:
+
+1. **Scale storage**: tổng data lớn hơn một node.
+2. **Scale write throughput**: writes phân tán vào nhiều shard.
+3. **Scale read throughput**: reads theo key phân tán vào nhiều shard.
+4. **Giảm blast radius**: một shard có thể gặp vấn đề mà không kéo toàn bộ data xuống, nếu thiết kế tốt.
+
+Ví dụ users table quá lớn, chia theo `user_id`:
+
+```txt
+Shard 1: user_id 0000 - 2499
+Shard 2: user_id 2500 - 4999
+Shard 3: user_id 5000 - 7499
+Shard 4: user_id 7500 - 9999
+```
+
+Hoặc dùng hash:
+
+```txt
+shard = hash(user_id) % 4
+```
+
+Hình dung:
+
+```txt
+                 ┌──────────────┐
+App ────────────▶│ Shard Router │
+                 └──────┬───────┘
+                        │
+        ┌───────────────┼───────────────┐
+        ▼               ▼               ▼
+   ┌─────────┐     ┌─────────┐     ┌─────────┐
+   │ Shard 1 │     │ Shard 2 │     │ Shard 3 │
+   │ users A │     │ users B │     │ users C │
+   └─────────┘     └─────────┘     └─────────┘
+```
+
+Khác replication, mỗi shard chứa **phần data khác nhau**.
+
+```txt
+Replication:
+Node A: users 1..1000
+Node B: users 1..1000
+Node C: users 1..1000
+
+Sharding:
+Node A: users 1..333
+Node B: users 334..666
+Node C: users 667..1000
+```
+
+---
+
+### 8. Partition và Shard có giống nhau không?
+
+Hai từ này hay bị dùng lẫn nhau.
+
+**Partition** thường nghĩa rộng hơn: một phần dữ liệu được chia ra theo rule nào đó.
+
+**Shard** thường là partition được phân tán độc lập để scale horizontal, thường nằm trên node khác nhau.
+
+Ví dụ trong PostgreSQL native partitioning:
+
+```txt
+orders_2026_01
+orders_2026_02
+orders_2026_03
+```
+
+Các partition này có thể vẫn nằm trên cùng một database instance. Đây là partitioning nhưng chưa chắc là sharding.
+
+Ví dụ trong distributed database:
+
+```txt
+Shard 1 trên node A
+Shard 2 trên node B
+Shard 3 trên node C
+```
+
+Đây là sharding.
+
+Một cách nhớ:
+
+```txt
+Partition = chia dữ liệu thành phần
+Shard = partition được dùng như đơn vị phân tán/scale độc lập
+```
+
+Nhưng trong nhiều sản phẩm, docs có thể gọi partition là shard hoặc ngược lại. Luôn đọc định nghĩa cụ thể của system.
+
+---
+
+### 9. Sharding key / Partition key là gì?
+
+**Sharding key** hoặc **partition key** là field dùng để quyết định record nằm ở shard nào.
+
+Ví dụ:
+
+```txt
+users table: shard by user_id
+orders table: shard by customer_id
+messages table: shard by conversation_id
+logs table: shard by tenant_id + time_bucket
+```
+
+Chọn sharding key là quyết định cực kỳ quan trọng vì nó ảnh hưởng:
+
+- Data distribution có đều không.
+- Query có đi thẳng tới một shard không.
+- Có hot shard không.
+- Transaction có nằm trong một shard không.
+- Rebalancing sau này có khó không.
+
+Ví dụ tốt:
+
+```txt
+Session store
+key = session_token
+Data phân bố đều, query luôn lookup theo token
+```
+
+Ví dụ nguy hiểm:
+
+```txt
+Order table shard by country
+90% traffic ở VN
+=> shard VN nóng, các shard khác rảnh
+```
+
+Ví dụ cần suy nghĩ kỹ:
+
+```txt
+Chat messages shard by conversation_id
+Conversation thường nhỏ -> ổn
+Nhưng group chat siêu lớn -> một conversation hot
+```
+
+Nếu chọn sai shard key, thêm node chưa chắc giúp vì traffic vẫn dồn vào một shard.
+
+---
+
+### 10. Hash sharding vs range sharding
+
+#### Hash sharding
+
+Dùng hash của key để phân phối data.
+
+```txt
+shard = hash(user_id) % number_of_shards
+```
+
+Ưu điểm:
+
+- Data phân bố tương đối đều.
+- Giảm hot shard nếu key cardinality cao và traffic không quá skew.
+- Dễ dùng cho point lookup.
+
+Nhược điểm:
+
+- Range query khó. Ví dụ tìm user_id từ 1000 đến 2000 có thể phải hỏi nhiều shard.
+- Khi đổi số shard, `hash % N` có thể làm nhiều key đổi shard nếu không dùng consistent hashing.
+
+#### Range sharding
+
+Chia theo khoảng giá trị.
+
+```txt
+Shard 1: created_at 2026-01
+Shard 2: created_at 2026-02
+Shard 3: created_at 2026-03
+```
+
+Ưu điểm:
+
+- Range query rất tự nhiên.
+- Dễ archive/drop partition cũ nếu theo thời gian.
+
+Nhược điểm:
+
+- Dễ hot shard nếu writes tập trung vào range mới nhất.
+- Cần split/merge range khi data lệch.
+
+Ví dụ log system shard theo ngày:
+
+```txt
+2026-07-09 nhận toàn bộ write hôm nay
+=> shard ngày hôm nay rất nóng
+```
+
+Để tránh hot shard, có thể dùng time bucket + hash bucket:
+
+```txt
+partition_key = date + hash(tenant_id) % 16
+```
+
+Magic number `16` không phải mặc định đúng. Nó cần dựa trên write QPS, throughput mỗi partition, số tenant, khả năng query fan-out và cost vận hành.
+
+---
+
+### 11. Consistent hashing là gì?
+
+Consistent hashing là kỹ thuật phân phối key lên các node sao cho khi thêm/bớt node, chỉ một phần nhỏ key phải di chuyển.
+
+Nếu dùng công thức đơn giản:
+
+```txt
+shard = hash(key) % N
+```
+
+Khi N đổi từ 4 lên 5, phần lớn key đổi shard vì phép `% N` đổi. Rebalancing rất nặng.
+
+Consistent hashing đặt node và key lên một vòng hash:
+
+```txt
+        [Node A]
+      /          \
+ key1            key2
+    /              \
+[Node D]          [Node B]
+    \              /
+ key4            key3
+      \          /
+        [Node C]
+```
+
+Key thuộc về node kế tiếp trên vòng. Khi thêm Node E, chỉ các key trong một đoạn gần Node E phải chuyển, không phải toàn bộ keyspace.
+
+Trong thực tế, hệ thống thường dùng virtual nodes để phân phối đều hơn:
+
+```txt
+Node A có nhiều vị trí ảo trên ring
+Node B có nhiều vị trí ảo trên ring
+Node C có nhiều vị trí ảo trên ring
+```
+
+Consistent hashing không làm mất bài toán hot key. Nếu một key nhận 50% traffic, nó vẫn nóng dù hashing đẹp.
+
+---
+
+### 12. Replication factor là gì?
+
+**Replication factor** là số bản copy của mỗi shard/partition.
+
+Ví dụ replication factor = 3:
+
+```txt
+Shard 1 có 3 bản:
+- Shard 1 primary trên Node A
+- Shard 1 replica trên Node B
+- Shard 1 replica trên Node C
+```
+
+Hình dung sharding + replication cùng lúc:
+
+```txt
+                Cluster
+
+        ┌──────────┐    ┌──────────┐    ┌──────────┐
+        │  Node A  │    │  Node B  │    │  Node C  │
+        │ S1 leader│    │ S1 repl  │    │ S1 repl  │
+        │ S2 repl  │    │ S2 leader│    │ S2 repl  │
+        │ S3 repl  │    │ S3 repl  │    │ S3 leader│
+        └──────────┘    └──────────┘    └──────────┘
+```
+
+Ở đây có 3 shard, mỗi shard có 3 replica. Mỗi node có thể là leader của một shard và replica của shard khác.
+
+Replication factor càng cao:
+
+- Availability tốt hơn.
+- Read capacity có thể tốt hơn.
+- Durability tốt hơn.
+- Storage cost cao hơn.
+- Write amplification cao hơn vì mỗi write phải copy nhiều bản hơn.
+- Replication lag/coordination phức tạp hơn.
+
+Không có con số luôn đúng. RF=3 phổ biến vì chịu được 1 node failure khá tốt trong nhiều hệ thống, nhưng multi-region hoặc dữ liệu critical có thể cần khác.
+
+---
+
+### 13. Quorum là gì?
+
+**Quorum** là số node tối thiểu phải đồng ý/ack để một operation được coi là thành công.
+
+Trong replicated system, quorum giúp cân bằng consistency và availability.
+
+Ví dụ replication factor = 3.
+
+```txt
+Write quorum W = 2
+Read quorum  R = 2
+```
+
+Write chỉ success khi ít nhất 2/3 replica ack. Read đọc từ ít nhất 2 replica. Vì R + W > RF, read quorum và write quorum sẽ giao nhau ở ít nhất một replica có data mới nhất theo mô hình lý tưởng.
+
+```txt
+RF = 3
+W = 2
+R = 2
+R + W = 4 > 3
+=> read và write quorum overlap
+```
+
+Nếu chọn:
+
+```txt
+W = 1
+R = 1
+```
+
+Latency thấp hơn, availability cao hơn, nhưng dễ đọc data cũ hơn.
+
+Nếu chọn:
+
+```txt
+W = 3
+R = 1
+```
+
+Write chậm và dễ fail hơn nếu một replica down, nhưng read nhanh.
+
+Nếu chọn:
+
+```txt
+W = 1
+R = 3
+```
+
+Write nhanh, read chậm hơn và phải chờ nhiều replica.
+
+Các database như Cassandra cho phép tune consistency level kiểu `ONE`, `QUORUM`, `ALL`. Nhưng quorum không phải magic. Network delay, clock, hinted handoff, read repair, conflict resolution, và implementation cụ thể vẫn rất quan trọng.
+
+---
+
+### 14. Failover là gì?
+
+**Failover** là quá trình chuyển traffic/responsibility từ node lỗi sang node còn sống.
+
+Ví dụ primary database chết:
+
+```txt
+Before:
+App writes -> Primary A
+              Replica B
+              Replica C
+
+Primary A chết
+
+After failover:
+App writes -> Primary B
+              Replica C
+```
+
+Failover gồm vài bước:
+
+1. Detect failure: health check/heartbeat timeout.
+2. Decide node mới: chọn replica phù hợp nhất.
+3. Promote replica thành primary.
+4. Redirect traffic: update endpoint/DNS/proxy/service discovery.
+5. Ensure old primary không nhận write nữa nếu nó sống lại.
+6. Rebuild replication cho node cũ hoặc thay node mới.
+
+Phần nguy hiểm nhất là **split-brain**.
+
+---
+
+### 15. Split-brain là gì?
+
+Split-brain xảy ra khi hệ thống có hơn một node cùng nghĩ mình là primary/leader.
+
+Ví dụ network bị chia:
+
+```txt
+          Network partition
+
+App A -> Primary A     X     Replica B <- App B
+        thinks leader        promoted leader
+```
+
+Nếu cả A và B đều nhận write, dữ liệu có thể diverge:
+
+```txt
+A nhận: balance = balance - 100
+B nhận: balance = balance - 100
+```
+
+Khi network nối lại, hệ thống không biết write nào đúng hoặc phải reconcile rất khó.
+
+Cách giảm split-brain:
+
+- Dùng consensus/quorum để chỉ majority side được elect leader.
+- Dùng fencing token để old leader không thể ghi vào shared resource.
+- Dùng lease có timeout cẩn thận, nhưng phải hiểu clock skew.
+- Không promote replica thủ công nếu chưa chắc primary cũ bị cô lập hoàn toàn.
+- Dùng managed service có failover protocol đáng tin cậy.
+
+Trong interview, nếu nói tới failover mà không nhắc split-brain thì câu trả lời thường còn thiếu production depth.
+
+---
+
+### 16. Rebalancing là gì?
+
+**Rebalancing** là di chuyển shard/partition giữa các node để cluster cân bằng lại.
+
+Khi nào cần rebalance?
+
+```txt
+- Thêm node mới để tăng capacity
+- Remove node cũ
+- Một node quá đầy disk
+- Một shard quá nóng
+- Cluster mất node và cần phục hồi replication factor
+```
+
+Ví dụ thêm Node D:
+
+```txt
+Before:
+Node A: Shard 1, Shard 2
+Node B: Shard 3, Shard 4
+Node C: Shard 5, Shard 6
+
+After:
+Node A: Shard 1, Shard 2
+Node B: Shard 3
+Node C: Shard 5
+Node D: Shard 4, Shard 6
+```
+
+Rebalancing không miễn phí:
+
+- Tốn network IO.
+- Tốn disk IO.
+- Có thể làm latency tăng.
+- Có thể ảnh hưởng replication lag.
+- Có thể gây hot spot nếu move quá nhanh.
+- Nếu fail giữa chừng, cần resume an toàn.
+
+Production runbook thường cần giới hạn tốc độ rebalance:
+
+```txt
+- Chỉ move N shard cùng lúc
+- Giới hạn network bandwidth
+- Không rebalance trong peak hours
+- Monitor p95/p99 latency, error rate, replication lag
+- Có rollback/pause plan
+```
+
+---
+
+### 17. Routing: app biết shard nào để query bằng cách nào?
+
+Khi data bị shard, request phải được route tới đúng shard.
+
+Có 3 cách phổ biến.
+
+#### 17.1 Application-side routing
+
+Application tự biết rule:
+
+```java
+int shardId = hash(userId) % shardCount;
+DataSource ds = dataSources.get(shardId);
+```
+
+Ưu điểm:
+
+- Đơn giản cho hệ nhỏ.
+- Ít hop network.
+
+Nhược điểm:
+
+- Logic sharding leak vào application.
+- Thay đổi shard count/rule khó.
+- Nhiều service phải cập nhật cùng lúc.
+
+#### 17.2 Proxy/router layer
+
+Application gửi query tới router, router quyết định shard.
+
+```txt
+App -> Shard Router -> Shard 1/2/3
+```
+
+Ưu điểm:
+
+- App đơn giản hơn.
+- Có thể đổi mapping ở router.
+- Centralized routing/metrics.
+
+Nhược điểm:
+
+- Router có thể thành bottleneck/SPOF nếu không HA.
+- Thêm network hop.
+- Router phức tạp.
+
+#### 17.3 Database-native routing
+
+Distributed database tự quản lý shard mapping.
+
+Ví dụ Redis Cluster client hiểu hash slot mapping. Cassandra/DynamoDB/Elasticsearch có routing nội bộ theo partition key.
+
+Ưu điểm:
+
+- Ít custom logic hơn.
+- Rebalancing/failover tích hợp.
+
+Nhược điểm:
+
+- Phải hiểu model của database.
+- Query bị giới hạn theo partition/routing rule.
+- Khi sai partition key, vẫn có thể chết performance.
+
+---
+
+### 18. Read replica và read-after-write problem
+
+Read replica rất phổ biến để scale read:
+
+```txt
+Writes -> Primary
+Reads  -> Replicas
+```
+
+Nhưng async replication tạo vấn đề:
+
+```txt
+T1: User update profile trên primary
+T2: App đọc profile từ replica ngay lập tức
+T3: Replica chưa nhận update
+=> User thấy profile cũ
+```
+
+Đây là read-after-write inconsistency.
+
+Cách xử lý:
+
+1. Sau write, đọc từ primary trong một khoảng thời gian ngắn.
+2. Dùng session stickiness: user vừa write thì route read của user đó tới primary.
+3. Kiểm tra replication lag và chỉ đọc replica đủ fresh.
+4. Dùng synchronous replication nếu latency/cost chấp nhận được.
+5. UI hiển thị optimistic state từ response write.
+6. Với flow critical, không đọc từ replica.
+
+Ví dụ:
+
+```txt
+Change password -> login check phải đọc primary/strong consistent path
+Update display name -> UI có thể optimistic update, eventual consistency ổn hơn
+```
+
+Không phải mọi read đều cần strong consistency. Nhưng flow nào cần thì phải thiết kế rõ.
+
+---
+
+### 19. Hot shard / hot partition là gì?
+
+Hot shard xảy ra khi một shard nhận quá nhiều traffic hoặc chứa quá nhiều data so với shard khác.
+
+Ví dụ shard theo `tenant_id`:
+
+```txt
+Tenant A: 70% traffic
+Tenant B: 10%
+Tenant C-Z: 20%
+```
+
+Nếu mỗi tenant nằm một shard, tenant A làm shard đó nóng.
+
+Ví dụ shard theo `date`:
+
+```txt
+Tất cả writes hôm nay -> shard 2026-07-09
+```
+
+Shard hôm nay nóng, shard cũ gần như idle.
+
+Triệu chứng:
+
+- p95/p99 latency tăng dù cluster tổng thể còn dư CPU.
+- Một node disk/network/CPU cao bất thường.
+- Throttle ở một partition key.
+- Queue/backpressure tập trung.
+
+Cách xử lý:
+
+- Chọn partition key có cardinality cao hơn.
+- Thêm hash bucket vào key.
+- Tách tenant lớn ra dedicated shard.
+- Dùng adaptive partitioning nếu database hỗ trợ.
+- Cache hot key nếu read-heavy.
+- Thay đổi write pattern hoặc batch.
+- Với counter, dùng sharded counter rồi aggregate.
+
+Ví dụ sharded counter:
+
+```txt
+like_count:post_123:bucket_0
+like_count:post_123:bucket_1
+...
+like_count:post_123:bucket_15
+```
+
+Write phân tán vào 16 bucket, read sum lại. Con số 16 phải dựa vào write QPS và read cost, không chọn bừa.
+
+---
+
+### 20. Single-leader, multi-leader, leaderless
+
+#### Single-leader
+
+Một leader/primary nhận write.
+
+```txt
+Writes -> Leader -> Followers
+Reads  -> Leader hoặc Followers
+```
+
+Ưu điểm:
+
+- Conflict ít hơn.
+- Ordering rõ hơn.
+- Dễ hiểu và vận hành hơn.
+
+Nhược điểm:
+
+- Leader là write bottleneck.
+- Cross-region write latency cao nếu leader ở xa.
+- Failover cần thời gian.
+
+Phù hợp:
+
+- Payment/order/accounting.
+- Hệ thống cần invariant mạnh.
+- Team muốn operational simplicity.
+
+#### Multi-leader
+
+Nhiều leader nhận write, thường ở nhiều region.
+
+```txt
+Region US leader <-> Region EU leader <-> Region APAC leader
+```
+
+Ưu điểm:
+
+- Local write latency thấp ở nhiều region.
+- Region có thể tiếp tục nhận write khi disconnected.
+
+Nhược điểm:
+
+- Conflict resolution phức tạp.
+- Dễ mất update nếu rule merge kém.
+- Không phù hợp mọi invariant.
+
+Phù hợp:
+
+- Collaborative app có merge logic rõ.
+- User profile field độc lập có last-write-wins chấp nhận được.
+- Workload cần multi-region write nhưng conflict ít.
+
+#### Leaderless
+
+Không có leader cố định; client/coordinator ghi/đọc tới nhiều replica theo quorum.
+
+```txt
+Client -> Replica A
+       -> Replica B
+       -> Replica C
+```
+
+Ưu điểm:
+
+- Không có single leader bottleneck.
+- Availability tốt khi một số replica fail.
+- Tunable consistency.
+
+Nhược điểm:
+
+- Conflict/versioning/read repair phức tạp.
+- Application phải hiểu eventual consistency hơn.
+- Debug khó hơn.
+
+Phù hợp:
+
+- Workload write-heavy phân tán.
+- Availability cao hơn strict consistency cho nhiều operation.
+- Các hệ kiểu Cassandra/Dynamo-style.
+
+---
+
+### 21. Consensus là gì và liên quan gì tới leader?
+
+Consensus là nhóm node đồng ý với nhau về một giá trị/trạng thái dù có node fail hoặc message delay. Các thuật toán phổ biến: Raft, Paxos, Zab.
+
+Dùng để trả lời các câu hỏi như:
+
+```txt
+- Ai là leader hiện tại?
+- Log entry này đã được commit chưa?
+- Cluster membership hiện tại là gì?
+- Failover có an toàn không?
+```
+
+Ví dụ Raft đơn giản:
+
+```txt
+1. Nodes bầu một leader
+2. Client gửi write tới leader
+3. Leader append log entry
+4. Leader gửi log entry tới followers
+5. Khi majority ack, entry được commit
+6. Followers apply entry theo cùng thứ tự
+```
+
+Điểm quan trọng là majority/quorum. Nếu cluster 3 node, cần 2 node để có majority. Nếu network split 1-2, phía 2 node có thể tiếp tục, phía 1 node không được tự làm leader.
+
+Đây là cách tránh split-brain.
+
+Vì sao thường dùng số node lẻ?
+
+```txt
+3 nodes chịu được 1 node failure, cần majority 2
+4 nodes cũng chỉ chịu được 1 node failure nếu cần majority 3
+5 nodes chịu được 2 node failure, cần majority 3
+```
+
+Thêm node chẵn không tăng fault tolerance tương ứng nhưng tăng coordination cost.
+
+---
+
+### 22. Cluster membership là gì?
+
+Cluster membership là danh sách node nào đang thuộc cluster và vai trò của chúng.
+
+Ví dụ:
+
+```txt
+Node A: alive, leader for shard 1
+Node B: alive, follower for shard 1
+Node C: suspect/down
+Node D: joining
+```
+
+Membership khó vì distributed system không thể phân biệt hoàn hảo giữa:
+
+```txt
+- Node chết thật
+- Network chậm
+- GC pause
+- CPU overloaded
+- Packet loss
+- Process sống nhưng disk treo
+```
+
+Health check timeout quá ngắn có thể failover nhầm. Timeout quá dài làm recovery chậm.
+
+Production thường cần:
+
+- Heartbeat.
+- Failure detector.
+- Graceful leave/join.
+- Quorum/consensus cho membership critical.
+- Alert khi node flapping.
+- Runbook cho node replacement.
+
+---
+
+### 23. Multi-region: replication khó hơn rất nhiều
+
+Trong một region, latency giữa nodes có thể vài ms. Cross-region latency có thể hàng chục tới hàng trăm ms.
+
+Ví dụ:
+
+```txt
+Singapore <-> Tokyo: ~70ms tùy network
+Singapore <-> US East: có thể >200ms RTT
+```
+
+Nếu synchronous write phải chờ US East ack, user ở Singapore sẽ thấy write chậm rõ rệt. Vì vậy multi-region thường phải chọn trade-off:
+
+#### Active-passive
+
+Một region chính nhận write, region phụ standby.
+
+```txt
+Active SG -> replicate -> Passive US
+```
+
+Ưu điểm:
+
+- Đơn giản hơn.
+- Conflict ít.
+- Dễ giữ consistency hơn.
+
+Nhược điểm:
+
+- User xa active region latency cao.
+- Failover region có RTO/RPO.
+
+#### Active-active
+
+Nhiều region cùng nhận traffic/write.
+
+```txt
+SG accepts write
+US accepts write
+EU accepts write
+```
+
+Ưu điểm:
+
+- Latency local tốt.
+- Region failure ít ảnh hưởng availability.
+
+Nhược điểm:
+
+- Conflict resolution khó.
+- Consistency trade-off rõ hơn.
+- Operational complexity cao.
+
+Với system tiền/order/inventory, active-active write không thể chọn dễ dàng. Với feed/like/profile preference, có thể khả thi hơn.
+
+---
+
+### 24. Ví dụ thực tế: PostgreSQL primary + read replicas
+
+Một setup phổ biến:
+
+```txt
+                ┌───────────────┐
+Writes ────────▶│ PostgreSQL    │
+                │ Primary       │
+                └───────┬───────┘
+                        │ WAL streaming
+        ┌───────────────┼───────────────┐
+        ▼               ▼               ▼
+ ┌─────────────┐  ┌─────────────┐  ┌─────────────┐
+ │ Replica 1   │  │ Replica 2   │  │ Replica 3   │
+ │ reporting   │  │ API reads   │  │ standby     │
+ └─────────────┘  └─────────────┘  └─────────────┘
+```
+
+Use cases:
+
+- Primary phục vụ write và critical reads.
+- Replica phục vụ read-heavy endpoints.
+- Một replica dành cho reporting để không ảnh hưởng API.
+- Standby có thể promote khi primary fail.
+
+Risks:
+
+- Replication lag làm read stale.
+- Long-running query trên replica có thể gây lag.
+- Failover làm connection reset.
+- Old primary quay lại có thể gây split-brain nếu không fencing.
+- Application phải reconnect theo writer endpoint mới.
+
+Runbook cơ bản khi primary lỗi:
+
+```txt
+1. Confirm primary thật sự down, không chỉ network từ app.
+2. Check replica lag; chọn replica ít lag nhất.
+3. Promote replica.
+4. Redirect writer endpoint.
+5. Restart/reconnect application pool nếu cần.
+6. Prevent old primary from accepting writes.
+7. Rebuild old primary as replica.
+8. Verify data consistency and replication health.
+```
+
+---
+
+### 25. Ví dụ thực tế: Redis Cluster
+
+Redis Cluster chia keyspace thành hash slots.
+
+```txt
+Total hash slots: 16384
+Each key maps to one slot
+Each slot belongs to a primary node
+Replica nodes copy primary nodes
+```
+
+Hình dung:
+
+```txt
+Node A primary: slots 0-5460
+Node B primary: slots 5461-10922
+Node C primary: slots 10923-16383
+
+Node A' replica of A
+Node B' replica of B
+Node C' replica of C
+```
+
+Khi client query key:
+
+```txt
+key -> hash slot -> node owning slot
+```
+
+Nếu client gửi nhầm node, Redis trả redirect để client cập nhật slot mapping.
+
+Redis Cluster cho ta cả sharding và replication:
+
+- Sharding: keyspace chia thành slots trên nhiều primary.
+- Replication: mỗi primary có replica để failover.
+
+Nhưng có trade-off:
+
+- Multi-key operation chỉ dễ nếu keys cùng hash slot.
+- Hot key vẫn nóng dù cluster có nhiều node.
+- Failover có thể mất một ít write nếu replication async.
+- Client library phải hỗ trợ cluster mode đúng.
+
+---
+
+### 26. Ví dụ thực tế: Kafka cluster
+
+Kafka có cluster gồm nhiều brokers. Topic được chia thành partitions. Mỗi partition có leader và followers.
+
+```txt
+Topic: orders, partitions = 3, replication factor = 3
+
+Partition 0: leader broker-1, followers broker-2, broker-3
+Partition 1: leader broker-2, followers broker-1, broker-3
+Partition 2: leader broker-3, followers broker-1, broker-2
+```
+
+Producer gửi message vào partition. Consumer group chia partitions cho consumers.
+
+```txt
+Producer -> Partition leader -> followers replicate
+Consumer -> reads from partition leader
+```
+
+Key points:
+
+- Partition là đơn vị parallelism và ordering.
+- Ordering chỉ guaranteed trong một partition, không phải toàn topic.
+- Key quyết định partition nếu producer dùng key.
+- Replication factor giúp broker fail không mất availability.
+- `acks=all` yêu cầu leader chờ in-sync replicas theo config, tăng durability nhưng tăng latency.
+
+Nếu topic orders partition theo `customer_id`, tất cả order của một customer vào cùng partition, giữ ordering theo customer. Nhưng nếu một customer cực lớn, partition đó hot.
+
+---
+
+### 27. Ví dụ thực tế: Cassandra/Dynamo-style
+
+Cassandra-style system thường:
+
+- Dùng consistent hashing/ring để phân phối partitions.
+- Có replication factor.
+- Cho phép tunable consistency.
+- Không có một primary duy nhất cho toàn cluster.
+
+Ví dụ:
+
+```txt
+RF = 3
+Write CL = QUORUM
+Read CL = QUORUM
+```
+
+Write/read đi tới nhiều replicas. Nếu một replica down, hệ thống có thể dùng hinted handoff/read repair để đồng bộ sau.
+
+Ưu điểm:
+
+- Write throughput cao.
+- Availability tốt.
+- Scale ngang tốt nếu partition key chuẩn.
+
+Nhược điểm:
+
+- Query phải thiết kế theo partition key.
+- Eventual consistency và repair cần hiểu kỹ.
+- Data modeling khác SQL nhiều.
+- Hot partition vẫn là vấn đề lớn.
+
+---
+
+### 28. Giống và khác nhau: bảng tổng hợp
+
+| Thuật ngữ | Trả lời câu hỏi gì? | Mục tiêu chính | Ví dụ |
+|---|---|---|---|
+| Cluster | Những node nào tạo thành hệ thống? | Vận hành nhiều node như một hệ | Redis Cluster, Kafka cluster |
+| Node | Đơn vị chạy trong cluster là gì? | Compute/storage participant | EC2, broker, DB instance |
+| Partition | Data được chia thành phần nào? | Tổ chức data | orders_2026_07 |
+| Shard | Data được phân tán ra sao? | Scale storage/throughput | users shard 1/2/3 |
+| Sharding key | Dựa vào gì để chọn shard? | Routing và distribution | user_id, tenant_id |
+| Replication | Data được copy ra sao? | HA/read/durability | primary + 2 replicas |
+| Replica | Bản copy của data nào? | Backup/read/failover | read replica |
+| Primary/Leader | Ai nhận write/điều phối? | Ordering/authority | PostgreSQL primary |
+| Follower | Ai copy leader? | Redundancy | Kafka follower |
+| Quorum | Bao nhiêu node phải đồng ý? | Consistency/availability trade-off | 2/3 ACK |
+| Failover | Khi node chết thì chuyển thế nào? | Availability | promote replica |
+| Rebalancing | Chia lại data khi cluster đổi? | Cân bằng capacity | move shard sang node mới |
+| Split-brain | Nhiều leader cùng tồn tại? | Failure mode nguy hiểm | two primaries accept writes |
+
+---
+
+### 29. Một mental model dễ nhớ
+
+Hãy tưởng tượng một thư viện lớn.
+
+#### Cluster
+
+Toàn bộ hệ thống thư viện gồm nhiều chi nhánh.
+
+```txt
+Library system = Cluster
+Branch A/B/C = Nodes
+```
+
+#### Sharding
+
+Mỗi chi nhánh giữ một nhóm sách khác nhau.
+
+```txt
+Branch A: sách A-H
+Branch B: sách I-P
+Branch C: sách Q-Z
+```
+
+Nếu muốn sách bắt đầu bằng `M`, tới Branch B. Đây là sharding.
+
+#### Replication
+
+Một cuốn sách quan trọng có nhiều bản copy ở nhiều chi nhánh.
+
+```txt
+Book X có copy ở Branch A, B, C
+```
+
+Nếu Branch A cháy, vẫn còn Branch B/C. Đây là replication.
+
+#### Primary/Replica
+
+Một chi nhánh là nơi ghi bản chính của catalog; chi nhánh khác copy theo.
+
+```txt
+Branch A cập nhật catalog
+Branch B/C nhận bản copy
+```
+
+#### Failover
+
+Branch A đóng cửa, Branch B được chọn làm chi nhánh chính tạm thời.
+
+#### Split-brain
+
+Branch A và B đều nghĩ mình là chi nhánh chính, cả hai cùng sửa catalog khác nhau. Sau đó merge rất đau.
+
+Mental model này không hoàn hảo nhưng giúp nhớ nhanh: **sharding là chia sách khác nhau; replication là copy cùng sách**.
+
+---
+
+### 30. Cách trả lời trong system design interview
+
+Khi interviewer hỏi về các thuật ngữ này, đừng chỉ định nghĩa. Hãy nối chúng với trade-off.
+
+Một flow trả lời tốt:
+
+```txt
+1. Cluster là tập node chạy cùng hệ thống.
+2. Nếu muốn scale storage/write, tôi dùng sharding.
+3. Nếu muốn HA/read scale, tôi dùng replication.
+4. Trong mỗi shard thường có primary/replica.
+5. Primary nhận write, replica copy và có thể serve read.
+6. Khi primary fail, cần failover nhưng phải tránh split-brain.
+7. Shard key quyết định data distribution; chọn sai gây hot shard.
+8. Consistency phụ thuộc sync/async replication, quorum và read path.
+```
+
+Ví dụ answer ngắn:
+
+> Cluster là nhóm node cùng chạy một hệ thống. Sharding là chia data ra nhiều shard để scale storage/throughput; replication là copy cùng data ra nhiều node để tăng availability/read throughput. Trong một thiết kế production, mỗi shard thường có primary và replicas. Primary nhận write, replicas copy data và có thể phục vụ read. Nếu primary chết, cluster failover bằng cách promote replica, nhưng phải dùng quorum/consensus/fencing để tránh split-brain. Điểm quan trọng nhất là sharding key và replication mode quyết định latency, consistency và failure mode.
+
+---
+
+### 31. Khi nào dùng cái nào?
+
+#### Chỉ cần replication
+
+Dùng khi một node chứa được data nhưng cần HA/read scale.
+
+```txt
+PostgreSQL primary + 2 read replicas
+```
+
+Phù hợp:
+
+- Data size vừa.
+- Write chưa quá lớn.
+- Read-heavy.
+- Cần failover.
+
+#### Cần sharding
+
+Dùng khi một node không chứa/xử lý nổi data/traffic.
+
+```txt
+users shard by user_id
+orders shard by merchant_id
+messages shard by conversation_id
+```
+
+Phù hợp:
+
+- Data rất lớn.
+- Write throughput cao.
+- Tenant/key distribution có thể phân tán.
+- Query chủ yếu đi theo shard key.
+
+#### Cần cả sharding + replication
+
+Đây là production phổ biến ở scale lớn.
+
+```txt
+Shard 1: primary + replicas
+Shard 2: primary + replicas
+Shard 3: primary + replicas
+```
+
+Phù hợp:
+
+- Cần scale và HA.
+- Chấp nhận operational complexity.
+- Có runbook rebalancing/failover.
+
+#### Không nên dùng distributed setup quá sớm
+
+Nếu hệ thống mới có 100 QPS và vài GB data, sharding thủ công có thể là overengineering. SQL instance tốt + index + backup + read replica có thể đủ rất lâu.
+
+Distributed system không miễn phí. Nó đổi bottleneck phần cứng lấy complexity phần mềm/vận hành.
+
+---
+
+### 32. Những câu hỏi nên tự hỏi trước khi thiết kế cluster/shard/replica
+
+```txt
+Data size hiện tại và 12 tháng tới là bao nhiêu?
+Read QPS/write QPS peak là bao nhiêu?
+Access pattern chính là gì?
+Query có luôn có partition key không?
+Có hot tenant/hot user/hot key không?
+Write có cần transaction cross-shard không?
+Read có chấp nhận stale không?
+RPO/RTO khi failover là bao nhiêu?
+Multi-region có cần active-active không?
+Team có vận hành được database/cluster này không?
+Có backup/restore/rebuild test chưa?
+```
+
+Trong đó:
+
+- **RPO**: mất tối đa bao nhiêu dữ liệu khi sự cố. Ví dụ RPO 0 nghĩa là không chấp nhận mất committed write.
+- **RTO**: mất bao lâu để khôi phục service. Ví dụ RTO 5 phút nghĩa là failover/recovery phải xong trong 5 phút.
+
+Nếu không biết RPO/RTO, rất khó chọn sync hay async replication, single-region hay multi-region, manual hay automatic failover.
+
+---
+
+### 33. Production checklist
+
+Khi vận hành distributed system, tôi muốn có ít nhất:
+
+```txt
+Monitoring:
+- node health
+- leader/primary status
+- replication lag
+- shard size
+- shard QPS
+- hot partition metric
+- p95/p99 latency
+- error rate/timeouts
+- disk usage
+- network IO
+- rebalance progress
+
+Alerting:
+- primary down
+- replica lag vượt ngưỡng
+- quorum unavailable
+- node flapping
+- disk > 80/90%
+- hot shard sustained
+- failover happened
+
+Runbook:
+- promote replica
+- remove bad node
+- add node
+- pause/resume rebalance
+- rebuild replica
+- restore from backup
+- verify data consistency
+- rollback after failed failover
+
+Testing:
+- backup restore drill
+- failover drill
+- chaos test node kill
+- network partition simulation nếu hệ thống critical
+- load test hot key/hot shard
+```
+
+Không có monitoring/runbook thì cluster chỉ là nhiều máy hơn để debug khó hơn.
+
+---
+
+### 34. Tóm tắt bằng một sơ đồ
+
+```txt
+                         Distributed Database Cluster
+
+                 ┌──────────────────────────────────────┐
+                 │              Cluster                 │
+                 │                                      │
+                 │  ┌────────────┐  ┌────────────┐      │
+                 │  │   Node A   │  │   Node B   │      │
+                 │  │            │  │            │      │
+                 │  │ Shard 1 P  │  │ Shard 1 R  │      │
+                 │  │ Shard 2 R  │  │ Shard 2 P  │      │
+                 │  └────────────┘  └────────────┘      │
+                 │                                      │
+                 │  ┌────────────┐  ┌────────────┐      │
+                 │  │   Node C   │  │   Node D   │      │
+                 │  │            │  │            │      │
+                 │  │ Shard 1 R  │  │ Shard 3 P  │      │
+                 │  │ Shard 3 R  │  │ Shard 2 R  │      │
+                 │  └────────────┘  └────────────┘      │
+                 └──────────────────────────────────────┘
+
+Legend:
+P = Primary/Leader for that shard
+R = Replica/Follower for that shard
+
+Sharding: Shard 1/2/3 chứa các phần data khác nhau
+Replication: mỗi shard có nhiều bản P/R trên nhiều node
+Failover: nếu P chết, một R được promote thành P
+Rebalancing: move shard giữa node khi thêm/bớt/cân bằng capacity
+```
+
+Nếu nhớ được sơ đồ này, bạn sẽ ít nhầm các thuật ngữ hơn.
+
+---
+
+## Bẫy thường gặp
+
+❌ **"Cluster nghĩa là đã high availability."**
+→ Tại sao sai: Cluster chỉ là nhiều node. Nếu metadata, load balancer, primary hoặc storage vẫn là single point of failure thì cluster vẫn có thể chết toàn bộ.
+✅ Đúng hơn: Cluster cần replication, failover, quorum/service discovery, monitoring và runbook thì mới đạt HA theo nghĩa thực tế.
+
+---
+
+❌ **"Sharding và replication là một."**
+→ Tại sao sai: Sharding chia data khác nhau ra nhiều node; replication copy cùng data ra nhiều node. Một cái scale capacity, một cái tăng redundancy/read availability.
+✅ Đúng hơn: Production scale lớn thường dùng cả hai: nhiều shard, mỗi shard có nhiều replica.
+
+---
+
+❌ **"Thêm replica sẽ tăng write throughput."**
+→ Tại sao sai: Replica thường tăng read throughput và availability, nhưng write vẫn phải đi qua primary hoặc phải replicate tới nhiều bản. Thêm replica có thể còn tăng write amplification.
+✅ Đúng hơn: Muốn tăng write throughput thường cần sharding/partitioning hoặc đổi write path, không chỉ thêm read replica.
+
+---
+
+❌ **"Sharding chỉ cần hash user_id là xong."**
+→ Tại sao sai: Hash key có thể phân phối data đều nhưng không đảm bảo traffic đều. Hot user/tenant vẫn làm shard nóng. Ngoài ra query không có shard key sẽ phải fan-out.
+✅ Đúng hơn: Chọn shard key phải dựa trên access pattern, cardinality, traffic distribution, transaction boundary và khả năng rebalance.
+
+---
+
+❌ **"Replica luôn có data mới nhất."**
+→ Tại sao sai: Với async replication, replica có lag. Đọc từ replica ngay sau write có thể thấy dữ liệu cũ.
+✅ Đúng hơn: Flow cần read-after-write consistency nên đọc primary/strong path hoặc có cơ chế đảm bảo freshness.
+
+---
+
+❌ **"Failover chỉ là đổi DNS sang replica."**
+→ Tại sao sai: Failover còn cần chọn replica không lag quá nhiều, promote an toàn, chặn old primary, reconnect clients, rebuild replication và verify data.
+✅ Đúng hơn: Failover là một runbook có detection, promotion, fencing, traffic switch, validation và rollback.
+
+---
+
+❌ **"Multi-region active-active luôn tốt nhất."**
+→ Tại sao sai: Active-active write giảm latency nhưng tạo conflict resolution và consistency problem rất khó, đặc biệt với money/inventory/order.
+✅ Đúng hơn: Chọn active-passive, active-active hay single-region theo RPO/RTO, latency, data invariants và conflict tolerance.
+
+---
+
+❌ **"Quorum đảm bảo mọi thứ strong consistent tuyệt đối."**
+→ Tại sao sai: Quorum là một kỹ thuật/setting, còn consistency thực tế phụ thuộc implementation, failure model, clock, repair, read path và conflict resolution.
+✅ Đúng hơn: Quorum giúp tạo overlap giữa read/write replicas, nhưng vẫn phải hiểu semantics của database cụ thể.
+
+---
+
+❌ **"Distributed system giúp đơn giản hơn vì có nhiều máy."**
+→ Tại sao sai: Nhiều máy làm tăng failure modes: partial failure, network partition, lag, split-brain, rebalancing, inconsistent reads.
+✅ Đúng hơn: Chỉ phân tán khi có lý do rõ ràng về scale/availability/latency; nếu không, một hệ đơn giản được vận hành tốt thường đáng tin hơn.
+
+---
+
+## Câu hỏi follow-up
+
+### 1. Sharding khác replication như thế nào?
+
+Sharding là chia dữ liệu thành nhiều phần khác nhau để mỗi node chịu một phần data/traffic. Replication là copy cùng một dữ liệu ra nhiều node để tăng availability, durability hoặc read throughput. Nếu có 3 node và node nào cũng có toàn bộ user table, đó là replication. Nếu node A giữ user 1-100, node B giữ user 101-200, node C giữ user 201-300, đó là sharding. Hệ lớn thường kết hợp cả hai: mỗi shard có nhiều replica.
+
+### 2. Khi nào cần sharding database?
+
+Tôi chỉ sharding khi một database instance không còn đáp ứng được storage/write/read workload sau khi đã tối ưu hợp lý: index, query, partition table, read replica, cache, archive. Sharding làm tăng complexity rất lớn, đặc biệt là transaction cross-shard, query fan-out, migration và rebalancing. Nếu access pattern chủ yếu theo một key rõ ràng và data/traffic có thể phân tán đều theo key đó, sharding phù hợp hơn. Nếu query linh hoạt nhiều chiều, sharding sớm có thể làm hệ thống khó phát triển.
+
+### 3. Read replica có thể gây bug gì?
+
+Bug phổ biến nhất là stale read. User vừa update data trên primary, request tiếp theo đọc từ replica chưa kịp replicate nên thấy data cũ. Với flow như đổi password, payment status, inventory, stale read có thể thành lỗi nghiêm trọng. Cách xử lý là đọc primary cho critical read, dùng sticky read sau write, kiểm tra replication lag hoặc thiết kế UI optimistic cho flow chấp nhận eventual consistency.
+
+### 4. Failover tự động có rủi ro gì?
+
+Failover tự động giúp giảm downtime nhưng có rủi ro promote nhầm nếu failure detector hiểu nhầm network delay là node chết. Rủi ro lớn nhất là split-brain, khi old primary và new primary cùng nhận write. Để giảm rủi ro cần quorum/consensus, fencing token, health check hợp lý và runbook rõ. Sau failover cũng phải kiểm tra data loss, replication status và application reconnect.
+
+### 5. Hot partition là gì và xử lý ra sao?
+
+Hot partition là một shard/partition nhận traffic hoặc data quá nhiều so với phần còn lại. Nguyên nhân thường là partition key skew, tenant lớn, celebrity user, key theo thời gian hiện tại hoặc một hot item. Cách xử lý tùy case: đổi partition key, thêm hash bucket, tách tenant lớn, cache hot read, dùng sharded counter, hoặc thiết kế read model riêng. Quan trọng là phải monitor QPS/latency theo shard chứ không chỉ nhìn average toàn cluster.
+
+### 6. Primary/replica khác leader/follower không?
+
+Về ý tưởng, chúng rất gần nhau: một node chính nhận write/điều phối, các node khác copy theo. Primary/replica thường dùng trong database, leader/follower thường dùng trong hệ thống log/consensus như Kafka/Raft. Một cluster có thể không có một leader toàn cục; ví dụ Kafka mỗi partition có leader riêng. Vì vậy luôn phải hỏi leader của cái gì: leader của cluster, shard, partition hay topic partition.
+
+### 7. Vì sao distributed systems hay dùng quorum?
+
+Quorum giúp hệ thống vẫn hoạt động khi một số node fail nhưng vẫn giữ mức consistency nhất định. Ví dụ replication factor 3, write cần 2 ACK và read đọc 2 replica thì read/write set có overlap. Điều này giảm khả năng đọc data cũ so với read/write chỉ 1 node. Nhưng quorum cũng tăng latency và có thể giảm availability nếu không đủ node phản hồi.
+
+### 8. Nếu network partition xảy ra thì hệ thống nên làm gì?
+
+Không có câu trả lời chung. Với payment, balance, inventory critical, thường nên ưu tiên consistency: nếu không có quorum thì reject/timeout thay vì nhận write có thể sai. Với like counter, feed, analytics event, có thể ưu tiên availability: nhận write tạm và reconcile sau. Quyết định phụ thuộc business invariant, RPO/RTO và khả năng merge conflict. Đây chính là lý do CAP theorem quan trọng nhưng phải áp vào từng flow cụ thể.
+
+---
+
+## Xem thêm
+
+- [Page 60ms ở Singapore nhưng 6s ở Mỹ — xử lý như thế nào?](/system-design/02-geo-latency-60ms-vs-6s)
+- [Scale từ 1,000 lên 50,000 users](/system-design/03-scale-1k-to-50k-users)
+- [SQL vs NoSQL: chọn database như thế nào?](/database/01-sql-vs-nosql)
