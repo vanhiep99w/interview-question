@@ -1,4 +1,4 @@
 {
   "title": "Database",
-  "pages": ["01-fuzzy-search-encrypted-column"]
+  "pages": ["01-sql-vs-nosql", "02-fuzzy-search-encrypted-column"]
 }

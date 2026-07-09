@@ -1,0 +1,1327 @@
+---
+title: "SQL vs NoSQL: chọn database như thế nào?"
+description: "Đi sâu vào bản chất data model, consistency, transaction, scale, query pattern và trade-off khi chọn SQL hoặc NoSQL."
+---
+
+# SQL vs NoSQL: chọn database như thế nào?
+
+## Câu hỏi
+
+> SQL và NoSQL khác nhau như thế nào? Khi nào nên dùng SQL, khi nào nên dùng NoSQL?
+
+---
+
+## Dành cho level
+
+**Mid / Senior / Staff** — Mid cần phân biệt được relational vs non-relational và vài use case phổ biến. Senior cần giải thích bằng data model, transaction boundary, query pattern, consistency và operational trade-off. Staff cần nhìn ở cấp hệ thống: ownership của dữ liệu, evolution theo thời gian, blast radius, migration path, observability, cost và khả năng vận hành bởi team.
+
+---
+
+## Cốt lõi cần nhớ
+
+- Đừng chọn database bằng slogan kiểu "SQL thì consistent, NoSQL thì scalable". Câu hỏi đúng là: **dữ liệu có shape gì, access pattern ra sao, transaction boundary nằm ở đâu, hệ thống cần consistency mức nào, và team vận hành được gì**.
+- **SQL tối ưu cho quan hệ, ràng buộc, transaction nhiều bảng, ad-hoc query và data correctness**. **NoSQL tối ưu khi access pattern rõ, scale/latency/availability là ưu tiên, schema thay đổi nhanh hoặc data model không hợp với bảng quan hệ**.
+- Phần khó nhất không phải syntax. Phần khó là hiểu cái gì database đảm bảo cho mình, cái gì application phải tự đảm bảo, và cái giá phải trả khi dữ liệu lớn dần hoặc requirement đổi.
+
+---
+
+## Câu trả lời mẫu
+
+> Tôi thường không bắt đầu bằng câu "SQL tốt hơn" hay "NoSQL scale tốt hơn", mà bắt đầu từ cách hệ thống sẽ đọc/ghi dữ liệu trong production. Nếu dữ liệu có quan hệ chặt, cần foreign key, cần transaction qua nhiều entity như order, payment, inventory, ledger, thì tôi ưu tiên SQL như PostgreSQL/MySQL vì database giúp mình giữ correctness bằng constraint, isolation và query linh hoạt. Ngược lại, nếu access pattern rất rõ, dữ liệu tự nhiên gom theo aggregate, cần latency thấp ở scale lớn, hoặc cần write/read phân tán theo key như session, event, feed, catalog denormalized, thì NoSQL như DynamoDB, Cassandra, MongoDB hoặc Redis có thể phù hợp hơn.
+>
+> Điểm tôi cẩn thận nhất là NoSQL thường đẩy một phần trách nhiệm từ database sang application: denormalization, duplicate data, consistency repair, idempotency, backfill, và migration. Vì vậy trong dự án thật, tôi sẽ viết ra query pattern, peak QPS, kích thước record, growth rate, consistency requirement, failure mode, rồi mới chọn. Với hệ thống business core, tôi thường bắt đầu bằng SQL cho tới khi có bottleneck rõ ràng; còn với workload cực lớn hoặc pattern ổn định, tôi thiết kế NoSQL từ đầu quanh partition key và access pattern. Cách chọn tốt nhất là chọn cái làm cho invariant quan trọng nhất của hệ thống khó bị phá vỡ nhất.
+
+---
+
+## Phân tích chi tiết
+
+### 1. Cách nghĩ đúng: database là nơi đặt trade-off, không chỉ là nơi lưu data
+
+Trong interview, câu hỏi SQL vs NoSQL thường không nhằm kiểm tra bạn nhớ định nghĩa. Interviewer muốn biết bạn có hiểu **database đang bảo vệ điều gì cho hệ thống** hay không.
+
+Một hệ thống production luôn có vài câu hỏi nền tảng:
+
+```txt
+Dữ liệu có quan hệ chặt không?
+Có cần transaction qua nhiều object không?
+Có cần query linh hoạt không, hay chỉ vài access pattern cố định?
+Read/write scale lớn tới mức nào?
+Nếu một request đọc dữ liệu cũ 1-2 giây thì có chấp nhận được không?
+Khi schema đổi, dữ liệu cũ migrate thế nào?
+Khi một node/region chết, hệ thống ưu tiên đúng tuyệt đối hay vẫn phục vụ được?
+Team có đủ kinh nghiệm vận hành database đó không?
+```
+
+SQL và NoSQL khác nhau vì chúng trả lời các câu hỏi này theo cách khác nhau.
+
+**SQL** thường nói: "Hãy mô hình hóa dữ liệu bằng bảng, quan hệ, constraint và transaction. Tôi sẽ giúp bạn giữ tính đúng đắn và cho phép query linh hoạt."
+
+**NoSQL** thường nói: "Hãy mô hình hóa dữ liệu theo cách bạn sẽ truy cập nó. Tôi sẽ giúp bạn scale/latency/availability tốt hơn cho pattern cụ thể, nhưng bạn phải chấp nhận ít ràng buộc chung hơn hoặc tự quản lý nhiều thứ hơn."
+
+Đây là bản chất quan trọng nhất.
+
+---
+
+### 2. SQL là gì ở tầng bản chất?
+
+SQL database như PostgreSQL, MySQL, SQL Server, Oracle được xây quanh **relational model**.
+
+Relational model không chỉ có nghĩa là "dữ liệu nằm trong bảng". Ý nghĩa sâu hơn là:
+
+- Dữ liệu được biểu diễn thành **relations**: bảng có row và column.
+- Các entity liên kết với nhau bằng key: primary key, foreign key.
+- Database có thể enforce invariant bằng constraint: `NOT NULL`, `UNIQUE`, `CHECK`, `FOREIGN KEY`.
+- Query engine có thể dùng SQL để join/filter/group/sort theo nhiều chiều.
+- Transaction engine cố gắng đảm bảo ACID ở mức database hỗ trợ.
+
+Ví dụ hệ thống order:
+
+```txt
+customers
+  id
+  email
+
+orders
+  id
+  customer_id
+  status
+  total_amount
+
+order_items
+  id
+  order_id
+  product_id
+  quantity
+  price
+
+payments
+  id
+  order_id
+  status
+  amount
+```
+
+Ở đây dữ liệu có quan hệ tự nhiên. Một order thuộc customer. Một order có nhiều item. Payment gắn với order. Nếu payment thành công nhưng order không được update, hệ thống sai. Nếu item trỏ tới order không tồn tại, dữ liệu bẩn.
+
+SQL database rất mạnh trong kiểu bài toán này vì ta có thể nói:
+
+```sql
+ALTER TABLE orders
+ADD CONSTRAINT fk_orders_customer
+FOREIGN KEY (customer_id) REFERENCES customers(id);
+
+ALTER TABLE payments
+ADD CONSTRAINT fk_payments_order
+FOREIGN KEY (order_id) REFERENCES orders(id);
+```
+
+Điểm quan trọng: **constraint làm lỗi xuất hiện sớm**. Nếu application bug và ghi `payment.order_id` không tồn tại, database reject ngay. Không phải đợi vài ngày sau dashboard lệch số rồi mới phát hiện.
+
+---
+
+### 3. NoSQL là gì ở tầng bản chất?
+
+NoSQL không phải là một database cụ thể. Nó là một nhóm database không đặt relational model và SQL truyền thống làm trung tâm.
+
+Các loại phổ biến:
+
+| Loại NoSQL | Ví dụ | Data model chính | Hợp với |
+|---|---|---|---|
+| Key-value | Redis, DynamoDB dạng đơn giản | key → value | session, cache, token, feature flag |
+| Document | MongoDB, Couchbase | document JSON/BSON | profile, catalog, CMS, dữ liệu semi-structured |
+| Wide-column | Cassandra, HBase, DynamoDB | partition key + sort/range | time-series, event, high write scale |
+| Graph | Neo4j, Amazon Neptune | node + edge | relationship traversal, fraud, recommendation |
+| Search engine | Elasticsearch/OpenSearch | inverted index | full-text search, log search, filtering phức tạp |
+
+NoSQL có điểm chung là thường yêu cầu bạn nghĩ theo **access pattern** trước.
+
+Ví dụ với DynamoDB/Cassandra, câu hỏi đầu tiên không phải "bảng gồm những cột nào?" mà là:
+
+```txt
+Màn hình/API nào cần đọc dữ liệu?
+Đọc theo key nào?
+Có sort/range theo thời gian không?
+Một partition có thể nóng không?
+Có cần query ngược lại không?
+Nếu cần query thứ hai thì tạo index hay duplicate dữ liệu?
+```
+
+Ví dụ lưu activity feed:
+
+```txt
+Access pattern chính:
+- Lấy 50 activity mới nhất của user X
+- Ghi activity mới với timestamp
+
+NoSQL design:
+partition_key = user_id
+sort_key      = created_at DESC
+value         = activity payload
+```
+
+Query rất nhanh vì database đi thẳng tới partition của `user_id`, scan một range nhỏ theo `created_at`, rồi trả về 50 item.
+
+Nhưng nếu ngày mai product hỏi: "Cho tôi tất cả activity thuộc type = PAYMENT_FAILED trong 30 ngày qua, group theo country", thiết kế này có thể không trả lời tốt. Bạn cần secondary index, data pipeline, Elasticsearch, warehouse, hoặc model khác.
+
+Đó là trade-off: **NoSQL thường rất mạnh với query đã biết trước, nhưng kém linh hoạt hơn khi query thay đổi ngoài thiết kế ban đầu**.
+
+---
+
+### 4. So sánh nhanh nhưng không hời hợt
+
+| Khía cạnh | SQL | NoSQL |
+|---|---|---|
+| Cách model | Normalize theo entity và relation | Model theo access pattern/aggregate |
+| Schema | Schema rõ, enforce mạnh | Flexible schema hoặc schema do app enforce |
+| Query | SQL linh hoạt, join/group/sort mạnh | Query thường bị giới hạn theo key/index/model |
+| Transaction | ACID tốt, multi-row/multi-table phổ biến | Có thể có transaction, nhưng thường giới hạn hoặc đắt hơn |
+| Constraint | FK, unique, check, not null | Thường ít constraint; app tự bảo vệ nhiều hơn |
+| Scale mặc định | Vertical + read replica + partition/sharding khi cần | Thường thiết kế để horizontal scale tốt hơn theo key |
+| Consistency | Strong consistency dễ hơn | Tùy database; eventual consistency phổ biến trong hệ phân tán |
+| Schema evolution | Migration rõ, nhưng cần quản lý lock/backfill | Flexible hơn, nhưng dễ sinh dữ liệu nhiều version |
+| Ad-hoc analytics | Tốt hơn cho query nghiệp vụ vừa phải | Thường cần ETL sang warehouse/search |
+| Operational risk | Index/lock/transaction/deadlock/replication lag | Hot partition, duplicate data, repair, eventual consistency, index giới hạn |
+
+Bảng này chỉ là summary. Trong production, từng database cụ thể có ngoại lệ. PostgreSQL có JSONB, full-text search, partitioning. MongoDB có transaction. DynamoDB có conditional write và transaction. Redis có persistence. Elasticsearch không nên làm source of truth. Vì vậy đừng trả lời như thể SQL/NoSQL là hai thế giới tuyệt đối.
+
+---
+
+### 5. Data model: normalize vs denormalize
+
+Đây là khác biệt rất thực tế.
+
+#### SQL thường normalize
+
+Normalize nghĩa là tách dữ liệu thành các bảng theo entity, giảm duplicate, giữ một nguồn sự thật.
+
+```sql
+SELECT
+  o.id,
+  o.status,
+  c.email,
+  SUM(oi.quantity * oi.price) AS total
+FROM orders o
+JOIN customers c ON c.id = o.customer_id
+JOIN order_items oi ON oi.order_id = o.id
+WHERE o.id = :orderId
+GROUP BY o.id, o.status, c.email;
+```
+
+Ưu điểm:
+
+- Customer email đổi một chỗ là query sau thấy email mới.
+- Ít duplicate nên ít inconsistency.
+- Join giúp trả lời nhiều câu hỏi mới mà chưa cần redesign data.
+
+Nhược điểm:
+
+- Join nhiều bảng có thể chậm khi data rất lớn hoặc query thiếu index.
+- Schema migration phải cẩn thận.
+- Nếu scale write cực lớn, transaction/lock/index có thể thành bottleneck.
+
+#### NoSQL thường denormalize
+
+Denormalize nghĩa là duplicate dữ liệu theo shape cần đọc.
+
+Ví dụ document order trong MongoDB:
+
+```json
+{
+  "orderId": "ord_123",
+  "customer": {
+    "id": "cus_9",
+    "email": "a@example.com"
+  },
+  "status": "PAID",
+  "items": [
+    { "productId": "p1", "name": "Keyboard", "quantity": 1, "price": 1200000 },
+    { "productId": "p2", "name": "Mouse", "quantity": 1, "price": 300000 }
+  ],
+  "totalAmount": 1500000
+}
+```
+
+API `GET /orders/{id}` rất nhanh vì chỉ đọc một document. Không cần join.
+
+Nhưng nếu customer đổi email, các order cũ có cần đổi email không? Có thể câu trả lời là "không" vì order cần snapshot tại thời điểm mua. Nhưng nếu duplicate `customerTier` để tính quyền lợi hiện tại, thì update một nơi chưa đủ.
+
+Bản chất ở đây là: **denormalization đổi runtime read performance lấy write complexity và consistency complexity**.
+
+---
+
+### 6. Transaction và ACID: chỗ SQL thường thắng rất rõ
+
+ACID gồm:
+
+- **Atomicity**: hoặc tất cả thay đổi thành công, hoặc rollback hết.
+- **Consistency**: transaction đưa database từ trạng thái hợp lệ này sang trạng thái hợp lệ khác.
+- **Isolation**: transaction song song không nhìn thấy trạng thái trung gian sai.
+- **Durability**: commit rồi thì dữ liệu không mất khi crash bình thường.
+
+Ví dụ chuyển tiền:
+
+```sql
+BEGIN;
+
+UPDATE accounts
+SET balance = balance - 100000
+WHERE id = 'A' AND balance >= 100000;
+
+UPDATE accounts
+SET balance = balance + 100000
+WHERE id = 'B';
+
+INSERT INTO ledger_entries(from_account, to_account, amount)
+VALUES ('A', 'B', 100000);
+
+COMMIT;
+```
+
+Với domain như payment, accounting, inventory, booking slot, ledger, transaction không phải nice-to-have. Nó là business correctness.
+
+Trong SQL, transaction qua nhiều row/bảng là pattern tự nhiên. Database có lock, MVCC, isolation level và constraint để giúp mình.
+
+Trong NoSQL, nhiều database cũng có transaction hoặc conditional write, nhưng thường có giới hạn:
+
+- Transaction chỉ trong một partition hoặc một document thì rẻ.
+- Transaction cross-partition/cross-document có thể đắt, latency cao hơn, hoặc scale kém hơn.
+- Một số hệ ưu tiên availability/partition tolerance nên consistency không luôn strong mặc định.
+
+Ví dụ DynamoDB có conditional write rất hữu ích:
+
+```txt
+Update item order#123
+ConditionExpression: status = 'PENDING'
+Set status = 'PAID'
+```
+
+Câu này bảo vệ invariant "chỉ order PENDING mới được chuyển sang PAID" mà không cần lock thủ công. Nhưng nếu logic cần update order, payment, inventory, coupon, shipment qua nhiều aggregate, bạn phải thiết kế idempotency, saga, outbox, retry và reconciliation rất kỹ.
+
+Thông điệp phỏng vấn: **NoSQL không có nghĩa là không có consistency, nhưng consistency boundary thường nhỏ hơn hoặc phải thiết kế rõ hơn**.
+
+---
+
+### 7. Consistency: strong vs eventual không phải câu khẩu hiệu
+
+Một hiểu lầm phổ biến là "SQL strong consistent, NoSQL eventual consistent". Thực tế phức tạp hơn.
+
+- PostgreSQL primary read thường strong consistent với dữ liệu đã commit trên primary.
+- Nếu đọc từ read replica, bạn có thể gặp replication lag.
+- MongoDB có read concern/write concern để chỉnh consistency/durability.
+- DynamoDB hỗ trợ eventually consistent read và strongly consistent read trong cùng region cho một số pattern.
+- Cassandra cho phép tune consistency level như `ONE`, `QUORUM`, `ALL`.
+
+Câu hỏi đúng là: **request này có cần đọc bản mới nhất không?**
+
+Ví dụ:
+
+```txt
+Use case: sau khi user đổi password, login bằng password cũ phải fail ngay.
+Consistency cần: strong hoặc ít nhất read-after-write chắc chắn.
+```
+
+```txt
+Use case: số lượt like trên bài viết.
+Consistency cần: eventual thường chấp nhận được.
+User thấy 101 hay 102 trong vài giây không phá business invariant.
+```
+
+```txt
+Use case: inventory còn 1 sản phẩm, hai người cùng checkout.
+Consistency cần: concurrency control mạnh.
+Không thể bán âm kho nếu business không cho phép.
+```
+
+```txt
+Use case: feed/social timeline.
+Consistency cần: eventual thường ổn.
+Post mới xuất hiện trễ vài giây có thể chấp nhận để đổi lấy scale.
+```
+
+Senior answer nên nói được consistency theo từng flow, không nói một mức chung cho cả hệ thống.
+
+---
+
+### 8. Scale: vì sao câu "NoSQL scale tốt hơn" vừa đúng vừa nguy hiểm
+
+NoSQL thường được nhắc tới với horizontal scalability. Nhưng cần hiểu vì sao.
+
+Nhiều NoSQL database thiết kế dữ liệu quanh **partition key**. Khi ghi/đọc, database biết item thuộc partition nào, có thể phân tán partition lên nhiều node.
+
+Ví dụ:
+
+```txt
+Key = user_id
+user_1 -> partition A
+user_2 -> partition B
+user_3 -> partition C
+```
+
+Nếu key phân bố đều, workload trải ra nhiều node. Scale bằng cách thêm node/partition.
+
+Nhưng nếu key xấu, hệ thống vẫn nghẽn.
+
+Ví dụ hot partition:
+
+```txt
+partition_key = celebrity_user_id
+Một người nổi tiếng có 10 triệu follower cùng đọc/ghi vào feed partition đó
+=> một partition nóng, toàn cluster không cứu được nhiều
+```
+
+Hoặc:
+
+```txt
+partition_key = date
+2026-07-09 nhận 90% traffic ghi log hôm nay
+=> partition hôm nay nóng
+```
+
+Vì vậy chọn NoSQL không tự động scale. Bạn phải thiết kế:
+
+- Partition key có cardinality cao không?
+- Distribution có đều không?
+- Có tenant lớn bất thường không?
+- Có cần write sharding không?
+- Query có luôn đi qua partition key không?
+- Secondary index có bị hot không?
+- Item size có vượt giới hạn không?
+
+SQL cũng scale được, nhưng thường đi theo lộ trình khác:
+
+```txt
+1. Index đúng
+2. Query tối ưu
+3. Connection pool hợp lý
+4. Read replica cho read-heavy
+5. Partition table theo time/tenant
+6. Cache các read nóng
+7. Archive data cũ
+8. Sharding khi thật sự cần
+```
+
+Với rất nhiều hệ thống business, PostgreSQL/MySQL được thiết kế tốt có thể chạy rất xa trước khi cần NoSQL. Sai lầm phổ biến là chọn NoSQL quá sớm rồi tự viết lại những thứ SQL đã làm tốt: join, constraint, migration, transaction, reporting.
+
+---
+
+### 9. Query pattern: điểm quyết định rất lớn
+
+Nếu query pattern chưa rõ, SQL thường an toàn hơn.
+
+Ví dụ product mới ra mắt, team chưa biết business sẽ hỏi gì:
+
+```txt
+- Filter order theo status, date, country
+- Join order với customer tier
+- Group revenue theo campaign
+- Tìm customer mua product A nhưng chưa mua product B
+- Audit payment lỗi theo bank
+```
+
+SQL rất hợp vì query linh hoạt. Có thể thêm index, tạo materialized view, tối ưu dần.
+
+Ngược lại, nếu access pattern rõ và cố định:
+
+```txt
+API 1: get session by token
+API 2: expire session after TTL
+API 3: delete session on logout
+```
+
+Redis/key-value store hợp hơn SQL vì quan hệ gần như không có, TTL là primitive tự nhiên, latency thấp.
+
+Hoặc:
+
+```txt
+API: get latest 100 sensor readings by device_id
+Write: append reading 10,000 events/second
+Retention: 30 days
+```
+
+Wide-column/time-series design có thể hợp hơn relational table thường, nhất là khi scale write rất lớn.
+
+Nguyên tắc dễ nhớ:
+
+```txt
+Query linh hoạt, quan hệ nhiều, invariant mạnh -> nghiêng SQL
+Query cố định, key-based, throughput/latency cực quan trọng -> nghiêng NoSQL
+```
+
+---
+
+### 10. Schema: strict schema không phải lúc nào cũng xấu
+
+Nhiều người nói NoSQL tốt vì "không cần schema". Trong production, câu này nguy hiểm.
+
+Không có schema ở database không có nghĩa là không có schema. Nó chỉ có nghĩa là **schema chuyển từ database sang application code, API contract, validation layer, pipeline và dashboard**.
+
+Ví dụ document cũ:
+
+```json
+{
+  "userId": "u1",
+  "name": "Hiep",
+  "phone": "0912345678"
+}
+```
+
+Document mới:
+
+```json
+{
+  "userId": "u2",
+  "fullName": "Hiep Tran",
+  "phoneNumber": {
+    "countryCode": "+84",
+    "number": "912345678"
+  }
+}
+```
+
+Nếu app không handle cả hai version, production lỗi. Nếu analytics pipeline chỉ đọc `phone`, data mới mất. Nếu index vẫn build trên field cũ, query chậm hoặc sai.
+
+SQL schema migration có thể phiền, nhưng nó ép team quản lý thay đổi rõ ràng:
+
+```sql
+ALTER TABLE users ADD COLUMN phone_country_code VARCHAR(8);
+ALTER TABLE users ADD COLUMN phone_national_number VARCHAR(32);
+```
+
+Sau đó có kế hoạch backfill, dual-write, switch read, cleanup.
+
+Với NoSQL, bạn vẫn cần versioning:
+
+```json
+{
+  "schemaVersion": 2,
+  "userId": "u2",
+  "fullName": "Hiep Tran",
+  "phoneNumber": {
+    "countryCode": "+84",
+    "number": "912345678"
+  }
+}
+```
+
+Senior answer nên nói: flexible schema giúp iteration nhanh, nhưng phải có strategy cho old documents, validation, backfill và observability.
+
+---
+
+### 11. Join: không chỉ là syntax, mà là câu hỏi dữ liệu sống ở đâu
+
+SQL join cho phép lưu data normalized rồi ghép khi đọc. Đây là sức mạnh lớn.
+
+NoSQL thường tránh join bằng cách:
+
+1. Embed data trong cùng document/record.
+2. Duplicate data sang nhiều read model.
+3. Query nhiều lần ở application layer.
+4. Dùng search index/materialized view.
+
+Ví dụ hiển thị order list cần order + customer email.
+
+SQL:
+
+```sql
+SELECT o.id, o.status, c.email
+FROM orders o
+JOIN customers c ON c.id = o.customer_id
+WHERE o.created_at >= now() - interval '7 days';
+```
+
+NoSQL denormalized:
+
+```json
+{
+  "pk": "ORDER#ord_123",
+  "status": "PAID",
+  "customerId": "cus_9",
+  "customerEmailSnapshot": "a@example.com"
+}
+```
+
+Nếu email hiển thị trong order là snapshot tại thời điểm mua, denormalize đúng. Nếu email phải luôn là email hiện tại, denormalize tạo vấn đề update nhiều nơi.
+
+Vì vậy câu hỏi không phải "NoSQL có join không?" mà là:
+
+```txt
+Dữ liệu này là snapshot hay source of truth?
+Nếu source đổi, các bản duplicate có cần đổi không?
+Nếu update duplicate fail một phần thì hệ thống sửa thế nào?
+User có chấp nhận stale data không?
+```
+
+---
+
+### 12. Index: SQL index linh hoạt hơn, NoSQL index phải nghĩ từ đầu hơn
+
+Trong SQL, bạn có thể bắt đầu với bảng normalized rồi thêm index theo query thực tế:
+
+```sql
+CREATE INDEX idx_orders_customer_created
+ON orders(customer_id, created_at DESC);
+
+CREATE INDEX idx_orders_status_created
+ON orders(status, created_at DESC);
+```
+
+Query planner chọn plan dựa trên statistics. Bạn dùng `EXPLAIN ANALYZE` để xem bottleneck.
+
+Trong NoSQL, index thường là một phần của data design. Ví dụ DynamoDB:
+
+```txt
+Base table:
+PK = CUSTOMER#123
+SK = ORDER#2026-07-09#ord_1
+
+GSI for status query:
+GSI1PK = STATUS#PAID
+GSI1SK = CREATED_AT#2026-07-09#ord_1
+```
+
+Bạn phải biết trước có query theo status. Nếu sau này cần query theo `couponCode`, bạn tạo GSI mới, backfill, chờ index build, tính cost, và kiểm tra hot key.
+
+Cassandra còn nghiêm hơn: query phải match primary key/clustering key design. Secondary index tùy trường hợp có thể rất tệ ở scale lớn.
+
+Thông điệp: **SQL cho nhiều tự do query hơn sau khi dữ liệu đã lưu; NoSQL thường yêu cầu tự do đó được thiết kế trước bằng index/read model**.
+
+---
+
+### 13. CAP theorem: dùng để hiểu trade-off, không dùng để trả lời máy móc
+
+CAP nói rằng trong hệ phân tán, khi có network partition, hệ thống phải chọn giữa:
+
+- **Consistency**: mọi node trả về dữ liệu mới nhất/đúng theo một định nghĩa consistency.
+- **Availability**: mỗi request nhận được response không lỗi từ node còn sống.
+- **Partition tolerance**: hệ thống chịu được network split.
+
+Trong thực tế distributed system luôn phải chịu partition. Vậy khi partition xảy ra, bạn nghiêng về C hay A.
+
+Ví dụ payment ledger:
+
+```txt
+Nếu network split, tốt hơn là reject giao dịch tạm thời
+còn hơn cho hai phía cùng spend một số dư.
+=> ưu tiên consistency hơn availability cho flow này.
+```
+
+Ví dụ like counter/feed:
+
+```txt
+Nếu network split, vẫn cho user like/post tạm,
+sau đó reconcile.
+=> ưu tiên availability hơn strict consistency.
+```
+
+Nhưng đừng lạm dụng CAP để nói "SQL là CA, NoSQL là AP". Nhiều SQL chạy single-primary không phải distributed theo nghĩa đó. Nhiều NoSQL có tunable consistency. Nhiều hệ thống hiện đại chọn trade-off theo operation, không theo nhãn database.
+
+Câu trả lời tốt là dùng CAP để giải thích failure mode cụ thể.
+
+---
+
+### 14. Ví dụ chọn database theo từng use case
+
+#### User profile
+
+Nếu profile có nhiều field thay đổi theo product, không quá nhiều quan hệ, đọc theo `userId`, document database có thể hợp.
+
+```txt
+GET /users/{id}/profile
+```
+
+MongoDB/document model cho phép lưu profile theo shape tự nhiên. Nhưng nếu profile liên quan nhiều bảng quyền, billing, compliance audit, SQL có thể an toàn hơn.
+
+#### Order/payment
+
+Nghiêng SQL.
+
+Lý do:
+
+- Quan hệ nhiều: order, item, payment, refund, shipment.
+- Invariant mạnh: không double charge, không refund quá amount, không shipment order chưa paid.
+- Audit/reporting quan trọng.
+- Transaction và constraint có giá trị rất lớn.
+
+Nếu scale rất lớn, vẫn có thể dùng SQL làm source of truth, rồi publish event sang NoSQL/read model để phục vụ read-heavy.
+
+#### Session/token
+
+Nghiêng Redis/key-value.
+
+Lý do:
+
+- Lookup theo key.
+- TTL tự nhiên.
+- Không cần join.
+- Latency thấp.
+- Data có thể rebuild/re-login nếu mất tùy requirement.
+
+#### Product catalog
+
+Tùy.
+
+- Source of truth có thể là SQL để quản lý SKU, price, inventory rule.
+- Search/filter frontend thường cần Elasticsearch/OpenSearch.
+- Product detail có thể cache/document denormalized.
+
+Đây là ví dụ rất thực tế của polyglot persistence.
+
+#### Chat messages
+
+Tùy scale.
+
+Ở scale vừa, PostgreSQL partition theo conversation/time có thể đủ.
+
+Ở scale rất lớn, wide-column như Cassandra/DynamoDB theo `conversation_id` + `message_timestamp` có thể hợp hơn.
+
+Query chính:
+
+```txt
+Get latest N messages in conversation X
+Append new message
+```
+
+Pattern rất rõ, phù hợp NoSQL.
+
+#### Audit log/event log
+
+Thường append-only, write nhiều, query theo tenant/time. Có thể dùng:
+
+- SQL partitioned table nếu scale vừa và cần transaction gần business data.
+- Kafka + object storage + warehouse cho analytics.
+- OpenSearch cho search/debug.
+- Cassandra/DynamoDB cho high-scale retrieval theo key/time.
+
+Không nên trả lời một database duy nhất nếu workload gồm cả source of truth, search và analytics.
+
+---
+
+### 15. Polyglot persistence: production thường không chỉ chọn một
+
+Hệ thống thực tế hay dùng nhiều storage, mỗi cái đúng vai trò.
+
+Ví dụ e-commerce:
+
+```txt
+PostgreSQL
+- users
+- orders
+- payments
+- inventory transaction
+- source of truth
+
+Redis
+- session
+- rate limit
+- hot cache
+
+Elasticsearch/OpenSearch
+- product search
+- order admin search
+- log search
+
+S3/Data lake/Warehouse
+- analytics
+- reporting
+- ML feature
+
+Kafka
+- event stream giữa các service
+- outbox relay
+```
+
+Luồng có thể như sau:
+
+```txt
+User checkout
+  -> Order Service ghi PostgreSQL trong transaction
+  -> Outbox table lưu OrderCreated event
+  -> Relay publish Kafka
+  -> Search index cập nhật OpenSearch
+  -> Analytics pipeline lưu warehouse
+  -> Cache invalidation qua Redis
+```
+
+Điểm quan trọng: PostgreSQL vẫn là source of truth cho order. OpenSearch chỉ là read model. Nếu index lệch, có thể rebuild từ source/event log.
+
+Đây là mindset tốt trong interview: **đừng ép một database làm mọi thứ**.
+
+---
+
+### 16. Source of truth vs read model
+
+Một lỗi thiết kế phổ biến là dùng database tối ưu cho search/cache làm source of truth.
+
+Ví dụ dùng Elasticsearch làm nơi duy nhất lưu order vì query search tiện. Vấn đề:
+
+- Elasticsearch tối ưu cho search, không phải transaction business critical.
+- Refresh interval làm document không luôn visible ngay.
+- Update concurrent phức tạp hơn SQL transaction.
+- Mapping thay đổi cần reindex.
+- Nếu index corrupt, không có nguồn thật để rebuild.
+
+Thiết kế tốt hơn:
+
+```txt
+PostgreSQL = source of truth
+OpenSearch = read model/search index
+Kafka/outbox = sync mechanism
+```
+
+Tương tự Redis thường không nên là source of truth cho tiền, order, inventory nếu không thiết kế persistence/replication/failure cực kỹ. Redis rất tốt làm cache/session/rate limit, nhưng cần hiểu mất cache thì hệ thống hồi phục thế nào.
+
+Câu hỏi phỏng vấn hay đi sâu vào đây vì nó cho thấy bạn hiểu vai trò của storage, không chỉ biết tên công nghệ.
+
+---
+
+### 17. Migration và evolution: chọn database là chọn cả tương lai thay đổi
+
+Requirement ban đầu thường đơn giản. Vấn đề là 6 tháng sau.
+
+Ví dụ ban đầu:
+
+```txt
+Need: lưu order theo customer, show order detail.
+```
+
+Sau đó business hỏi:
+
+```txt
+- dashboard revenue theo campaign
+- search order theo phone/email
+- audit payment failed
+- export tax report
+- fraud detection theo device fingerprint
+- reconciliation với payment provider
+```
+
+Nếu bạn chọn NoSQL chỉ vì `GET order by id` nhanh, các query mới có thể cần hàng loạt GSI/read model/pipeline. Không sai, nhưng phải biết cost.
+
+SQL thường giúp giai đoạn discovery tốt hơn vì query linh hoạt. NoSQL phù hợp khi workload đã rõ hoặc scale requirement ép buộc.
+
+Migration strategy cũng khác:
+
+#### SQL migration thường explicit
+
+```txt
+1. Add nullable column
+2. Deploy app dual-write
+3. Backfill old rows theo batch
+4. Switch read sang column mới
+5. Add constraint NOT NULL nếu cần
+6. Drop column cũ sau khi ổn định
+```
+
+#### NoSQL migration thường application-driven
+
+```txt
+1. Thêm schemaVersion mới
+2. App đọc được cả old/new document
+3. New write dùng format mới
+4. Background backfill dần
+5. Metric theo số document còn old version
+6. Cleanup code old version khi hết dữ liệu cũ
+```
+
+Cả hai đều cần plan. Flexible schema không xóa nhu cầu migration; nó chỉ đổi cách migration diễn ra.
+
+---
+
+### 18. Performance: database chậm thường không phải vì SQL hay NoSQL
+
+Trong production, nguyên nhân chậm thường cụ thể hơn:
+
+```txt
+SQL chậm:
+- thiếu index
+- index sai thứ tự column
+- query SELECT quá nhiều column
+- N+1 query từ ORM
+- transaction giữ lock quá lâu
+- connection pool quá nhỏ/quá lớn
+- autovacuum/statistics không ổn
+- read replica lag
+- bảng quá lớn chưa partition/archive
+
+NoSQL chậm:
+- hot partition
+- query không đi theo partition key
+- secondary index quá tải
+- item/document quá lớn
+- scan thay vì point/range query
+- consistency level quá cao cho workload
+- compaction/repair/backpressure
+- duplicate read model sync chậm
+```
+
+Vì vậy câu trả lời tốt không nói "NoSQL nhanh hơn". Phải nói "nhanh hơn cho access pattern nào, với key distribution nào, và failure mode nào".
+
+---
+
+### 19. Cost: tiền và độ phức tạp đều là cost
+
+SQL cost thường đến từ:
+
+- Instance lớn hơn khi scale vertical.
+- Read replica.
+- Storage/index bloat.
+- DBA/ops effort cho vacuum, backup, failover, tuning.
+- Sharding nếu vượt ngưỡng.
+
+NoSQL cost thường đến từ:
+
+- Provisioned/on-demand capacity theo read/write unit.
+- Duplicate data nhiều lần.
+- Global secondary index cũng tốn write/storage.
+- Backfill/reindex cost.
+- Engineering cost cho consistency, repair, migration.
+- Debug khó hơn khi data bị duplicate và eventually consistent.
+
+Một thiết kế NoSQL có thể giảm latency nhưng tăng cost vì mỗi write phải ghi 4 read model và 3 index. Một thiết kế SQL có thể rẻ hơn rất nhiều nếu QPS vừa phải.
+
+Trong interview Senior/Staff, nói được cost giúp câu trả lời thực tế hơn.
+
+---
+
+### 20. Decision framework: tôi sẽ chọn như thế nào?
+
+Một framework dễ dùng trong interview:
+
+#### Bước 1 — Xác định invariant quan trọng nhất
+
+```txt
+Nếu invariant bị phá thì hậu quả là gì?
+- Mất tiền?
+- Sai inventory?
+- User thấy UI hơi trễ?
+- Dashboard lệch tạm thời?
+```
+
+Invariant càng critical, càng nghiêng về database có transaction/constraint mạnh ở source of truth.
+
+#### Bước 2 — Vẽ access pattern
+
+```txt
+Read:
+- đọc theo id?
+- list theo user/time?
+- search text?
+- filter nhiều chiều?
+- analytics aggregate?
+
+Write:
+- append-only?
+- update nhiều field?
+- write burst?
+- multi-entity transaction?
+```
+
+#### Bước 3 — Ước lượng scale và growth
+
+```txt
+QPS hiện tại / 1 năm tới?
+Data size?
+Record size?
+Hot key có không?
+Retention bao lâu?
+Multi-region không?
+```
+
+Không cần con số hoàn hảo, nhưng phải có order of magnitude. 100 QPS khác 100k QPS. 10 GB khác 100 TB.
+
+#### Bước 4 — Chọn source of truth trước
+
+```txt
+Business-critical source of truth -> thường SQL hoặc database có consistency rõ
+Search/cache/analytics -> read model phụ
+```
+
+#### Bước 5 — Chỉ thêm NoSQL khi nó giải quyết bottleneck cụ thể
+
+```txt
+- Redis cho cache/session/rate limit
+- OpenSearch cho full-text search
+- DynamoDB/Cassandra cho key/time access high scale
+- MongoDB cho document aggregate linh hoạt
+- Graph DB cho traversal sâu
+```
+
+Đừng thêm vì trend. Thêm vì workload cần.
+
+---
+
+### 21. Một số kịch bản trả lời phỏng vấn
+
+#### Kịch bản 1: hệ thống order/payment mới, traffic chưa quá lớn
+
+Tôi sẽ chọn PostgreSQL/MySQL làm source of truth. Lý do là domain có transaction và invariant mạnh: order state, payment state, refund, inventory reservation. SQL giúp enforce FK/unique/check constraint, transaction update nhiều bảng và query audit/reporting dễ hơn. Nếu sau này read-heavy, tôi thêm read replica, cache, hoặc read model qua Kafka/outbox. Tôi chưa chọn NoSQL làm primary store trừ khi có requirement scale/availability rất cụ thể.
+
+#### Kịch bản 2: session store cho API gateway
+
+Tôi sẽ dùng Redis hoặc key-value store. Access pattern chỉ là get/set/delete theo token, có TTL, không cần join hay transaction nhiều entity. Latency thấp quan trọng hơn query linh hoạt. Tuy nhiên tôi sẽ xác định rõ session mất thì user login lại được không, Redis persistence/replication setup ra sao, và fallback khi Redis down thế nào.
+
+#### Kịch bản 3: chat message ở scale lớn
+
+Nếu scale vừa, SQL partitioned table có thể đủ và dễ vận hành. Nếu scale rất lớn, tôi sẽ cân nhắc Cassandra/DynamoDB với partition key là conversation/channel id và sort key là timestamp/message id. Query chính là lấy message mới nhất theo conversation, append message mới. Tôi sẽ cẩn thận hot conversation, pagination, ordering, idempotent write, retention và backfill search index nếu cần search nội dung.
+
+#### Kịch bản 4: product search
+
+Tôi không dùng SQL `LIKE` đơn giản cho search phức tạp ở scale lớn, cũng không dùng Elasticsearch làm source of truth. Tôi sẽ lưu product canonical data trong SQL hoặc document store tùy domain, sau đó index sang OpenSearch/Elasticsearch cho full-text search, filtering, ranking. Nếu search index lệch, rebuild từ source of truth/event log.
+
+#### Kịch bản 5: IoT sensor data
+
+Nếu mỗi device gửi nhiều reading liên tục và query chủ yếu theo device/time, NoSQL wide-column hoặc time-series database có thể hợp hơn. Data thường append-only, access pattern rõ, retention theo thời gian. Tôi sẽ thiết kế partition để tránh hot key, ví dụ bucket theo device + day/hour nếu cần, và có pipeline xuống object storage/warehouse cho analytics dài hạn.
+
+---
+
+### 22. Anti-pattern: dùng NoSQL để né thiết kế schema
+
+Một team đôi khi chọn MongoDB/DynamoDB vì "schema thay đổi liên tục". Điều này có thể đúng ở giai đoạn prototype, nhưng production vẫn cần contract.
+
+Nếu không có discipline, dữ liệu thành:
+
+```json
+{ "phone": "0912345678" }
+{ "phoneNumber": "0912345678" }
+{ "phone_number": "0912345678" }
+{ "phone": { "value": "0912345678" } }
+```
+
+Sau đó query, analytics, API, migration đều khổ.
+
+Dùng NoSQL tốt vẫn cần:
+
+- Document schema validation hoặc app validation.
+- Schema version.
+- Backward-compatible reader.
+- Backfill job.
+- Data quality metric.
+- Contract test.
+
+NoSQL không miễn phí khỏi modeling. Nó chỉ cho phép modeling gần với aggregate/access pattern hơn.
+
+---
+
+### 23. Anti-pattern: dùng SQL nhưng bỏ hết constraint
+
+Ngược lại, dùng SQL mà không khai thác constraint cũng phí.
+
+Ví dụ:
+
+```sql
+CREATE TABLE payments (
+  id VARCHAR(64),
+  order_id VARCHAR(64),
+  amount NUMERIC,
+  status VARCHAR(32)
+);
+```
+
+Không primary key, không unique, không FK, không check. Application bug có thể ghi duplicate payment, negative amount, status sai chính tả.
+
+Tốt hơn:
+
+```sql
+CREATE TABLE payments (
+  id VARCHAR(64) PRIMARY KEY,
+  order_id VARCHAR(64) NOT NULL REFERENCES orders(id),
+  amount NUMERIC(18, 2) NOT NULL CHECK (amount >= 0),
+  status VARCHAR(32) NOT NULL CHECK (status IN ('PENDING', 'PAID', 'FAILED', 'REFUNDED')),
+  provider_transaction_id VARCHAR(128),
+  created_at TIMESTAMP NOT NULL DEFAULT now(),
+  UNIQUE (provider_transaction_id)
+);
+```
+
+Nếu đã chọn SQL vì correctness, hãy để database giúp bạn bảo vệ correctness.
+
+---
+
+### 24. Hybrid pattern: SQL source of truth + NoSQL read model
+
+Đây là pattern rất hay gặp và rất nên nói trong interview.
+
+Ví dụ order service:
+
+```txt
+PostgreSQL tables:
+- orders
+- order_items
+- payments
+- refunds
+- outbox_events
+```
+
+Khi tạo order:
+
+```sql
+BEGIN;
+
+INSERT INTO orders (...);
+INSERT INTO order_items (...);
+INSERT INTO outbox_events(event_type, aggregate_id, payload)
+VALUES ('OrderCreated', 'ord_123', '{...}');
+
+COMMIT;
+```
+
+Sau đó outbox relay publish Kafka:
+
+```txt
+OrderCreated -> Kafka -> consumers
+```
+
+Consumer cập nhật read model:
+
+```txt
+Redis: cache order summary
+OpenSearch: order admin search
+Warehouse: revenue analytics
+DynamoDB: customer order timeline nếu cần high-scale read
+```
+
+Ưu điểm:
+
+- Transaction business nằm ở SQL.
+- Read-heavy/search/analytics đi qua storage phù hợp.
+- Nếu read model lỗi, rebuild từ outbox/event/source.
+- Mỗi database có vai trò rõ ràng.
+
+Nhược điểm:
+
+- Eventual consistency giữa source và read model.
+- Cần idempotent consumer.
+- Cần monitoring lag.
+- Cần replay/backfill.
+
+Đây là trade-off thực tế, không phải silver bullet.
+
+---
+
+### 25. Nếu interviewer hỏi "NoSQL có đảm bảo ACID không?"
+
+Trả lời tốt:
+
+> Tùy database và phạm vi transaction. Một số NoSQL hiện đại có transaction hoặc conditional write, ví dụ MongoDB hỗ trợ multi-document transaction, DynamoDB có transaction API, Cassandra có lightweight transaction cho một số case. Nhưng điểm quan trọng là cost và boundary. Transaction trong một document/partition thường tự nhiên và rẻ hơn; transaction cross-partition/cross-document thường đắt hơn hoặc không phải path tối ưu. Vì vậy tôi không nói NoSQL không có ACID, mà tôi hỏi invariant nằm ở đâu và database có support invariant đó một cách hiệu quả không.
+
+Ví dụ document aggregate:
+
+```json
+{
+  "cartId": "cart_1",
+  "items": [
+    { "sku": "A", "qty": 1 },
+    { "sku": "B", "qty": 2 }
+  ],
+  "total": 300000
+}
+```
+
+Nếu toàn bộ cart update trong một document, atomic update có thể đủ. Nhưng nếu checkout cần update cart, order, payment, inventory ở nhiều aggregate, bạn cần transaction lớn hơn hoặc saga/outbox/reconciliation.
+
+---
+
+### 26. Nếu interviewer hỏi "SQL có scale ngang được không?"
+
+Trả lời tốt:
+
+> Có, nhưng không phải lúc nào cũng đơn giản như thêm node. SQL scale read khá phổ biến bằng read replica. Scale write có thể dùng partitioning, sharding, distributed SQL như CockroachDB/Yugabyte, hoặc tách workload. Nhưng distributed SQL cũng có trade-off về latency, transaction coordination và operational complexity. Vì vậy tôi thường tối ưu query/index/schema trước, đo bottleneck, rồi mới quyết định shard hoặc chuyển workload cụ thể sang NoSQL/read model.
+
+Lộ trình thực tế:
+
+```txt
+1. Fix slow query, index, N+1
+2. Read replica cho read traffic
+3. Cache hot path
+4. Partition table lớn theo time/tenant
+5. Archive cold data
+6. Split service/database theo bounded context
+7. Sharding hoặc distributed SQL nếu write scale ép buộc
+8. NoSQL read/write model cho workload cụ thể nếu phù hợp
+```
+
+Không nên nhảy từ bước 1 sang bước 8 nếu chưa có số liệu.
+
+---
+
+### 27. Nếu interviewer hỏi "MongoDB vs PostgreSQL JSONB thì sao?"
+
+Đây là câu hay vì ranh giới SQL/NoSQL ngày càng mờ.
+
+PostgreSQL có `JSONB`, GIN index, full-text search, partitioning. MongoDB có transaction, aggregation pipeline, schema validation. Vì vậy chọn không chỉ dựa vào document hay table.
+
+Gợi ý:
+
+- Nếu phần lõi vẫn relational, cần transaction/constraint/join, nhưng có vài field linh hoạt → PostgreSQL + JSONB có thể rất tốt.
+- Nếu aggregate tự nhiên là document lớn, query chủ yếu theo document, schema biến động nhiều, team quen MongoDB → MongoDB hợp lý.
+- Nếu cần reporting join nhiều chiều, PostgreSQL thường dễ hơn.
+- Nếu document lớn bị update nhiều field nhỏ, cần xem write amplification/locking/versioning cụ thể.
+
+Ví dụ dùng JSONB có kiểm soát:
+
+```sql
+CREATE TABLE products (
+  id UUID PRIMARY KEY,
+  sku VARCHAR(64) NOT NULL UNIQUE,
+  name TEXT NOT NULL,
+  attributes JSONB NOT NULL DEFAULT '{}'
+);
+
+CREATE INDEX idx_products_attributes_gin
+ON products USING GIN (attributes);
+```
+
+Cách này giữ core field có schema rõ, còn attributes linh hoạt cho category-specific fields.
+
+---
+
+### 28. Nếu interviewer hỏi "Dùng database nào cho microservices?"
+
+Nguyên tắc quan trọng hơn SQL/NoSQL là **service ownership**.
+
+Mỗi service nên own dữ liệu của nó. Service khác không nên join trực tiếp vào database của service này. Nếu cần dữ liệu, dùng API/event/read model.
+
+Ví dụ:
+
+```txt
+Order Service owns orders DB
+Payment Service owns payments DB
+Inventory Service owns inventory DB
+```
+
+Order Service không nên query thẳng table `payments` của Payment Service để join. Vì như vậy schema database trở thành public contract, deploy độc lập mất ý nghĩa.
+
+Trong microservices, một service có thể dùng SQL, service khác dùng NoSQL tùy workload. Đây là polyglot persistence theo bounded context.
+
+Nhưng trade-off là transaction cross-service khó hơn. Bạn cần saga, outbox, idempotency, retry, reconciliation.
+
+---
+
+### 29. Checklist chọn SQL hay NoSQL
+
+Nghiêng SQL nếu:
+
+- Dữ liệu có quan hệ nhiều và cần join tự nhiên.
+- Cần transaction nhiều row/bảng.
+- Business invariant mạnh và muốn database enforce.
+- Query/reporting thay đổi thường xuyên.
+- Team muốn source of truth dễ audit.
+- Scale hiện tại/vài năm tới SQL xử lý được.
+- Bạn cần migration, constraint, schema rõ ràng.
+
+Nghiêng NoSQL nếu:
+
+- Access pattern rõ, chủ yếu key-based/range-based.
+- Cần horizontal scale/write throughput rất cao.
+- Data model tự nhiên là document/aggregate/key-value/graph.
+- Có thể chấp nhận denormalization và eventual consistency ở một số flow.
+- Schema thay đổi nhanh nhưng team có schema version/validation.
+- Cần TTL, append-only, time-series, graph traversal, full-text search chuyên biệt.
+- Team hiểu partition key, hot key, index, repair và migration của database đó.
+
+Cân nhắc hybrid nếu:
+
+- SQL cần làm source of truth nhưng read/search quá nặng.
+- Cần full-text search ngoài transaction store.
+- Cần cache latency thấp.
+- Cần analytics không ảnh hưởng OLTP.
+
+---
+
+### 30. Một câu trả lời ngắn gọn nhưng senior
+
+Nếu phải trả lời trong 60 giây:
+
+> Tôi chọn SQL khi correctness và quan hệ dữ liệu là trung tâm: transaction nhiều bảng, constraint, join, reporting, audit. Tôi chọn NoSQL khi access pattern rõ và cần tối ưu scale/latency/availability theo key hoặc theo document/aggregate cụ thể. NoSQL không tự động nhanh hơn; nó nhanh khi data model khớp query pattern và partition key tốt. SQL không tự động không scale; rất nhiều hệ thống scale tốt bằng index, replica, partition và cache. Với business core như order/payment, tôi thường bắt đầu bằng SQL làm source of truth, rồi thêm Redis/OpenSearch/DynamoDB/Cassandra làm read model hoặc workload-specific store khi có bottleneck rõ. Điều quan trọng là xác định invariant, consistency requirement và failure mode trước khi chọn công nghệ.
+
+---
+
+## Bẫy thường gặp
+
+❌ **"SQL là structured data, NoSQL là unstructured data."**
+→ Tại sao sai: Đây là cách nói quá nông. Nhiều NoSQL vẫn có structure rất rõ, chỉ là structure không bị relational schema enforce theo kiểu SQL. MongoDB document, DynamoDB item, Cassandra row đều cần schema ở mức application/access pattern.
+✅ Đúng hơn: SQL dùng relational schema và constraint rõ ở database; NoSQL thường model theo document/key/column/graph và schema có thể flexible hơn, nhưng production vẫn cần validation/versioning.
+
+---
+
+❌ **"NoSQL nhanh hơn SQL."**
+→ Tại sao sai: NoSQL có thể rất nhanh cho point lookup/range query đúng key, nhưng có thể rất tệ nếu scan, hot partition, index sai hoặc query ngoài access pattern. SQL query có index đúng cũng rất nhanh.
+✅ Đúng hơn: Performance phụ thuộc vào access pattern, index, partition key, data size, workload và consistency requirement.
+
+---
+
+❌ **"SQL không scale được."**
+→ Tại sao sai: SQL scale rất tốt cho nhiều workload bằng index, read replica, partitioning, caching, connection pooling, archive, sharding hoặc distributed SQL. Vấn đề là write scaling và distributed transaction có trade-off.
+✅ Đúng hơn: SQL scale được, nhưng horizontal write scaling và global distribution cần thiết kế kỹ; NoSQL thường có primitive tốt hơn cho một số workload phân tán theo key.
+
+---
+
+❌ **"NoSQL không có transaction."**
+→ Tại sao sai: Nhiều NoSQL hiện đại có transaction/conditional write. Nhưng phạm vi, cost và semantics khác nhau.
+✅ Đúng hơn: Hỏi transaction boundary nằm ở đâu. Nếu invariant nằm trong một document/partition, NoSQL có thể ổn. Nếu invariant trải qua nhiều entity quan hệ, SQL thường tự nhiên hơn.
+
+---
+
+❌ **"Schema-less nghĩa là không cần migration."**
+→ Tại sao sai: Dữ liệu cũ vẫn tồn tại. Application vẫn phải đọc được nhiều version. Analytics/index vẫn cần hiểu field nào có nghĩa gì.
+✅ Đúng hơn: Schema-less/flexible schema chuyển trách nhiệm migration sang application, reader compatibility, backfill và data quality monitoring.
+
+---
+
+❌ **"Dùng Elasticsearch thay database chính vì search tiện."**
+→ Tại sao sai: Elasticsearch/OpenSearch tối ưu cho search index, không phải source of truth transaction-critical. Reindex, refresh lag, mapping change và consistency là vấn đề lớn.
+✅ Đúng hơn: Dùng database source of truth riêng, publish event/outbox để build search index; search index có thể rebuild khi lệch.
+
+---
+
+❌ **"Cứ microservices là mỗi service dùng database khác nhau."**
+→ Tại sao sai: Polyglot persistence tăng operational complexity. Nếu team chưa đủ năng lực vận hành, nhiều database có thể tạo nhiều lỗi hơn lợi ích.
+✅ Đúng hơn: Mỗi service own data của mình, nhưng chọn database theo workload và năng lực team; không dùng nhiều database chỉ để đúng trend.
+
+---
+
+❌ **"Denormalization là xấu."**
+→ Tại sao sai: Denormalization là kỹ thuật hợp lý để tối ưu read path và scale, đặc biệt với read model/search/feed.
+✅ Đúng hơn: Denormalization tốt khi duplicate data có ownership, sync mechanism, idempotency, monitoring lag và rebuild strategy rõ ràng.
+
+---
+
+## Câu hỏi follow-up
+
+### 1. Nếu hệ thống ban đầu dùng SQL, khi nào bạn quyết định thêm NoSQL?
+
+Tôi không thêm NoSQL chỉ vì traffic tăng chung chung. Tôi cần thấy bottleneck cụ thể: query search không phù hợp B-tree index, read latency hot path quá cao, write append-only vượt khả năng SQL sau khi đã partition/tune, hoặc access pattern key-based rất rõ. Sau đó tôi xác định NoSQL đó là source of truth hay read model. Thường tôi thêm Redis cho cache/session, OpenSearch cho search, hoặc DynamoDB/Cassandra cho read/write model theo key; SQL vẫn giữ business source of truth nếu invariant mạnh.
+
+### 2. Nếu NoSQL bị eventual consistency, làm sao tránh user thấy dữ liệu sai?
+
+Đầu tiên phải phân loại flow nào được stale và flow nào không được stale. Với flow critical như payment/password/inventory, tôi dùng strong read/conditional write/transaction hoặc đọc từ source of truth. Với flow có thể stale như feed/search/dashboard, tôi hiển thị trạng thái pending, dùng read-your-write cache, polling, hoặc fallback đọc source khi cần. Ngoài ra cần monitor replication/index lag và có reconciliation job để sửa lệch.
+
+### 3. Làm sao thiết kế partition key cho NoSQL?
+
+Partition key phải match access pattern chính và phân bố đều. Tôi kiểm tra cardinality, traffic distribution, tenant lớn, hot key, item size và query range cần sort key không. Nếu có hot key như một celebrity user hoặc một ngày hiện tại, tôi cân nhắc bucket/shard key, time bucket, write sharding hoặc thay đổi read model. Thiết kế partition key sai là một trong những lỗi NoSQL đắt nhất vì sửa sau khi có data lớn rất khó.
+
+### 4. Khi nào dùng MongoDB thay vì PostgreSQL?
+
+Tôi cân nhắc MongoDB khi dữ liệu tự nhiên là document aggregate, thường đọc/ghi cả document, schema thay đổi nhanh, ít join phức tạp, và transaction boundary nằm trong document hoặc một nhóm nhỏ document. PostgreSQL hợp hơn nếu dữ liệu relational, cần constraint/join/reporting/transaction mạnh. Nếu chỉ có vài field linh hoạt trong một domain relational, PostgreSQL `JSONB` có thể là điểm cân bằng tốt hơn MongoDB.
+
+### 5. Nếu cần full-text search thì dùng SQL hay NoSQL?
+
+Nếu search đơn giản và scale vừa, PostgreSQL full-text search hoặc trigram index có thể đủ. Nếu cần ranking, analyzer theo ngôn ngữ, typo tolerance, faceted search, relevance tuning, high query volume, tôi dùng OpenSearch/Elasticsearch làm search index. Nhưng tôi thường không để search engine làm source of truth cho dữ liệu business critical; nó là read model được build từ source/event.
+
+### 6. Làm sao đảm bảo dữ liệu duplicate trong NoSQL không bị lệch?
+
+Tôi cần định nghĩa nguồn sự thật, cơ chế update duplicate, idempotency key, retry, dead-letter queue và reconciliation job. Nếu dùng event-driven, consumer phải idempotent vì event có thể delivered nhiều lần. Tôi cũng monitor lag giữa source và read model, số record failed, và có khả năng replay/backfill. Nếu duplicate data là snapshot lịch sử thì không cần sync, nhưng phải ghi rõ semantics để không ai hiểu nhầm.
+
+### 7. SQL isolation level ảnh hưởng gì tới lựa chọn database?
+
+Isolation level quyết định transaction song song nhìn thấy nhau như thế nào. Với các flow như booking slot, inventory decrement, ledger, nếu isolation quá yếu hoặc query không lock đúng, có thể xảy ra lost update/write skew. SQL cho mình nhiều công cụ như row lock, unique constraint, serializable isolation, optimistic locking. NoSQL cũng có conditional write/CAS ở một số database, nhưng phải xem invariant có nằm trong phạm vi operation đó không.
+
+### 8. Dùng cache Redis trước database có thay đổi quyết định SQL/NoSQL không?
+
+Cache giúp giảm read load và latency, nhưng không thay thế source of truth. Nếu dữ liệu cần transaction/constraint, SQL vẫn là lựa chọn source tốt dù có Redis cache phía trước. Cache lại thêm vấn đề invalidation, TTL, stale data, cache stampede và consistency. Tôi chỉ dùng cache cho dữ liệu đọc nhiều, chấp nhận stale trong khoảng nhỏ hoặc có invalidation rõ ràng.
+
+---
+
+## Xem thêm
+
+- [Fuzzy search trên cột phone_number đã mã hoá](/database/02-fuzzy-search-encrypted-column)
