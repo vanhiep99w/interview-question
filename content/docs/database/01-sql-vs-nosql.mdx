@@ -190,6 +190,54 @@ Bảng này chỉ là summary. Trong production, từng database cụ thể có 
 
 Đây là khác biệt rất thực tế.
 
+#### "SQL là normalize-first, NoSQL là query-first" có đúng không?
+
+**Đúng như một mental model, nhưng không phải định luật.**
+
+Với relational database, cách thiết kế thường bắt đầu từ **facts, entity, relationship và invariant**: customer là gì, order là gì, quan hệ giữa chúng ra sao, dữ liệu nào chỉ nên có một nguồn sự thật. Sau đó ta normalize để tránh update anomaly và để database enforce constraint. Khi đã hiểu logical model, ta mới tối ưu physical model theo query thật bằng index, partition, materialized view, cache hoặc denormalization có chủ đích.
+
+```txt
+SQL thường đi theo flow:
+business facts + invariant
+  -> normalized logical model
+  -> query và execution plan
+  -> index/partition/denormalize nếu số liệu chứng minh cần
+```
+
+Với nhiều NoSQL phân tán như DynamoDB hoặc Cassandra, table/key design phụ thuộc trực tiếp vào cách đọc. Nếu query không có partition key phù hợp, database không thể chạy hiệu quả trên toàn cluster. Vì vậy team phải liệt kê access pattern trước, rồi tạo partition key, sort key, secondary index và có thể duplicate cùng một fact sang nhiều read model.
+
+```txt
+NoSQL query-first thường đi theo flow:
+access patterns + latency/throughput target
+  -> partition/sort key
+  -> record shape và read model
+  -> duplicate data nếu một query khác cần shape khác
+```
+
+Ví dụ cùng dữ liệu order:
+
+```txt
+SQL logical model:
+orders -> order_items -> customers
+Một fact lưu ở nơi canonical; join/index phục vụ nhiều query.
+
+DynamoDB query-first model:
+CUSTOMER#123 / ORDER#2026-07-09#456  -> customer order history
+ORDER#456    / DETAIL               -> order detail
+STATUS#PAID  / 2026-07-09#456       -> paid-order index/read model
+```
+
+Một order có thể xuất hiện ở nhiều item vì mỗi item phục vụ một access pattern. Đổi lại, application phải xử lý duplicate write, partial failure, eventual consistency và rebuild.
+
+Nhưng không nên tuyệt đối hóa:
+
+- SQL cũng phải **query-aware**; normalize máy móc mà không xét workload có thể tạo query và join rất đắt.
+- SQL hoàn toàn có thể denormalize bằng summary table, materialized view hoặc CQRS read model.
+- NoSQL không phải loại nào cũng "query-first" giống nhau: document database thường **aggregate-first**, key-value store **key-first**, graph database **relationship/traversal-first**.
+- NoSQL vẫn cần model domain và invariant; nếu chỉ thiết kế theo màn hình hiện tại, requirement đổi có thể khiến data model phải làm lại.
+
+Cách nói chính xác hơn trong interview là: **SQL thường bắt đầu từ logical truth và relationship rồi tối ưu physical access; nhiều NoSQL bắt đầu từ access pattern và data locality rồi chấp nhận duplicate để tránh distributed join.**
+
 #### SQL thường normalize
 
 Normalize nghĩa là tách dữ liệu thành các bảng theo entity, giảm duplicate, giữ một nguồn sự thật.
@@ -346,7 +394,58 @@ Senior answer nên nói được consistency theo từng flow, không nói một
 
 NoSQL thường được nhắc tới với horizontal scalability. Nhưng cần hiểu vì sao.
 
-Nhiều NoSQL database thiết kế dữ liệu quanh **partition key**. Khi ghi/đọc, database biết item thuộc partition nào, có thể phân tán partition lên nhiều node.
+#### Vì sao SQL truyền thống thường scale dọc trước?
+
+Không phải vì ngôn ngữ SQL hay relational model cấm scale ngang. Nguyên nhân là **kiến trúc và các guarantee mà relational database truyền thống cung cấp**.
+
+Một PostgreSQL/MySQL single-primary thường đặt transaction engine, lock/MVCC, WAL, buffer cache, unique index, foreign key, query planner và dữ liệu authoritative trên một primary. Tăng CPU/RAM/IOPS của máy đó giữ nguyên một không gian transaction thống nhất, nên đơn giản và ít latency coordination hơn. Đây là vertical scaling.
+
+Scale ngang write khó hơn vì phải chia dữ liệu thành shard. Khi đó những operation vốn local có thể thành distributed operation:
+
+```txt
+JOIN customer và order ở hai shard
+-> phải gửi dữ liệu qua network hoặc scatter-gather
+
+UNIQUE(email) trên toàn hệ thống
+-> cần global index hoặc coordination giữa shard
+
+Transaction update inventory + order ở hai shard
+-> cần distributed transaction/consensus hoặc đổi business flow
+
+Ad-hoc query không có shard key
+-> fan-out tới nhiều shard rồi merge kết quả
+```
+
+Network không chỉ chậm hơn memory/local disk; node còn có thể timeout hoặc mất kết nối giữa lúc transaction chạy. Vì thế giữ join, constraint, transaction và arbitrary query transparent trên nhiều node phức tạp hơn nhiều so với scale một primary mạnh hơn. SQL truyền thống thường chọn vertical scale trước vì **đó là con đường đơn giản nhất để giữ semantics mạnh**, không phải vì SQL về bản chất chỉ chạy được trên một máy.
+
+SQL vẫn horizontal scale được:
+
+- Read replica scale read, nhưng không trực tiếp tăng write capacity và có thể có replication lag.
+- Application sharding/MySQL sharding scale write nếu có shard key tốt, nhưng application phải chịu thêm complexity.
+- Distributed SQL như CockroachDB, YugabyteDB hoặc Google Spanner phân tán dữ liệu và transaction, đổi lại có coordination latency và operational trade-off.
+- PostgreSQL extension/solution như Citus phân phối một số workload theo distribution key.
+
+#### Vì sao nhiều NoSQL scale ngang tự nhiên hơn?
+
+Nhiều NoSQL được thiết kế trong thời đại distributed system và **giảm hoặc thu hẹp các operation cần coordination toàn cluster**. Chúng thường yêu cầu query đi qua partition key, giữ transaction trong một item/document/partition, tránh join tùy ý và chấp nhận consistency có thể tune hoặc eventual ở một số flow.
+
+Khi `partition_key` quyết định chính xác node nào giữ data, router có thể đưa request thẳng tới partition đó. Nếu key phân bố đều, thêm node cho phép chuyển một phần partition và traffic sang node mới. Phần lớn request vẫn local trong một partition thay vì phải coordinate toàn cluster.
+
+Đây là trade-off cốt lõi:
+
+```txt
+SQL truyền thống:
+query/transaction linh hoạt hơn
+-> database phải coordination nhiều hơn
+-> scale dọc thường là bước đầu đơn giản nhất
+
+NoSQL phân tán:
+query/transaction bị giới hạn theo key/locality
+-> partition độc lập hơn
+-> dễ chia read/write traffic sang nhiều node hơn
+```
+
+Nhiều NoSQL database vì thế thiết kế dữ liệu quanh **partition key**. Khi ghi/đọc, database biết item thuộc partition nào, có thể phân tán partition lên nhiều node.
 
 Ví dụ:
 
@@ -859,6 +958,38 @@ Vì vậy câu trả lời tốt không nói "NoSQL nhanh hơn". Phải nói "nh
 ---
 
 ### 19. Cost: tiền và độ phức tạp đều là cost
+
+#### "Ngày xưa storage đắt nên dùng SQL; giờ storage rẻ nên dùng NoSQL để read nhanh" có đúng không?
+
+**Đúng một phần về xu hướng kinh tế, nhưng sai nếu dùng làm lý do quyết định.**
+
+Trước đây disk và memory đắt hơn nhiều, nên giảm duplicate là một lợi ích quan trọng của normalization. Tuy nhiên relational model không ra đời chỉ để tiết kiệm storage. Giá trị lớn hơn của nó là tránh anomaly và giữ một logical fact ở một nơi:
+
+```txt
+Update anomaly:
+email bị duplicate trong 1 triệu order
+-> đổi email phải sửa 1 triệu record; fail giữa chừng sẽ lệch dữ liệu
+
+Insert anomaly:
+không thể lưu customer nếu model bắt buộc phải có order
+
+Delete anomaly:
+xóa order cuối cùng vô tình làm mất thông tin customer
+```
+
+Normalization còn đem lại constraint, data independence và khả năng ad-hoc query. Những lợi ích đó vẫn còn nguyên dù disk gần như miễn phí.
+
+Ngày nay storage rẻ hơn, RAM/SSD tốt hơn và read latency/throughput quan trọng hơn, nên nhiều hệ thống sẵn sàng **đổi storage lấy compute và latency**: duplicate data thành read model, precompute aggregate, cache hoặc lưu document đã ghép sẵn để một request chỉ cần một key lookup. Đây là lý do kinh tế và kỹ thuật khiến denormalization/NoSQL phổ biến hơn.
+
+Nhưng "storage rẻ" không có nghĩa duplicate miễn phí:
+
+- Một bản dữ liệu có thể được nhân qua replica, multi-region, backup, index và môi trường staging.
+- Duplicate 5 read model làm mỗi write tốn thêm I/O, network và capacity unit.
+- Backfill, reindex, snapshot và restore đều lâu và đắt hơn khi data phình lớn.
+- Chi phí kỹ sư để sửa inconsistency thường đắt hơn tiền disk.
+- Read không tự động nhanh chỉ vì dùng NoSQL; SQL point lookup với index và cache cũng có thể rất nhanh.
+
+Cách nói chính xác là: **storage rẻ hơn làm denormalization khả thi hơn; access pattern rõ làm precomputed read model nhanh hơn; nhưng việc chọn SQL hay NoSQL vẫn phải dựa vào invariant, query pattern, scale, consistency và total cost of ownership.** Không nên chọn NoSQL chỉ vì disk rẻ hoặc vì hệ thống read-heavy. Một workload read-heavy có quan hệ phức tạp vẫn có thể phù hợp với SQL + index + read replica + cache/materialized view.
 
 SQL cost thường đến từ:
 
