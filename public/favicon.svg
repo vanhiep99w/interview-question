@@ -1,4 +1,46 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" fill="none">
-  <rect width="32" height="32" rx="8" fill="#3b82f6"/>
-  <text x="16" y="23" font-family="Georgia, serif" font-size="22" font-weight="bold" fill="white" text-anchor="middle">?</text>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
+  <defs>
+    <linearGradient id="bg" x1="7" y1="4" x2="57" y2="60" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#0F172A"/>
+      <stop offset="0.55" stop-color="#172554"/>
+      <stop offset="1" stop-color="#312E81"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="9" y1="14" x2="54" y2="51" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#22D3EE"/>
+      <stop offset="0.5" stop-color="#60A5FA"/>
+      <stop offset="1" stop-color="#A78BFA"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0" cy="0" r="1" gradientTransform="translate(51 11) rotate(132) scale(31)">
+      <stop stop-color="#818CF8" stop-opacity="0.42"/>
+      <stop offset="1" stop-color="#818CF8" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <rect x="1" y="1" width="62" height="62" rx="15" fill="url(#bg)"/>
+  <rect x="1.75" y="1.75" width="60.5" height="60.5" rx="14.25" stroke="white" stroke-opacity="0.14" stroke-width="1.5"/>
+  <circle cx="49" cy="13" r="27" fill="url(#glow)"/>
+
+  <path
+    d="M21 13H19C14.6 13 12.5 15.6 12.5 20V25C12.5 29 11 31 7.5 32C11 33 12.5 35 12.5 39V44C12.5 48.4 14.6 51 19 51H21"
+    stroke="url(#accent)"
+    stroke-width="4"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+  <path
+    d="M47 13H49C53.4 13 55.5 15.6 55.5 20V25C55.5 29 57 31 60.5 32C57 33 55.5 35 55.5 39V44C55.5 48.4 53.4 51 49 51H47"
+    stroke="url(#accent)"
+    stroke-width="4"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+
+  <path
+    d="M26 24.5C26 19.5 29.6 16.5 34.5 16.5C39.4 16.5 43 19.6 43 24C43 28.1 40.7 30.2 37.6 31.9C34.9 33.4 34 34.8 34 37.5"
+    stroke="white"
+    stroke-width="5"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+  <circle cx="34" cy="45.5" r="3" fill="url(#accent)"/>
 </svg>
