@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react';
-import { RootProvider } from 'fumadocs-ui/provider';
+import { Provider } from '@/components/provider';
 import './globals.css';
 
 export const metadata = {
@@ -11,10 +11,8 @@ export const metadata = {
 export default function RootLayout({ children }: { children: ReactNode }) {
   return (
     <html lang="vi" suppressHydrationWarning>
-      <body suppressHydrationWarning>
-        <RootProvider search={{ options: { type: 'static' } }}>
-          {children}
-        </RootProvider>
+      <body className="flex min-h-screen flex-col" suppressHydrationWarning>
+        <Provider>{children}</Provider>
       </body>
     </html>
   );

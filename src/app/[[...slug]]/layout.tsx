@@ -5,7 +5,7 @@ import type { ReactNode } from 'react';
 export default function Layout({ children }: { children: ReactNode }) {
   return (
     <DocsLayout
-      tree={source.pageTree}
+      tree={source.getPageTree()}
       nav={{ title: 'Interview Questions' }}
       sidebar={{ tabs: false }}
     >
