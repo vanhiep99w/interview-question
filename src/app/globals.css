@@ -8,9 +8,12 @@
   --fd-font-mono: 'JetBrains Mono', monospace;
 }
 
-/* Wider content area */
-#nd-page article {
+/* Keep the document content close to the sidebar and table of contents. */
+#nd-page > article {
+  width: 100%;
   max-width: none;
+  margin-inline: 0;
+  padding-inline: clamp(1rem, 1.5vw, 1.5rem);
 }
 
 /* Vietnamese text readability */
