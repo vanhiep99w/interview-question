@@ -1,0 +1,1192 @@
+---
+title: "Column nullable có sử dụng index được không?"
+description: "NULL được lưu trong B-tree ra sao, khi nào PostgreSQL dùng index cho IS NULL/IS NOT NULL và cách thiết kế partial, unique, composite index."
+---
+
+# Column nullable có sử dụng index được không?
+
+## Câu hỏi
+
+> Một column cho phép `NULL` có tạo và sử dụng index được không? Query `IS NULL`, `IS NOT NULL` hoặc tìm một giá trị cụ thể có dùng index không, và khi nào nên dùng partial index?
+
+---
+
+## Dành cho level
+
+**Mid / Senior** — Mid cần trả lời được rằng nullable column vẫn tạo index được, biết dùng `IS NULL` thay vì `= NULL`, và hiểu index tồn tại không có nghĩa optimizer luôn chọn index scan. Senior cần phân tích theo database engine, selectivity, tỷ lệ `NULL`, query pattern, partial/composite/unique index, write overhead, statistics và chứng minh bằng `EXPLAIN (ANALYZE, BUFFERS)` trên dữ liệu gần production.
+
+---
+
+## Cốt lõi cần nhớ
+
+- **Có.** Trong PostgreSQL, B-tree index chứa được `NULL`; planner có thể dùng nó cho `column = value`, range, `IS NULL`, `IS NOT NULL` và `ORDER BY`. Nullable chỉ là constraint của column, không làm index mất hiệu lực.
+- **Có thể dùng không có nghĩa chắc chắn sẽ dùng.** Nếu predicate trả về phần lớn table — ví dụ 90% rows đều `NULL` và query `IS NULL` — sequential scan thường rẻ hơn hàng triệu random heap lookups qua index.
+- Thiết kế index phải theo query: full index cho nhiều kiểu lookup; partial index như `WHERE deleted_at IS NULL` cho tập active nhỏ; composite index đặt các key filter/sort thực sự cần. Luôn kiểm tra database cụ thể vì PostgreSQL/MySQL và Oracle không lưu `NULL` trong B-tree giống nhau.
+
+---
+
+## Câu trả lời mẫu
+
+> Trong PostgreSQL, một column nullable vẫn tạo B-tree index bình thường và index có thể phục vụ cả lookup giá trị cụ thể lẫn `IS NULL` hoặc `IS NOT NULL`. Tuy nhiên tôi không kết luận query sẽ nhanh chỉ vì có index, vì planner chọn theo selectivity: nếu `IS NULL` match 80–90% table thì sequential scan thường rẻ hơn đi qua index rồi đọc gần như toàn bộ heap. Với case soft delete hoặc outbox, nếu chỉ một phần nhỏ rows là active/unprocessed, tôi thường tạo partial index theo đúng query, ví dụ `(tenant_id, created_at) WHERE deleted_at IS NULL`, thay vì index riêng `deleted_at` một cách máy móc. Tôi cũng kiểm tra semantics của unique index, vì PostgreSQL mặc định cho phép nhiều `NULL`, còn `NULLS NOT DISTINCT` sẽ coi các `NULL` là trùng nhau. Trước khi rollout, tôi xem `null_frac`, cardinality, query frequency và chạy `EXPLAIN (ANALYZE, BUFFERS)` trên dữ liệu có distribution gần production. Cuối cùng tôi dùng `CREATE INDEX CONCURRENTLY` cho bảng production lớn, theo dõi write latency/index size và xác nhận index thật sự được dùng sau `ANALYZE`.
+
+---
+
+## Phân tích chi tiết
+
+### 1. Câu trả lời ngắn: nullable và index là hai khái niệm độc lập
+
+Schema sau hoàn toàn hợp lệ:
+
+```sql
+CREATE TABLE users (
+    id          BIGINT PRIMARY KEY,
+    email       TEXT,
+    deleted_at  TIMESTAMPTZ
+);
+
+CREATE INDEX idx_users_email ON users (email);
+CREATE INDEX idx_users_deleted_at ON users (deleted_at);
+```
+
+`email` và `deleted_at` đều nullable nhưng vẫn tạo index được. Với PostgreSQL B-tree, planner có thể cân nhắc index cho:
+
+```sql
+SELECT * FROM users WHERE email = 'alice@example.com';
+SELECT * FROM users WHERE deleted_at IS NULL;
+SELECT * FROM users WHERE deleted_at IS NOT NULL;
+SELECT * FROM users WHERE deleted_at >= now() - interval '7 days';
+SELECT * FROM users ORDER BY deleted_at NULLS LAST LIMIT 50;
+```
+
+Điều cần tách rõ:
+
+```txt
+Nullable        = row có được phép không có giá trị ở column này hay không.
+Indexed         = database có duy trì access path cho column/expression hay không.
+Index eligible  = predicate có thể được index method hỗ trợ hay không.
+Index selected  = optimizer ước tính index plan rẻ hơn plan khác hay không.
+```
+
+Một query có thể **eligible** dùng index nhưng planner vẫn chọn sequential scan. Đây không phải dấu hiệu index “không support NULL”; có thể đơn giản là index không có lợi với distribution hiện tại.
+
+---
+
+### 2. `NULL` không phải một giá trị thông thường
+
+Trong SQL, `NULL` biểu diễn unknown/missing, nên so sánh bằng toán tử thông thường không trả về `TRUE`:
+
+```sql
+SELECT NULL = NULL;       -- NULL/UNKNOWN, không phải TRUE
+SELECT NULL <> NULL;      -- NULL/UNKNOWN
+SELECT 10 = NULL;         -- NULL/UNKNOWN
+```
+
+Vì `WHERE` chỉ giữ rows có predicate là `TRUE`, query sau không tìm được row nào:
+
+```sql
+-- Sai
+SELECT *
+FROM users
+WHERE deleted_at = NULL;
+```
+
+Phải dùng:
+
+```sql
+SELECT *
+FROM users
+WHERE deleted_at IS NULL;
+
+SELECT *
+FROM users
+WHERE deleted_at IS NOT NULL;
+```
+
+Nếu cần so sánh null-safe trong PostgreSQL:
+
+```sql
+SELECT *
+FROM users
+WHERE external_id IS NOT DISTINCT FROM :externalId;
+```
+
+`IS NOT DISTINCT FROM` coi hai `NULL` là bằng nhau về semantics so sánh. Tuy nhiên index plan cho parameter/null-safe predicate cần được kiểm tra trên query thật; đừng đổi toàn bộ `=` thành null-safe operator mà không xem execution plan.
+
+Lỗi `= NULL` là lỗi về **three-valued logic**, không phải lỗi của index.
+
+---
+
+### 3. PostgreSQL B-tree có thể dùng cho `IS NULL` và `IS NOT NULL`
+
+PostgreSQL documentation nêu rõ B-tree có thể xử lý:
+
+```txt
+<  <=  =  >=  >
+BETWEEN, IN
+IS NULL, IS NOT NULL
+```
+
+Ví dụ:
+
+```sql
+CREATE INDEX idx_orders_shipped_at ON orders (shipped_at);
+
+EXPLAIN (ANALYZE, BUFFERS)
+SELECT *
+FROM orders
+WHERE shipped_at IS NULL;
+```
+
+Tùy data distribution, kết quả có thể là:
+
+```txt
+Bitmap Heap Scan on orders
+  Recheck Cond: (shipped_at IS NULL)
+  -> Bitmap Index Scan on idx_orders_shipped_at
+       Index Cond: (shipped_at IS NULL)
+```
+
+hoặc:
+
+```txt
+Seq Scan on orders
+  Filter: (shipped_at IS NULL)
+```
+
+Cả hai đều có thể là plan đúng. Câu hỏi không nên là “PostgreSQL có dùng được index không?”, mà là:
+
+```txt
+Predicate có match bao nhiêu rows?
+Rows nằm tập trung hay rải trên nhiều heap pages?
+Query cần trả column nào?
+Table/index có nằm trong cache không?
+Statistics có đủ mới và đủ chính xác không?
+Index scan có tránh sort hoặc cho index-only scan không?
+```
+
+---
+
+### 4. Selectivity quyết định planner có chọn index hay không
+
+**Selectivity** là tỷ lệ rows match predicate.
+
+Giả sử bảng có 100 triệu orders:
+
+#### Case A — 95 triệu rows có `shipped_at IS NULL`
+
+```sql
+SELECT *
+FROM orders
+WHERE shipped_at IS NULL;
+-- trả khoảng 95% table
+```
+
+Dùng index có thể phải:
+
+1. Scan gần như toàn bộ phần `NULL` trong index.
+2. Theo row locator về rất nhiều heap pages.
+3. Đọc gần như toàn bộ table nhưng theo access pattern kém tuần tự hơn.
+
+Sequential scan thường hợp lý hơn.
+
+#### Case B — 100 nghìn rows có `shipped_at IS NULL`
+
+```sql
+SELECT *
+FROM orders
+WHERE shipped_at IS NULL;
+-- trả khoảng 0,1% table
+```
+
+Index scan/bitmap index scan có khả năng thắng vì bỏ qua 99,9% rows không liên quan.
+
+Các tỷ lệ `95%` và `0,1%` chỉ để làm rõ hai cực, **không phải ngưỡng optimizer cố định**. Điểm crossover phụ thuộc row width, correlation, cache, storage, parallelism, số column cần trả và cost settings. Không có rule universal kiểu “trên 10% thì index không dùng”.
+
+---
+
+### 5. Xem tỷ lệ NULL và statistics trong PostgreSQL
+
+Planner dùng statistics do `ANALYZE`/autovacuum thu thập. Có thể xem:
+
+```sql
+SELECT
+    schemaname,
+    tablename,
+    attname,
+    null_frac,
+    n_distinct,
+    most_common_vals,
+    most_common_freqs
+FROM pg_stats
+WHERE schemaname = 'public'
+  AND tablename = 'orders'
+  AND attname = 'shipped_at';
+```
+
+Ý nghĩa chính:
+
+- `null_frac`: fraction rows có `NULL` trong sample statistics.
+- `n_distinct`: số distinct values ước tính; giá trị âm biểu diễn tỷ lệ so với số rows.
+- `most_common_vals`/`most_common_freqs`: values phổ biến và tần suất ước tính.
+
+Sau bulk load/backfill lớn:
+
+```sql
+ANALYZE orders (shipped_at);
+```
+
+Nếu distribution cực skew hoặc estimate sai đáng kể, có thể tăng statistics target cho column:
+
+```sql
+ALTER TABLE orders
+ALTER COLUMN shipped_at SET STATISTICS 500;
+
+ANALYZE orders (shipped_at);
+```
+
+`500` là ví dụ cho column có distribution phức tạp hơn default, không phải giá trị mặc định nên áp toàn hệ thống. Statistics target cao hơn tăng sample/độ chi tiết nhưng cũng tăng thời gian `ANALYZE`, planning metadata và maintenance cost. Chỉ tăng sau khi `EXPLAIN` cho thấy estimate sai ảnh hưởng plan.
+
+So sánh estimated và actual rows:
+
+```sql
+EXPLAIN (ANALYZE, BUFFERS)
+SELECT *
+FROM orders
+WHERE shipped_at IS NULL;
+```
+
+Không chạy `EXPLAIN ANALYZE` bừa trên `UPDATE`, `DELETE` hoặc query cực nặng ở production, vì `ANALYZE` **thực thi query thật**.
+
+---
+
+### 6. Full index: đơn giản và phục vụ nhiều query pattern
+
+```sql
+CREATE INDEX idx_users_email ON users (email);
+```
+
+Full index phù hợp khi cần nhiều kiểu query:
+
+```sql
+WHERE email = :email
+WHERE email IS NULL
+WHERE email IS NOT NULL
+ORDER BY email
+```
+
+Ưu điểm:
+
+- Query pattern linh hoạt hơn partial index.
+- Planner không cần chứng minh query predicate imply partial predicate.
+- Dễ hiểu, dễ dùng cho equality/range/order.
+
+Chi phí:
+
+- Index chứa entries cho toàn bộ rows, kể cả `NULL` trong PostgreSQL.
+- Mọi insert và update liên quan phải duy trì index.
+- Tốn disk, cache và WAL.
+- Một index riêng trên low-cardinality nullable column có thể ít giá trị nếu query trả quá nhiều rows.
+
+Vì vậy “column nullable có index được” không suy ra “nên index column đó”. Index phải trả lời một query hoặc enforce một constraint có giá trị thực tế.
+
+---
+
+### 7. Partial index: chỉ index subset query thực sự cần
+
+Partial index có `WHERE predicate` và chỉ chứa rows thỏa predicate.
+
+#### Index các giá trị không NULL
+
+```sql
+CREATE INDEX idx_users_email_present
+ON users (email)
+WHERE email IS NOT NULL;
+```
+
+Phù hợp khi:
+
+- Phần lớn rows có `email IS NULL`.
+- Query chủ yếu lookup email cụ thể.
+- Không cần index hỗ trợ query tìm rows `email IS NULL`.
+
+Query sau có thể dùng partial index vì equality với một giá trị cụ thể ngụ ý `email IS NOT NULL`:
+
+```sql
+SELECT *
+FROM users
+WHERE email = 'alice@example.com';
+```
+
+Index nhỏ hơn full index, giảm disk/cache và không phải thêm entry cho rows email `NULL`. Nhưng khi email chuyển từ `NULL` sang non-null, database vẫn phải insert entry vào index; partial index không làm write miễn phí.
+
+#### Index các rows đang NULL
+
+Soft-delete/outbox/job thường quan tâm subset chưa xử lý:
+
+```sql
+CREATE INDEX idx_outbox_unpublished
+ON outbox_events (occurred_at, id)
+WHERE published_at IS NULL;
+```
+
+Query tương ứng:
+
+```sql
+SELECT id, aggregate_id, payload
+FROM outbox_events
+WHERE published_at IS NULL
+ORDER BY occurred_at, id
+LIMIT 100;
+```
+
+Ở đây key index là `(occurred_at, id)`, không phải `published_at`. Predicate đã đảm bảo mọi entry là unpublished; key được chọn để hỗ trợ `ORDER BY` và claim batch ổn định.
+
+`LIMIT 100` chỉ minh họa worker lấy batch nhỏ. Batch production phải dựa trên payload size, thời gian xử lý, lock duration và throughput; batch quá lớn giữ nhiều memory/lock, batch quá nhỏ tăng round-trip.
+
+Một thiết kế kém hữu ích hơn:
+
+```sql
+CREATE INDEX idx_outbox_unpublished_bad
+ON outbox_events (published_at)
+WHERE published_at IS NULL;
+```
+
+Index này vẫn có thể giúp tìm subset nhỏ trong PostgreSQL, nhưng mọi key đều `NULL`; nó không hỗ trợ thứ tự `occurred_at` và không cover identity cần claim. Hãy index columns query dùng để filter/order/join/return, không máy móc index chính nullable column.
+
+---
+
+### 8. Partial index chỉ dùng được khi planner chứng minh predicate phù hợp
+
+Với index:
+
+```sql
+CREATE INDEX idx_active_orders_tenant_created
+ON orders (tenant_id, created_at DESC)
+WHERE deleted_at IS NULL;
+```
+
+Query phù hợp:
+
+```sql
+SELECT *
+FROM orders
+WHERE tenant_id = :tenantId
+  AND deleted_at IS NULL
+ORDER BY created_at DESC
+LIMIT 50;
+```
+
+Query không phù hợp:
+
+```sql
+SELECT *
+FROM orders
+WHERE tenant_id = :tenantId;
+```
+
+Rows đã deleted không nằm trong index nên planner không thể dùng partial index để trả tất cả orders.
+
+PostgreSQL không có theorem prover tổng quát để nhận mọi biểu thức tương đương. Predicate query nên viết nhất quán với predicate index. Ví dụ ORM tự sinh biểu thức phức tạp như:
+
+```sql
+WHERE COALESCE(deleted_at, TIMESTAMP '9999-12-31') > now()
+```
+
+không giống rõ ràng với:
+
+```sql
+WHERE deleted_at IS NULL
+```
+
+và còn có semantics khác. Hãy kiểm tra SQL thật do Hibernate sinh ra.
+
+Parameterized predicate cũng có caveat. PostgreSQL docs nêu ví dụ index `WHERE x < 2` không thể luôn được suy ra từ prepared query `WHERE x < $1`, vì `$1` có thể là bất kỳ giá trị nào. Với soft-delete, `deleted_at IS NULL` là literal cố định nên tránh được kiểu bất định này; parameter cho `tenant_id` không làm mất predicate cố định đó.
+
+---
+
+### 9. Composite index với nullable column
+
+Giả sử query chính:
+
+```sql
+SELECT *
+FROM orders
+WHERE tenant_id = :tenantId
+  AND deleted_at IS NULL
+ORDER BY created_at DESC
+LIMIT 50;
+```
+
+Các lựa chọn:
+
+```sql
+-- Full composite index
+CREATE INDEX idx_orders_tenant_deleted_created
+ON orders (tenant_id, deleted_at, created_at DESC);
+
+-- Partial index thường gọn hơn cho active-order query
+CREATE INDEX idx_orders_active_tenant_created
+ON orders (tenant_id, created_at DESC)
+WHERE deleted_at IS NULL;
+```
+
+Partial index có lợi nếu active rows là subset đủ nhỏ và query gần như luôn thêm `deleted_at IS NULL`. Nó bỏ `deleted_at` khỏi key vì predicate đã cố định giá trị đó, đồng thời dùng key order đúng cho tenant + sort.
+
+Nếu query khác cần lịch sử đã xóa:
+
+```sql
+WHERE tenant_id = :tenantId
+  AND deleted_at >= :from
+  AND deleted_at < :to
+```
+
+partial active index không giúp. Có thể cần full/composite index khác, nhưng đừng tạo index cho mọi query hiếm; kiểm tra frequency và latency SLO.
+
+#### Thứ tự column vẫn quan trọng
+
+Index:
+
+```sql
+CREATE INDEX idx_orders_tenant_deleted
+ON orders (tenant_id, deleted_at);
+```
+
+rất tự nhiên cho:
+
+```sql
+WHERE tenant_id = ? AND deleted_at IS NULL
+```
+
+Nhưng query chỉ có:
+
+```sql
+WHERE deleted_at IS NULL
+```
+
+không có leading `tenant_id` nên khả năng sử dụng/hiệu quả khác; PostgreSQL phiên bản mới có thể cân nhắc skip scan trong một số distribution, nhưng không nên thiết kế dựa vào may mắn. Nếu đây là critical query toàn hệ thống, hãy tạo index theo chính access pattern đó hoặc dùng partial index có key phù hợp.
+
+---
+
+### 10. Unique index và NULL: dễ trả lời sai nhất
+
+PostgreSQL mặc định coi các `NULL` là **distinct** trong unique index/constraint. Vì vậy:
+
+```sql
+CREATE UNIQUE INDEX uq_users_phone
+ON users (phone_number);
+```
+
+Cho phép:
+
+```txt
+phone_number = NULL
+phone_number = NULL
+phone_number = NULL
+```
+
+Nhưng không cho phép hai rows cùng non-null value:
+
+```txt
+phone_number = '0901234567'
+phone_number = '0901234567'  → unique violation
+```
+
+Đây thường chính là requirement “phone optional, nhưng nếu có thì không được trùng”. Có thể dùng partial unique index để index nhỏ hơn khi rất nhiều `NULL`:
+
+```sql
+CREATE UNIQUE INDEX uq_users_phone_present
+ON users (phone_number)
+WHERE phone_number IS NOT NULL;
+```
+
+#### Nếu business chỉ cho phép tối đa một NULL
+
+PostgreSQL hỗ trợ:
+
+```sql
+CREATE UNIQUE INDEX uq_users_phone_one_null
+ON users (phone_number) NULLS NOT DISTINCT;
+```
+
+`NULLS NOT DISTINCT` làm các `NULL` bị coi như trùng nhau cho uniqueness, nên row `NULL` thứ hai bị reject. Feature này có từ PostgreSQL 15; cần kiểm tra version trước migration.
+
+#### Composite unique index
+
+```sql
+CREATE UNIQUE INDEX uq_tenant_external_id
+ON customers (tenant_id, external_id);
+```
+
+Mặc định nhiều rows có cùng `tenant_id` và `external_id NULL` vẫn có thể tồn tại, vì ít nhất một indexed value là `NULL`. Nếu business yêu cầu mỗi tenant chỉ có tối đa một row với external ID unknown, dùng:
+
+```sql
+CREATE UNIQUE INDEX uq_tenant_external_id_strict
+ON customers (tenant_id, external_id) NULLS NOT DISTINCT;
+```
+
+Đừng chọn semantics từ syntax trước. Hãy viết ví dụ rows được phép/bị cấm rồi mới tạo unique index.
+
+---
+
+### 11. `IS NOT NULL` có dùng index không?
+
+Có thể. PostgreSQL B-tree hỗ trợ `IS NOT NULL`, nhưng selectivity vẫn quyết định.
+
+Nếu 99% rows non-null:
+
+```sql
+SELECT *
+FROM users
+WHERE email IS NOT NULL;
+```
+
+query gần như đọc toàn table; sequential scan thường hợp lý.
+
+Nếu chỉ 1% rows non-null:
+
+```sql
+SELECT *
+FROM users
+WHERE optional_external_id IS NOT NULL;
+```
+
+index scan có thể rất hiệu quả.
+
+Đôi khi query không cần `SELECT *` mà chỉ cần indexed column:
+
+```sql
+SELECT email
+FROM users
+WHERE email IS NOT NULL
+ORDER BY email;
+```
+
+Planner có thể cân nhắc index-only scan vì dữ liệu cần trả có trong index. Tuy nhiên PostgreSQL vẫn dựa vào visibility map để biết tuple có visible hay không; nếu table update nhiều và chưa vacuum phù hợp, vẫn có heap fetch. “Covering index” không đảm bảo zero heap access trong mọi thời điểm.
+
+---
+
+### 12. Index cho `ORDER BY ... NULLS FIRST/LAST`
+
+PostgreSQL B-tree lưu thứ tự `NULL` và cho cấu hình:
+
+```sql
+CREATE INDEX idx_tasks_due_at
+ON tasks (due_at ASC NULLS LAST);
+```
+
+Query:
+
+```sql
+SELECT *
+FROM tasks
+ORDER BY due_at ASC NULLS LAST
+LIMIT 50;
+```
+
+có thể đọc trực tiếp theo index order và tránh sort, đặc biệt hữu ích với `LIMIT`. Nhưng direction/null ordering phải tương thích với cách scan index. PostgreSQL có thể scan B-tree ngược, song với multicolumn index và mixed directions cần thiết kế cụ thể:
+
+```sql
+CREATE INDEX idx_tasks_priority_due
+ON tasks (priority DESC, due_at ASC NULLS LAST);
+```
+
+Đừng thêm `NULLS LAST` chỉ vì column nullable; thêm khi query ordering và SLO thực sự cần nó.
+
+---
+
+### 13. Function trên nullable column có thể làm plain index không dùng được
+
+Index:
+
+```sql
+CREATE INDEX idx_users_email ON users (email);
+```
+
+Query:
+
+```sql
+SELECT *
+FROM users
+WHERE lower(email) = lower(:email);
+```
+
+không phải lookup trực tiếp trên key `email`. Nếu cần case-insensitive lookup, tạo expression index:
+
+```sql
+CREATE INDEX idx_users_email_lower
+ON users (lower(email))
+WHERE email IS NOT NULL;
+```
+
+Query phải dùng expression tương thích:
+
+```sql
+SELECT *
+FROM users
+WHERE lower(email) = lower(:email);
+```
+
+Tương tự, pattern sau thường là smell:
+
+```sql
+WHERE COALESCE(email, '') = :email
+```
+
+Nó thay semantics của `NULL` thành empty string và có thể cần expression index riêng. Nếu input không được null, dùng `email = :email`; nếu input có thể null, tách code path:
+
+```sql
+-- input có giá trị
+WHERE email = :email
+
+-- input null và muốn tìm missing email
+WHERE email IS NULL
+```
+
+Tách query thường giúp semantics rõ và planner có predicate cụ thể hơn so với một optional-filter query lớn.
+
+---
+
+### 14. Optional filter pattern dễ tạo plan kém
+
+API search hay viết:
+
+```sql
+SELECT *
+FROM users
+WHERE (:email IS NULL OR email = :email)
+  AND (:status IS NULL OR status = :status);
+```
+
+Khi `:email` là `NULL`, điều kiện đầu match mọi row; khi có giá trị, nó là equality lookup. Một prepared statement phải phục vụ distributions rất khác nhau, và generic plan có thể không tối ưu cho cả hai. Nhiều `OR` cũng làm selectivity estimation khó hơn.
+
+Cách tốt hơn cho critical search endpoint:
+
+- Xây query theo các filter thật sự có mặt bằng Criteria API/QueryDSL hoặc SQL builder.
+- Giới hạn số shape query để tránh combinatorial explosion.
+- Tạo composite index theo top query patterns, không theo từng field UI.
+- Kiểm tra `pg_stat_statements` để biết query shape/frequency thật.
+
+Đừng ép index hint trước khi sửa predicate/statistics; PostgreSQL không có built-in index hint như một số database khác vì planner cần tự so sánh cost.
+
+---
+
+### 15. Spring Data JPA sinh `IS NULL` như thế nào?
+
+Repository method:
+
+```java
+public interface OrderRepository extends JpaRepository<Order, Long> {
+
+    List<Order> findTop50ByTenantIdAndDeletedAtIsNullOrderByCreatedAtDesc(
+        Long tenantId
+    );
+}
+```
+
+SQL ý tưởng:
+
+```sql
+SELECT ...
+FROM orders
+WHERE tenant_id = ?
+  AND deleted_at IS NULL
+ORDER BY created_at DESC
+FETCH FIRST 50 ROWS ONLY;
+```
+
+Index phù hợp:
+
+```sql
+CREATE INDEX idx_orders_active_tenant_created
+ON orders (tenant_id, created_at DESC)
+WHERE deleted_at IS NULL;
+```
+
+JPA mapping nullable:
+
+```java
+@Column(name = "deleted_at")
+private Instant deletedAt;
+```
+
+`nullable = true/false` trong annotation chủ yếu mô tả/generate schema tùy config; nó không quyết định optimizer có dùng index. Production schema migration nên do Flyway/Liquibase quản lý, và index design phải dựa trên SQL/query plan thật thay vì entity annotation.
+
+Nếu dùng `@Where`, Hibernate filter, tenant filter hoặc soft-delete feature, kiểm tra generated SQL ở mọi code path. Native query/batch job có thể không tự thêm `deleted_at IS NULL` và có semantics khác repository method.
+
+---
+
+### 16. Database engine khác nhau: đừng trả lời như thể mọi B-tree giống nhau
+
+#### PostgreSQL
+
+- B-tree chứa/search được `NULL`.
+- `IS NULL` và `IS NOT NULL` là indexable conditions.
+- Unique mặc định cho phép nhiều `NULL`.
+- Có partial index và `NULLS NOT DISTINCT`.
+
+#### MySQL/InnoDB
+
+- Secondary B-tree indexes có thể lưu `NULL`.
+- `IS NULL`/`IS NOT NULL` có thể dùng index.
+- Unique nullable key thường cho phép nhiều `NULL`.
+- MySQL không có PostgreSQL-style arbitrary partial index; thường cần composite/generated-column design tùy case.
+
+#### Oracle B-tree
+
+Oracle không lưu rows mà **tất cả index key columns đều `NULL`** trong conventional B-tree. Vì vậy single-column B-tree index trên nullable column thường không giúp `WHERE column IS NULL`. Một workaround là composite/function-based index có non-null expression/constant, nhưng phải thiết kế theo Oracle semantics; bitmap index có lưu null nhưng thường không phù hợp OLTP write concurrency.
+
+Ví dụ Oracle-specific:
+
+```sql
+CREATE INDEX idx_users_email_with_nulls
+ON users (email, 1);
+```
+
+Constant `1` làm index key không còn “all null”, nhưng đây không phải pattern cần dùng trong PostgreSQL.
+
+Kết luận interview an toàn:
+
+> “Có thể index nullable column, nhưng việc NULL có được lưu và query `IS NULL` có dùng index hay không phụ thuộc engine. Với PostgreSQL thì có; với Oracle conventional B-tree có ngoại lệ all-null key.”
+
+---
+
+### 17. Soft delete: use case partial index rất điển hình
+
+Schema:
+
+```sql
+CREATE TABLE orders (
+    id          BIGINT PRIMARY KEY,
+    tenant_id   BIGINT NOT NULL,
+    status      TEXT NOT NULL,
+    created_at  TIMESTAMPTZ NOT NULL,
+    deleted_at  TIMESTAMPTZ
+);
+```
+
+Query nóng:
+
+```sql
+SELECT id, status, created_at
+FROM orders
+WHERE tenant_id = :tenantId
+  AND deleted_at IS NULL
+ORDER BY created_at DESC
+LIMIT 50;
+```
+
+Index:
+
+```sql
+CREATE INDEX CONCURRENTLY idx_orders_active_tenant_created
+ON orders (tenant_id, created_at DESC)
+INCLUDE (status)
+WHERE deleted_at IS NULL;
+```
+
+`INCLUDE(status)` có thể hỗ trợ index-only scan vì response cần status nhưng không filter/order theo nó. Tuy nhiên included column làm index lớn hơn, tăng write/WAL và B-tree deduplication không áp dụng khi có non-key column; chỉ thêm sau khi đo heap fetch cost.
+
+Soft delete còn có correctness issue:
+
+```sql
+CREATE UNIQUE INDEX uq_users_active_tenant_email
+ON users (tenant_id, lower(email))
+WHERE deleted_at IS NULL;
+```
+
+Index này enforce email unique **chỉ trong active users**, cho phép reuse email sau khi row cũ soft-delete. Đây phải là quyết định business rõ ràng: nếu audit/security không cho reuse identity, partial unique index này là sai dù query nhanh.
+
+---
+
+### 18. Outbox/job queue: partial index nhỏ nhưng churn cao
+
+Outbox thường có nhiều rows đã publish và ít rows pending:
+
+```sql
+CREATE INDEX CONCURRENTLY idx_outbox_pending
+ON outbox_events (occurred_at, id)
+WHERE published_at IS NULL;
+```
+
+Worker:
+
+```sql
+SELECT id
+FROM outbox_events
+WHERE published_at IS NULL
+ORDER BY occurred_at, id
+FOR UPDATE SKIP LOCKED
+LIMIT 100;
+```
+
+Khi publish xong:
+
+```sql
+UPDATE outbox_events
+SET published_at = now()
+WHERE id = :id;
+```
+
+Row chuyển từ thỏa predicate sang không thỏa predicate, nên index entry bị xóa. Partial index nhỏ giúp scan pending nhanh, nhưng workload có churn liên tục; cần monitor index bloat, vacuum, WAL và transaction batch duration.
+
+Nếu pending backlog tăng từ 0,1% lên 40% trong incident, index vẫn đúng về correctness nhưng query cost/plan có thể thay đổi. Metric backlog age/count quan trọng hơn chỉ nhìn “index đang tồn tại”.
+
+---
+
+### 19. Chi phí write khi index nullable column
+
+Mỗi index thêm work cho DML:
+
+```txt
+INSERT non-null value → insert index entry
+INSERT NULL          → full PostgreSQL index vẫn có entry;
+                       partial WHERE col IS NOT NULL thì không
+UPDATE NULL → value  → thêm entry vào partial/full index
+UPDATE value → NULL  → xóa/đổi entry
+DELETE               → index tuple cần cleanup theo MVCC/VACUUM
+```
+
+Nhiều index còn làm:
+
+- Tăng WAL và replication bandwidth/lag.
+- Tăng storage, backup và cache pressure.
+- Giảm khả năng PostgreSQL dùng HOT update khi indexed columns hoặc index predicates bị ảnh hưởng.
+- Kéo dài bulk load/backfill.
+
+Vì vậy partial index không chỉ tối ưu read; nó có thể giảm write/storage nếu loại được phần lớn rows không quan tâm. Nhưng predicate thay đổi thường xuyên như pending → completed vẫn tạo index churn.
+
+---
+
+### 20. Tạo index trên bảng production lớn
+
+Lệnh thường dùng ở PostgreSQL production:
+
+```sql
+CREATE INDEX CONCURRENTLY idx_orders_active_tenant_created
+ON orders (tenant_id, created_at DESC)
+WHERE deleted_at IS NULL;
+```
+
+`CONCURRENTLY` cho phép insert/update/delete tiếp tục thay vì block writers như standard index build, nhưng:
+
+- Build lâu và tốn thêm CPU/I/O vì cần nhiều phase/scan.
+- Không được chạy trong transaction block.
+- Chỉ một concurrent index build trên một table tại một thời điểm.
+- Nếu fail, có thể để lại invalid index vẫn tốn maintenance; phải inspect/drop/rebuild.
+- Build xong không có nghĩa query lập tức đổi plan trong mọi session/workload.
+
+Kiểm tra trạng thái:
+
+```sql
+SELECT
+    i.relname AS index_name,
+    ix.indisvalid,
+    ix.indisready,
+    pg_size_pretty(pg_relation_size(i.oid)) AS index_size
+FROM pg_index ix
+JOIN pg_class i ON i.oid = ix.indexrelid
+WHERE i.relname = 'idx_orders_active_tenant_created';
+```
+
+Sau rollout:
+
+```sql
+ANALYZE orders;
+```
+
+và kiểm tra query plan/latency/usage. Không tạo index trong peak hour chỉ vì có `CONCURRENTLY`; nó không block writers theo cách standard build nhưng vẫn cạnh tranh I/O/CPU và có thể tăng replication lag.
+
+---
+
+### 21. Đo index usage đúng cách
+
+Execution plan là bằng chứng trực tiếp cho một query:
+
+```sql
+EXPLAIN (ANALYZE, BUFFERS, WAL)
+SELECT id, status, created_at
+FROM orders
+WHERE tenant_id = 42
+  AND deleted_at IS NULL
+ORDER BY created_at DESC
+LIMIT 50;
+```
+
+Cần xem:
+
+```txt
+Estimated rows vs actual rows
+Index Cond và Filter
+Rows Removed by Filter
+Shared hit/read blocks
+Heap Fetches nếu Index Only Scan
+Sort có còn tồn tại không
+Execution time qua nhiều lần warm/cold cache phù hợp
+```
+
+Thống kê usage tổng quan:
+
+```sql
+SELECT
+    schemaname,
+    relname AS table_name,
+    indexrelname AS index_name,
+    idx_scan,
+    idx_tup_read,
+    idx_tup_fetch
+FROM pg_stat_user_indexes
+WHERE relname = 'orders'
+ORDER BY idx_scan DESC;
+```
+
+`idx_scan = 0` không tự động nghĩa index vô dụng:
+
+- Statistics có thể vừa reset/restart.
+- Unique index có giá trị enforce constraint dù ít query scan.
+- Index phục vụ incident/month-end job hiếm nhưng critical.
+- Replica có workload read khác primary.
+
+Đánh giá qua một observation window đại diện và inventory constraint/query trước khi drop.
+
+---
+
+### 22. Reproduce nhỏ để hiểu planner — nhưng không thay production benchmark
+
+Có thể tạo dữ liệu thử:
+
+```sql
+CREATE TABLE nullable_index_demo (
+    id BIGSERIAL PRIMARY KEY,
+    external_id TEXT
+);
+
+INSERT INTO nullable_index_demo (external_id)
+SELECT CASE
+         WHEN n % 1000 = 0 THEN 'EXT-' || n
+         ELSE NULL
+       END
+FROM generate_series(1, 1000000) AS n;
+
+CREATE INDEX idx_demo_external_id
+ON nullable_index_demo (external_id);
+
+ANALYZE nullable_index_demo;
+```
+
+Một triệu rows đủ để minh họa planner trên máy local mà không làm test quá nặng; `n % 1000 = 0` tạo khoảng 0,1% non-null để minh họa predicate selective. Đây không phải distribution mặc định cho application thật.
+
+Test:
+
+```sql
+EXPLAIN (ANALYZE, BUFFERS)
+SELECT *
+FROM nullable_index_demo
+WHERE external_id = 'EXT-500000';
+
+EXPLAIN (ANALYZE, BUFFERS)
+SELECT *
+FROM nullable_index_demo
+WHERE external_id IS NOT NULL;
+
+EXPLAIN (ANALYZE, BUFFERS)
+SELECT *
+FROM nullable_index_demo
+WHERE external_id IS NULL;
+```
+
+Kỳ vọng hợp lý:
+
+- Equality lookup rất selective có khả năng dùng index.
+- `IS NOT NULL` chỉ khoảng 0,1% có khả năng dùng index.
+- `IS NULL` gần 99,9% có khả năng dùng sequential scan.
+
+Không hard-code plan exact trong automated test vì planner/cost/cache/version có thể thay đổi. Test performance bằng threshold/SLO có môi trường ổn định hơn, còn correctness test không nên phụ thuộc node name trong `EXPLAIN` trừ khi đó là mục tiêu tuning cụ thể.
+
+---
+
+### 23. Decision table theo query pattern
+
+| Query/workload | Index khởi đầu | Lý do |
+|---|---|---|
+| `WHERE email = ?`, email optional và khá unique | Full B-tree hoặc partial `WHERE email IS NOT NULL` | Equality selective; partial nhỏ nếu phần lớn NULL |
+| `WHERE col IS NULL`, NULL rất hiếm | Full B-tree hoặc partial index cho NULL subset | Chỉ đọc subset nhỏ |
+| `WHERE col IS NULL`, NULL chiếm gần toàn table | Thường seq scan; index theo filter khác | Index không loại đủ rows |
+| Active rows: `deleted_at IS NULL` + tenant + sort | `(tenant_id, created_at DESC) WHERE deleted_at IS NULL` | Predicate loại history, key phục vụ filter/sort |
+| Pending outbox + oldest first | `(occurred_at, id) WHERE published_at IS NULL` | Index nhỏ, deterministic claim order |
+| Optional value unique nếu có | Unique index mặc định hoặc unique partial non-null | Non-null không trùng, nhiều NULL được phép |
+| Chỉ cho một NULL | `UNIQUE ... NULLS NOT DISTINCT` | NULL được coi là duplicate trong PostgreSQL 15+ |
+| Case-insensitive optional email | `lower(email) WHERE email IS NOT NULL` | Query expression khớp index expression |
+| Query luôn trả phần lớn rows | Có thể không cần index riêng | Sequential scan thường rẻ hơn |
+
+Đây là điểm khởi đầu để benchmark, không phải mapping tuyệt đối.
+
+---
+
+### 24. Checklist trả lời interview
+
+```txt
+1. Xác định database engine/version
+   PostgreSQL, MySQL, Oracle có NULL-index semantics khác nhau.
+
+2. Viết query thật
+   = value, IS NULL, IS NOT NULL, ORDER BY, JOIN hay uniqueness?
+
+3. Đo distribution
+   Row count, null_frac, n_distinct, hot tenants, active/history ratio.
+
+4. Chọn shape index
+   Full, partial, composite, expression, unique, INCLUDE.
+
+5. Kiểm tra predicate matching
+   SQL do ORM sinh có thật sự chứa/ám chỉ partial predicate không?
+
+6. Chứng minh bằng plan
+   EXPLAIN (ANALYZE, BUFFERS), estimated vs actual rows.
+
+7. Tính write/ops cost
+   WAL, storage, update churn, vacuum, replication lag.
+
+8. Rollout an toàn
+   CREATE INDEX CONCURRENTLY, monitor invalid index và latency.
+```
+
+Câu chốt tốt trong interview:
+
+> “Nullable column dùng index được; điều quyết định không phải nullable mà là engine, operator, selectivity và query shape. Với PostgreSQL, `IS NULL`/`IS NOT NULL` đều indexable, nhưng tôi chỉ tạo/chọn full hay partial index sau khi xem distribution và execution plan.”
+
+---
+
+## Bẫy thường gặp
+
+❌ **"Column có NULL thì database không tạo index được"**
+
+→ Tại sao sai: PostgreSQL và MySQL cho phép index nullable column; PostgreSQL B-tree còn hỗ trợ `IS NULL`/`IS NOT NULL`.
+
+✅ Đúng hơn: Xác định engine cụ thể; Oracle conventional B-tree có ngoại lệ không lưu all-null keys.
+
+---
+
+❌ **"Có index thì query `IS NULL` chắc chắn dùng index"**
+
+→ Tại sao sai: Optimizer chọn plan theo cost; nếu `NULL` chiếm phần lớn table, sequential scan có thể rẻ hơn.
+
+✅ Đúng hơn: Xem `null_frac`, estimated/actual rows và `EXPLAIN (ANALYZE, BUFFERS)`.
+
+---
+
+❌ **"Tìm NULL bằng `column = NULL`"**
+
+→ Tại sao sai: Kết quả comparison là `UNKNOWN`, nên `WHERE` không giữ row nào.
+
+✅ Đúng hơn: Dùng `IS NULL`, `IS NOT NULL` hoặc null-safe comparison khi semantics yêu cầu.
+
+---
+
+❌ **"Soft delete thì chỉ cần index `(deleted_at)`"**
+
+→ Tại sao sai: Query thường còn filter tenant/status và sort created time; một key toàn `NULL` trong active subset không phục vụ tốt các access pattern đó.
+
+✅ Đúng hơn: Ví dụ `(tenant_id, created_at DESC) WHERE deleted_at IS NULL`, dựa trên query thật.
+
+---
+
+❌ **"Unique index không cho phép nhiều NULL"**
+
+→ Tại sao sai: PostgreSQL mặc định coi các `NULL` là distinct, nên unique index cho phép nhiều NULL.
+
+✅ Đúng hơn: Dùng `NULLS NOT DISTINCT` nếu business muốn tối đa một NULL; kiểm tra PostgreSQL version.
+
+---
+
+❌ **"Partial index nhỏ hơn nên luôn tốt hơn full index"**
+
+→ Tại sao sai: Nó chỉ phục vụ queries mà planner chứng minh predicate phù hợp; query ngoài subset mất access path đó.
+
+✅ Đúng hơn: Chọn partial index khi workload ổn định và subset thực sự hữu ích; giữ full index nếu query pattern đa dạng cần nó.
+
+---
+
+❌ **"Bọc nullable column bằng `COALESCE` vẫn dùng plain index"**
+
+→ Tại sao sai: `COALESCE(column, ...)` là expression khác key `column`, đồng thời có thể đổi semantics.
+
+✅ Đúng hơn: Tách null/non-null query path hoặc tạo expression index đúng với expression đã chuẩn hóa.
+
+---
+
+❌ **"`CREATE INDEX CONCURRENTLY` không ảnh hưởng production"**
+
+→ Tại sao sai: Nó tránh block writes kiểu standard build nhưng vẫn scan table nhiều phase, tiêu thụ CPU/I/O/WAL và có thể để lại invalid index khi fail.
+
+✅ Đúng hơn: Chạy trong maintenance window phù hợp, monitor progress/load/replication và kiểm tra `indisvalid`.
+
+---
+
+❌ **"`idx_scan = 0` thì drop index ngay"**
+
+→ Tại sao sai: Statistics có thể vừa reset; index có thể enforce unique constraint hoặc phục vụ workload hiếm/replica.
+
+✅ Đúng hơn: Quan sát đủ lâu, kiểm tra constraint và query inventory trước khi drop.
+
+---
+
+❌ **"Semantics của NULL trong index giống nhau ở mọi database"**
+
+→ Tại sao sai: PostgreSQL/MySQL lưu NULL trong B-tree theo cách cho phép lookup, còn Oracle conventional B-tree bỏ rows khi toàn bộ key columns đều NULL.
+
+✅ Đúng hơn: Trả lời kèm engine/version và xác minh official documentation.
+
+---
+
+## Câu hỏi follow-up
+
+### 1. Nếu 90% rows là NULL thì có nên tạo index không?
+
+Phụ thuộc query. Nếu thường tìm một non-null value hiếm, partial index `WHERE column IS NOT NULL` có thể rất tốt vì chỉ chứa 10% rows. Nếu thường query `IS NULL` và phải trả gần 90% table, index riêng thường không giúp nhiều; cần filter/partition/query khác. Hãy đo distribution thật và execution plan thay vì chỉ nhìn tỷ lệ NULL.
+
+### 2. Partial index `WHERE deleted_at IS NULL` có dùng được khi query có thêm tenant không?
+
+Có, nếu query vẫn chứa `deleted_at IS NULL` và các điều kiện khác tương thích. Index key nên bắt đầu bằng column phục vụ lookup như `tenant_id`, sau đó là sort/range column. Parameter `tenant_id` không làm mất fixed partial predicate. Kiểm tra SQL generated và `EXPLAIN` để xác nhận.
+
+### 3. Tại sao planner chọn Seq Scan dù `IS NULL` chỉ trả ít rows?
+
+Có thể statistics stale/sai, table quá nhỏ, rows tập trung khiến seq scan rẻ, cost settings/cache khác, hoặc query phải đọc nhiều heap pages/columns. So sánh estimated với actual rows và xem buffers trước. Chạy `ANALYZE`, kiểm tra index validity/predicate/data type và tránh tắt `enable_seqscan` như một “fix” production. Nếu estimate nhiều-column sai, cân nhắc extended statistics đúng use case.
+
+### 4. Index-only scan có nghĩa không đọc table không?
+
+Không hoàn toàn. PostgreSQL cần visibility map để biết tuple có visible với transaction hay không; page chưa all-visible thì vẫn heap fetch. Index cũng phải chứa tất cả columns query cần qua key hoặc `INCLUDE`. Table update nhiều có thể làm index-only scan ít hiệu quả cho tới khi vacuum cập nhật visibility.
+
+### 5. Có nên dùng partial unique index cho email nullable không?
+
+Có thể, nếu requirement là email optional nhưng mọi non-null normalized email phải unique. PostgreSQL unique index mặc định đã cho phép nhiều NULL, nên partial version chủ yếu giảm index size/write cho rows NULL hoặc kết hợp soft-delete predicate. Hãy normalize case/Unicode/domain rule nhất quán; `lower(email)` đơn thuần chưa giải quyết mọi quy tắc email. Database constraint vẫn nên là lớp bảo vệ cuối trước race condition.
+
+### 6. `NULLS FIRST/LAST` có ảnh hưởng khả năng tìm `IS NULL` không?
+
+Nó chủ yếu điều khiển physical sort order của B-tree và khả năng phục vụ `ORDER BY`. B-tree vẫn có thể search `IS NULL` dù null nằm đầu hay cuối. Lựa chọn ordering quan trọng hơn khi query có mixed-direction composite sort và `LIMIT`. Tạo index đúng order sau khi xem query plan, không chỉ vì muốn NULL “trông đẹp”.
+
+### 7. Có nên index boolean nullable column không?
+
+Index riêng trên boolean/tri-state thường có cardinality thấp nên query có thể trả quá nhiều rows. Partial index thường hữu ích hơn, ví dụ index `(created_at)` chỉ cho `processed IS NOT TRUE` nếu đó là subset nhỏ và predicate query khớp chính xác. Tuy nhiên `IS NOT TRUE` gồm cả `FALSE` và `NULL`, khác `= FALSE`; phải xác định business semantics trước. Đừng dùng `NULL` như một status thứ ba nếu state machine cần constraint/audit rõ ràng.
+
+### 8. Có thể thay NULL bằng giá trị sentinel để dễ index không?
+
+Thường không nên. Sentinel như `'9999-12-31'`, `0` hoặc empty string trộn “không có giá trị” với giá trị domain thật, làm constraint/query/report khó hiểu. PostgreSQL đã index được NULL và có `NULLS FIRST/LAST`, partial index, null-safe comparison. Chỉ dùng sentinel khi domain thật sự định nghĩa nó, không phải workaround do hiểu sai index.
+
+### 9. Foreign key nullable có cần index không?
+
+Nullable không thay đổi nguyên tắc: index foreign-key column dựa trên join/query và parent update/delete behavior. PostgreSQL không tự tạo index cho referencing foreign key, nên thiếu index có thể làm kiểm tra parent delete/update scan child table lớn và gây lock/latency xấu. Composite FK cần index với leading columns phù hợp. Rows có FK NULL không cần referential match nhưng vẫn ảnh hưởng full index size trong PostgreSQL.
+
+### 10. Làm sao drop full index sau khi thêm partial index an toàn?
+
+Trước hết build partial index concurrently, kiểm tra valid, chạy `ANALYZE` và quan sát critical queries dùng nó. Inventory mọi query cần full index, kể cả `IS NULL`, history/admin jobs, replicas và uniqueness constraint. Theo dõi đủ một business cycle rồi mới `DROP INDEX CONCURRENTLY`; có rollback plan tái tạo full index. Không drop index backing constraint nếu chưa hiểu dependency và semantics enforce dữ liệu.
+
+---
+
+## Xem thêm
+
+- [SQL vs NoSQL: chọn database như thế nào?](/database/01-sql-vs-nosql) — query pattern, constraint và operational trade-off.
+- [Optimistic Lock vs Pessimistic Lock: chọn thế nào?](/database/03-optimistic-vs-pessimistic-locking) — concurrency control, transaction và database row lock.
+- [Fuzzy search trên cột phone_number đã mã hoá](/database/04-fuzzy-search-encrypted-column) — expression/search index và security trade-off.
+- [PostgreSQL — Index Types](https://www.postgresql.org/docs/current/indexes-types.html) — B-tree operators, gồm `IS NULL` và `IS NOT NULL`.
+- [PostgreSQL — Partial Indexes](https://www.postgresql.org/docs/current/indexes-partial.html) — predicate matching, partial unique index và các caveat.
+- [PostgreSQL — CREATE INDEX](https://www.postgresql.org/docs/current/sql-createindex.html) — `CONCURRENTLY`, `NULLS NOT DISTINCT`, `INCLUDE` và index ordering.

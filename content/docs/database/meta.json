@@ -2,7 +2,8 @@
   "title": "Database",
   "pages": [
     "01-sql-vs-nosql",
-    "02-optimistic-vs-pessimistic-locking",
-    "03-fuzzy-search-encrypted-column"
+    "02-index-on-nullable-column",
+    "03-optimistic-vs-pessimistic-locking",
+    "04-fuzzy-search-encrypted-column"
   ]
 }
