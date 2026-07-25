@@ -1,0 +1,416 @@
+---
+title: "Phân biệt Encoding, Encryption và Hashing"
+description: "Phân biệt mục đích, khả năng khôi phục dữ liệu và use case của Base64, AES-GCM, hashing, HMAC trong production."
+---
+
+# Phân biệt Encoding, Encryption và Hashing
+
+## Câu hỏi
+
+> Encoding khác Encryption như thế nào? Base64 có bảo mật dữ liệu không? Khi nào nên dùng encoding, encryption hoặc hashing?
+
+---
+
+## Dành cho level
+
+<Tabs items={["Mid", "Senior", "Staff"]}>
+
+<Tab value="Mid">
+
+Interviewer expect bạn phân biệt được **mục đích** của encoding và encryption, biết Base64 có thể decode mà không cần secret, và chọn hashing thay vì encryption để lưu password.
+
+</Tab>
+
+<Tab value="Senior">
+
+Interviewer expect bạn nhìn được cả data flow: dữ liệu cần tương thích giao thức thì encode, cần confidentiality thì encrypt, cần kiểm tra integrity hoặc lookup thì dùng hash/HMAC phù hợp. Bạn cũng cần giải thích authenticated encryption, nonce/IV, key management và vì sao không tự thiết kế thuật toán mã hoá.
+
+</Tab>
+
+<Tab value="Staff">
+
+Interviewer expect bạn thiết kế policy cho data in transit/data at rest, phân loại dữ liệu, quản lý key rotation bằng KMS, tách quyền truy cập key khỏi database, xây migration/versioning và observability mà không làm lộ plaintext hoặc secret.
+
+</Tab>
+
+</Tabs>
+
+---
+
+## Cốt lõi cần nhớ
+
+- **Encoding đổi cách biểu diễn để hệ thống khác đọc hoặc truyền dữ liệu được; nó không cung cấp confidentiality.** Ai biết format đều có thể decode Base64, URL encoding hoặc hex mà không cần key.
+- **Encryption bảo vệ bí mật bằng key.** Trong application nên ưu tiên authenticated encryption như AES-GCM để vừa giữ confidentiality vừa phát hiện ciphertext bị sửa; key phải nằm ngoài database chứa dữ liệu.
+- **Hashing là chiều thứ ba thường bị nhầm:** hash thông thường dùng cho fingerprint/integrity, HMAC dùng khi cần xác thực bằng secret, còn password phải dùng password-hashing chậm như Argon2id, bcrypt, scrypt hoặc PBKDF2 — không dùng SHA-256 trực tiếp.
+
+---
+
+## Câu trả lời mẫu
+
+> Tôi chọn cơ chế dựa trên security goal chứ không dựa vào việc output trông khó đọc. Nếu chỉ cần đưa binary vào JSON hoặc URL, tôi dùng Base64 hay percent-encoding và coi dữ liệu sau encode vẫn là public vì bất kỳ ai cũng decode được. Nếu dữ liệu như số định danh hoặc token cần được đọc lại nhưng không được lộ cho database operator, tôi dùng authenticated encryption như AES-GCM, sinh nonce mới cho mỗi lần encrypt và quản lý key qua AWS KMS hoặc Secrets Manager. Nếu không cần khôi phục giá trị gốc, tôi cân nhắc hashing; riêng password phải qua password-hashing algorithm có salt và cost phù hợp, không phải SHA-256 đơn thuần. Trong production tôi từng thấy API đưa credential vào Base64 rồi gọi đó là encryption, nhưng log collector chỉ cần một lệnh decode là đọc được toàn bộ secret. Tôi cũng tách quyền đọc ciphertext và quyền dùng key để một lần lộ database không tự động trở thành lộ plaintext. Khi review thiết kế, tôi kiểm tra thêm rotation, version của payload, integrity tag và nơi plaintext có thể xuất hiện trong log hoặc metric.
+
+---
+
+## Phân tích chi tiết
+
+### 1. Production scenario: Base64 làm credential trông “đã được bảo vệ”
+
+Giả sử một service gửi header:
+
+```http
+Authorization: Basic YWRtaW46c3VwZXItc2VjcmV0
+```
+
+Chuỗi phía sau trông khó đọc, nhưng chỉ là Base64:
+
+```bash
+printf '%s' 'YWRtaW46c3VwZXItc2VjcmV0' | base64 --decode
+# admin:super-secret
+```
+
+Không có secret key, không cần brute force và không cần quyền đặc biệt. Base64 chỉ biến bytes thành tập ký tự an toàn để truyền qua text protocol; nó không hề đặt security boundary quanh dữ liệu.
+
+Nếu request đi qua HTTPS, **TLS** mới là lớp encryption bảo vệ header trên đường truyền. Sau khi request tới reverse proxy hoặc application, credential lại xuất hiện ở dạng có thể đọc được; vì vậy access log, tracing và error report vẫn phải redact header này.
+
+Mental model cần dùng khi review là:
+
+```txt
+Encoding   → đổi representation
+Encryption → bảo vệ confidentiality bằng key
+Hashing    → tạo fingerprint một chiều
+```
+
+Output “trông như rác” không nói được cơ chế nào đang được dùng.
+
+### 2. So sánh theo mục đích và khả năng đảo ngược
+
+| Tiêu chí | Encoding | Encryption | Hashing |
+|---|---|---|---|
+| Mục đích chính | Tương thích format/transport | Giữ bí mật dữ liệu | Fingerprint, integrity, password verification |
+| Có lấy lại dữ liệu gốc? | Có, bằng decode | Có, nếu có đúng key | Theo thiết kế là không |
+| Cần secret key? | Không | Có | Hash thường: không; HMAC: có |
+| Cùng input có cùng output? | Thường có | Encryption an toàn thường khác do nonce ngẫu nhiên | Hash thường có; password hash khác do salt |
+| Ví dụ | UTF-8, Base64, Base64URL, hex, URL percent-encoding | AES-GCM, ChaCha20-Poly1305, TLS | SHA-256, HMAC-SHA-256, Argon2id, bcrypt |
+| Bảo mật plaintext? | Không | Có, nếu thuật toán và key management đúng | Không thể khôi phục trực tiếp, nhưng vẫn có thể bị đoán |
+
+Một câu hỏi interview tốt thường không dừng ở “có đảo ngược được không”. Senior engineer phải hỏi tiếp: ai được phép đảo ngược, key nằm đâu, dữ liệu có bị sửa mà không phát hiện không, có cần search hay deduplicate không, và chuyện gì xảy ra khi rotate key.
+
+### 3. Encoding: thay đổi representation, không thay đổi quyền truy cập
+
+Các encoding giải quyết những vấn đề khác nhau:
+
+- **UTF-8** ánh xạ ký tự thành bytes.
+- **Base64** ánh xạ binary thành text; thường dùng trong JSON, email hoặc certificate payload.
+- **Base64URL** thay `+` và `/` bằng ký tự an toàn cho URL; JWT dùng dạng này cho các segment.
+- **Percent-encoding** biểu diễn ký tự đặc biệt trong URL, ví dụ dấu cách thành `%20`.
+- **Hex** biểu diễn mỗi byte bằng hai ký tự `0-9a-f`.
+
+Java 17 encode/decode Base64URL như sau:
+
+```java
+import java.nio.charset.StandardCharsets;
+import java.util.Base64;
+
+String plaintext = "customer-123";
+
+String encoded = Base64.getUrlEncoder()
+    .withoutPadding()
+    .encodeToString(plaintext.getBytes(StandardCharsets.UTF_8));
+
+String decoded = new String(
+    Base64.getUrlDecoder().decode(encoded),
+    StandardCharsets.UTF_8
+);
+
+System.out.println(encoded); // Y3VzdG9tZXItMTIz
+System.out.println(decoded); // customer-123
+```
+
+`withoutPadding()` chỉ bỏ ký tự `=` không cần thiết trong một số URL-safe protocol; nó không tăng security. Nếu value chứa PII, access token hoặc credential, Base64 không làm value đó an toàn để log hay đưa vào source code.
+
+### 4. Encryption: key, nonce và integrity đều là một phần của thiết kế
+
+Encryption phù hợp khi hệ thống **cần đọc lại plaintext**, nhưng chỉ những principal có quyền dùng key mới được đọc. Ví dụ:
+
+- Mã hoá PII trong database.
+- Mã hoá object trước khi lưu S3.
+- TLS bảo vệ dữ liệu giữa client và server.
+- Mã hoá backup trước khi chuyển sang account khác.
+
+Trong application mới, nên ưu tiên **AEAD — Authenticated Encryption with Associated Data** như AES-GCM hoặc ChaCha20-Poly1305. AEAD cung cấp hai thuộc tính:
+
+1. **Confidentiality:** người không có key không đọc được plaintext.
+2. **Integrity/authenticity:** ciphertext, tag hoặc associated data bị sửa sẽ làm decrypt thất bại.
+
+Ví dụ Java 17 dùng AES-GCM:
+
+```java
+import java.security.GeneralSecurityException;
+import java.security.SecureRandom;
+import javax.crypto.Cipher;
+import javax.crypto.SecretKey;
+import javax.crypto.spec.GCMParameterSpec;
+
+public final class AesGcm {
+    private static final int NONCE_LENGTH_BYTES = 12;
+    private static final int TAG_LENGTH_BITS = 128;
+    private static final SecureRandom RANDOM = new SecureRandom();
+
+    public record EncryptedPayload(byte[] nonce, byte[] ciphertextAndTag) {}
+
+    public static EncryptedPayload encrypt(
+        byte[] plaintext,
+        byte[] associatedData,
+        SecretKey key
+    ) throws GeneralSecurityException {
+        byte[] nonce = new byte[NONCE_LENGTH_BYTES];
+        RANDOM.nextBytes(nonce);
+
+        Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
+        cipher.init(
+            Cipher.ENCRYPT_MODE,
+            key,
+            new GCMParameterSpec(TAG_LENGTH_BITS, nonce)
+        );
+        cipher.updateAAD(associatedData);
+
+        return new EncryptedPayload(nonce, cipher.doFinal(plaintext));
+    }
+
+    public static byte[] decrypt(
+        EncryptedPayload payload,
+        byte[] associatedData,
+        SecretKey key
+    ) throws GeneralSecurityException {
+        Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
+        cipher.init(
+            Cipher.DECRYPT_MODE,
+            key,
+            new GCMParameterSpec(TAG_LENGTH_BITS, payload.nonce())
+        );
+        cipher.updateAAD(associatedData);
+        return cipher.doFinal(payload.ciphertextAndTag());
+    }
+}
+```
+
+`12` bytes là độ dài nonce chuẩn và hiệu quả cho GCM; `128` bits là full authentication tag, giúp giảm xác suất chấp nhận dữ liệu giả mạo. Đây không phải các giá trị tùy ý để rút ngắn nhằm tiết kiệm vài bytes.
+
+<Callout type="warn" title="Không reuse nonce với cùng AES-GCM key">
+
+Nonce không cần giữ bí mật nhưng phải **unique với cùng key**; reuse nonce có thể phá confidentiality và integrity. Ví dụ trên dùng `SecureRandom` tạo 96-bit nonce mới cho mỗi lần encrypt. Ở hệ thống có throughput cực lớn hoặc yêu cầu uniqueness nghiêm ngặt, cần thiết kế nonce strategy và giới hạn số lần dùng mỗi key thay vì chỉ dựa vào copy-paste snippet.
+
+</Callout>
+
+Associated data không bị encrypt nhưng được authentication tag bảo vệ. Ví dụ dùng `customer-email:v1` làm associated data sẽ ngăn attacker chuyển ciphertext sang field hoặc version có context khác mà vẫn decrypt thành công.
+
+### 5. Ciphertext thường vẫn cần encoding
+
+Encryption trả về bytes bất kỳ, trong khi JSON và environment variable thường cần text. Vì vậy một pipeline hợp lệ có thể kết hợp cả hai:
+
+```txt
+plaintext
+  → AES-GCM encrypt
+  → nonce + ciphertext + authentication tag
+  → Base64 encode để lưu trong JSON
+```
+
+Khi đọc thì đảo thứ tự:
+
+```txt
+Base64 decode
+  → tách nonce/ciphertext/tag
+  → AES-GCM decrypt bằng đúng key
+  → plaintext
+```
+
+Base64 ở đây chỉ là lớp đóng gói. Security đến từ AES-GCM và key management, không đến từ chuỗi Base64 bên ngoài.
+
+Payload nên có version rõ ràng để hỗ trợ migration:
+
+```json
+{
+  "version": 2,
+  "keyId": "alias/customer-pii",
+  "algorithm": "AES-256-GCM",
+  "nonce": "Base64URL(...) ",
+  "ciphertext": "Base64URL(...)"
+}
+```
+
+Không cần lưu raw key trong payload. `keyId` chỉ là reference để service có quyền gọi KMS hoặc chọn wrapped data key phù hợp.
+
+### 6. Hashing, HMAC và password hashing không thay thế lẫn nhau
+
+#### Hash thông thường
+
+SHA-256 tạo fingerprint deterministic:
+
+```txt
+SHA-256(input) → digest 256-bit
+```
+
+Nó phù hợp để kiểm tra file có thay đổi do lỗi truyền tải hoặc làm content identifier. Nhưng vì không có secret, attacker có thể sửa dữ liệu rồi tính lại hash; hash đơn thuần không chứng minh ai đã tạo message.
+
+#### HMAC
+
+HMAC kết hợp hash với secret key:
+
+```txt
+HMAC-SHA-256(secret, message) → authentication tag
+```
+
+HMAC phù hợp để verify webhook signature, chống sửa message hoặc tạo blind index cho exact lookup. Không dùng `SHA-256(secret + message)` tự chế vì dễ mắc lỗi construction; dùng API HMAC chuẩn của framework.
+
+#### Password hashing
+
+Password có entropy thấp nên attacker có thể thử hàng tỷ giá trị phổ biến nếu chỉ dùng SHA-256. Password cần thuật toán cố ý tốn CPU/memory như Argon2id, scrypt, bcrypt hoặc PBKDF2, kèm **salt ngẫu nhiên riêng cho từng password** và cost được benchmark theo hạ tầng thật.
+
+Salt không phải secret và thường được lưu cạnh password hash. Mục đích của salt là làm hai user có cùng password vẫn có output khác nhau và ngăn dùng một bảng precomputed cho toàn bộ database; nó không thay thế pepper hoặc key management.
+
+### 7. Chọn cơ chế theo requirement
+
+| Requirement | Lựa chọn phù hợp | Lý do |
+|---|---|---|
+| Đưa ảnh binary vào JSON | Base64 | Chỉ cần text-safe representation |
+| Truyền query parameter an toàn về cú pháp | URL encoding | Escape ký tự đặc biệt, không phải security |
+| Bảo vệ HTTP request trên Internet | HTTPS/TLS | Encryption in transit và xác thực server |
+| Lưu PII nhưng application cần đọc lại | AES-GCM + KMS | Confidentiality, integrity và kiểm soát key |
+| Lưu password | Argon2id/bcrypt/scrypt/PBKDF2 | Verify được mà không lưu plaintext, chống guessing tốt hơn fast hash |
+| Verify webhook | HMAC hoặc digital signature | Phát hiện message bị sửa và xác thực sender |
+| Kiểm tra file tải về có lỗi | SHA-256 từ trusted channel | So sánh fingerprint; không cần decrypt |
+| Tìm exact value trên cột encrypted | HMAC blind index riêng | Search được nhưng phải chấp nhận equality leakage |
+
+Nếu requirement là “che dữ liệu khỏi người dùng bình thường” nhưng cùng application vừa giữ ciphertext vừa giữ key trong source code, security boundary gần như không tồn tại. Cần xác định threat model: chống đọc trộm network, chống database leak, chống operator lạm quyền hay chống compromise toàn bộ application; mỗi mục tiêu dẫn đến architecture khác nhau.
+
+### 8. Những ví dụ dễ gây nhầm trong web application
+
+#### JWT không mặc định được encrypt
+
+JWT dạng phổ biến là JWS gồm ba segment Base64URL:
+
+```txt
+header.payload.signature
+```
+
+Payload có signature để phát hiện sửa đổi nhưng client vẫn decode và đọc được. Không đặt password, secret hoặc PII nhạy cảm vào JWT chỉ vì token nhìn khó hiểu; nếu thật sự cần encrypted JWT thì đó là JWE với threat model và key management riêng.
+
+#### HTTPS không làm dữ liệu an toàn ở mọi nơi
+
+TLS bảo vệ **in transit** giữa hai endpoint TLS. Dữ liệu vẫn có thể lộ sau khi terminate TLS tại ALB, trong application log, trace attribute, database hoặc backup. Cần kết hợp transport encryption, encryption at rest, application-level encryption và redaction dựa trên data flow thực tế.
+
+#### Database “encrypted at rest” khác application-level encryption
+
+AWS RDS encryption at rest bảo vệ storage, snapshot và backup khi không có quyền truy cập dịch vụ phù hợp. Một SQL query hợp lệ từ database principal vẫn đọc được dữ liệu plaintext. Application-level encryption bảo vệ tốt hơn trước một số database-only compromise, nhưng đổi lại phức tạp hơn về search, rotation và vận hành.
+
+### 9. Key management quyết định phần lớn độ an toàn
+
+Một implementation dùng AES-GCM đúng vẫn thất bại nếu key nằm cạnh ciphertext hoặc bị log ra. Production design nên có:
+
+```txt
+[ ] Key nằm trong AWS KMS/HSM/Secrets Manager, không hard-code trong source
+[ ] IAM chỉ cho workload cần thiết dùng key
+[ ] Database principal không tự có quyền decrypt
+[ ] Payload có version và key ID để hỗ trợ rotation
+[ ] Có audit log cho KMS decrypt nhưng không log plaintext
+[ ] Backup/restore và disaster recovery bao gồm key lifecycle
+[ ] Có kế hoạch revoke, re-encrypt và rollback
+[ ] Secret không xuất hiện trong log, metric, trace hoặc exception
+```
+
+Với lượng dữ liệu lớn, envelope encryption thường được dùng: KMS bảo vệ data encryption key, còn application dùng data key để encrypt payload. Cách này giảm số lần gọi KMS và cho phép phân quyền/audit tập trung, nhưng data key plaintext chỉ nên tồn tại trong memory trong phạm vi cần thiết.
+
+Rotation không nhất thiết phải dừng hệ thống để mã hoá lại mọi row ngay lập tức. Một chiến lược phổ biến là đọc được nhiều key version, luôn ghi bằng version mới, rồi re-encrypt dần khi đọc hoặc bằng background job có rate limit, progress metric và khả năng rollback.
+
+### 10. Quy trình trả lời trong interview
+
+Khi được hỏi “nên encode hay encrypt field này?”, hãy đi theo thứ tự:
+
+1. **Dữ liệu có cần giữ bí mật không?** Nếu không, encoding có thể đủ cho transport.
+2. **Có cần khôi phục plaintext không?** Nếu có, encryption; nếu không, xem xét hashing.
+3. **Ai là attacker và trust boundary ở đâu?** Network, database, operator hay application host.
+4. **Có cần integrity/authenticity không?** Ưu tiên AEAD, HMAC hoặc signature theo use case.
+5. **Key được tạo, lưu, phân quyền và rotate thế nào?** Không để key management thành phần ghi chú cuối.
+6. **Requirement search/sort/index là gì?** Encryption an toàn làm mất pattern và ảnh hưởng query.
+7. **Plaintext có thể rò ở đâu ngoài database?** Log, trace, cache, queue, backup và analytics.
+
+Câu trả lời như vậy thể hiện tư duy thiết kế production thay vì chỉ đọc lại định nghĩa.
+
+---
+
+## Bẫy thường gặp
+
+❌ **"Base64 là một dạng encryption nhẹ."**
+→ Tại sao sai: Base64 không dùng secret key; bất kỳ ai biết format đều decode được trong thời gian tuyến tính theo kích thước input.
+✅ Đúng hơn: Dùng Base64 để đóng gói binary thành text, và dùng encryption riêng nếu dữ liệu cần confidentiality.
+
+---
+
+❌ **"Dữ liệu đã dùng HTTPS nên lưu vào log hoặc database thế nào cũng được."**
+→ Tại sao sai: TLS chỉ bảo vệ một chặng truyền tải; dữ liệu trở lại plaintext tại endpoint và có thể lộ qua log, trace, storage hoặc quyền application.
+✅ Đúng hơn: Vẽ data flow end-to-end, áp dụng redaction và encryption at rest/application-level theo threat model.
+
+---
+
+❌ **"Mã hoá password để lúc cần có thể decrypt."**
+→ Tại sao sai: Hệ thống xác thực không cần biết password gốc; giữ khả năng decrypt làm tăng blast radius khi key bị lộ.
+✅ Đúng hơn: Lưu password bằng password-hashing algorithm có salt và cost đã benchmark, rồi verify input bằng API của algorithm.
+
+---
+
+❌ **"SHA-256 là đủ an toàn để lưu password vì chưa bị phá."**
+→ Tại sao sai: Vấn đề không phải collision mà là SHA-256 quá nhanh, giúp attacker thử lượng lớn password sau khi lấy được database.
+✅ Đúng hơn: Dùng Argon2id, scrypt, bcrypt hoặc PBKDF2 với cost phù hợp và có kế hoạch tăng cost theo thời gian.
+
+---
+
+❌ **"Encrypt cùng plaintext thì ciphertext phải giống nhau để dễ tìm kiếm."**
+→ Tại sao sai: Deterministic output làm lộ equality/frequency; với AES-GCM, reuse nonce cùng key còn có thể phá security nghiêm trọng.
+✅ Đúng hơn: Dùng nonce unique và giải quyết search bằng blind index hoặc architecture riêng sau khi đánh giá leakage.
+
+---
+
+❌ **"Tự ghép AES-CBC với SHA-256 là tương đương AES-GCM."**
+→ Tại sao sai: Thứ tự encrypt/MAC, key separation, padding và error handling rất dễ sai, có thể tạo padding oracle hoặc bỏ sót integrity.
+✅ Đúng hơn: Dùng thư viện và construction AEAD chuẩn như AES-GCM hoặc ChaCha20-Poly1305; không tự thiết kế crypto protocol.
+
+---
+
+❌ **"Key để trong cùng bảng nhưng encode Base64 là đủ tách biệt."**
+→ Tại sao sai: Database leak sẽ lấy được cả ciphertext lẫn key, còn Base64 không bảo vệ key.
+✅ Đúng hơn: Đặt key trong KMS/HSM hoặc secret store, tách IAM permission và audit việc sử dụng key.
+
+---
+
+## Câu hỏi follow-up
+
+### 1. Tại sao cùng một plaintext encrypt hai lần lại nên cho ciphertext khác nhau?
+
+Encryption ngẫu nhiên dùng nonce/IV mới để hai bản ghi giống nhau không lộ ngay quan hệ equality. Với AES-GCM, nonce phải unique cho từng lần encrypt dưới cùng key; reuse nonce không chỉ lộ pattern mà có thể làm mất cả confidentiality và khả năng chống giả mạo. Nonce được lưu cùng ciphertext vì nó không phải secret.
+
+### 2. Hash và encryption khác nhau thế nào nếu attacker vẫn có thể đoán input?
+
+Encryption có key và được thiết kế để khôi phục plaintext; hash thì không có thao tác inverse chuẩn. Tuy nhiên hash deterministic của dữ liệu entropy thấp như số điện thoại hoặc password vẫn có thể bị dictionary/brute-force attack bằng cách hash từng candidate để so sánh. Vì vậy “không đảo ngược được” không đồng nghĩa “không đoán được”; password cần slow hash, còn blind index cần HMAC key và threat-model leakage.
+
+### 3. JWT đã có signature thì có cần encrypt không?
+
+Signature bảo đảm token không bị sửa mà không bị phát hiện, nhưng không che payload vì JWS chỉ Base64URL encode các segment. Nếu payload chứa dữ liệu mà client hoặc intermediary không được đọc, cần tránh đặt dữ liệu đó vào token hoặc cân nhắc JWE. Trước khi dùng JWE, phải đánh giá key distribution, rotation, token size và liệu opaque session/reference token có đơn giản hơn không.
+
+### 4. Có thể search trên dữ liệu đã encrypt không?
+
+Ciphertext từ encryption an toàn không giữ substring/order của plaintext, nên `LIKE` hoặc range query trực tiếp không hoạt động. Exact search có thể dùng HMAC blind index; fuzzy search có thể dùng trigram blind index rồi decrypt để verify, nhưng các index này làm lộ equality hoặc frequency ở mức nào đó. Cần giảm requirement search nếu có thể và document leakage như một trade-off security.
+
+### 5. Khi nào dùng HMAC thay vì hash thông thường?
+
+Dùng HMAC khi bên verify và bên tạo cùng chia sẻ secret, đồng thời cần phát hiện message do người không có secret tạo hoặc sửa. Hash thông thường phù hợp khi chỉ cần fingerprint và digest kỳ vọng được lấy từ một trusted channel. Nếu nhiều bên cần verify nhưng không nên có quyền ký, digital signature với private/public key thường phù hợp hơn HMAC.
+
+### 6. Rotate encryption key mà không downtime như thế nào?
+
+Gắn version hoặc key ID vào từng payload, cho read path hỗ trợ cả key cũ và key mới, còn write path chỉ dùng key mới. Sau đó chạy background migration có rate limit để decrypt bằng key cũ và re-encrypt bằng key mới, theo dõi tỷ lệ hoàn thành và lỗi trước khi revoke key cũ. Cần giữ rollback window có kiểm soát, vì revoke quá sớm có thể khiến backup hoặc row chưa migrate không đọc được.
+
+---
+
+## Xem thêm
+
+- [Fuzzy search trên cột phone_number đã mã hoá](/database/02-fuzzy-search-encrypted-column) — blind index, leakage và trade-off khi cần search trên encrypted data.
+- [CORS là gì và debug lỗi CORS trong production như thế nào?](/web/01-cors) — phân biệt browser security boundary với authentication, authorization và CSRF.
