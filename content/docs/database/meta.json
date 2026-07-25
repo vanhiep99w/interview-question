@@ -1,4 +1,8 @@
 {
   "title": "Database",
-  "pages": ["01-sql-vs-nosql", "02-fuzzy-search-encrypted-column"]
+  "pages": [
+    "01-sql-vs-nosql",
+    "02-optimistic-vs-pessimistic-locking",
+    "03-fuzzy-search-encrypted-column"
+  ]
 }
