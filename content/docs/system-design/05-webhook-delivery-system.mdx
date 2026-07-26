@@ -139,58 +139,89 @@ Nếu requirement nói “10 triệu events/ngày” nhưng trung bình mỗi ev
 
 ---
 
-### 3. Requirement clarification
+### 3. Chốt yêu cầu cụ thể trước khi chọn giải pháp
 
-Một câu trả lời Senior nên chốt contract trước khi vẽ architecture.
+Phần khó đọc nhất của bài này thường là thấy quá nhiều component nhưng không biết **component đó đang giải quyết yêu cầu nào**. Vì vậy ta chốt một baseline cụ thể trước. Đây là assumption để thiết kế và phỏng vấn; Product có thể đổi con số, nhưng khi đó ta phải tính lại capacity và policy.
 
-#### Functional requirements
+#### Baseline của bài toán
+
+| ID | Yêu cầu đã chốt | Cách kiểm chứng |
+|---|---|---|
+| **REQ-1 — Không làm chậm, không mất event** | Business API không gọi endpoint customer. Khi business transaction đã commit thì event phải tồn tại durable để có thể gửi sau, kể cả service crash. | Kill process ngay sau DB commit; event vẫn còn trong outbox và được relay sau khi service phục hồi. |
+| **REQ-2 — Tải mục tiêu** | 10 triệu là **deliveries/ngày sau fan-out**; baseline peak gấp 10 average, payload trung bình 5 KB. | Load test khoảng 1.160 deliveries/giây và thêm traffic retry; `oldest_pending_age` không tăng liên tục. |
+| **REQ-3 — Delivery contract** | Gửi bất đồng bộ qua HTTPS POST; accepted `2xx` là success. Healthy endpoint có 99% first attempt trong 5 giây. Total request timeout baseline 10 giây vì receiver được yêu cầu durable enqueue rồi trả nhanh. | Đo từ lúc business event commit đến lúc bắt đầu attempt đầu; tách rõ latency của platform và latency của customer endpoint. |
+| **REQ-4 — Semantics** | Delivery là **at-least-once**. Không hứa exactly-once; cùng một event giữ nguyên `event_id` qua retry và resend. | Inject failure sau khi receiver commit nhưng trước khi sender nhận response; receiver không tạo side effect lần hai. |
+| **REQ-5 — Isolation và backpressure** | Một endpoint timeout hoặc có backlog lớn không được làm endpoint khỏe trễ SLO. Replay không được chiếm hết capacity của live traffic. | Load test một tenant có backlog lớn và 5–10% endpoint timeout; latency của tenant khỏe vẫn nằm trong SLO. |
+| **REQ-6 — Retry có giới hạn** | Retry network error, `408`, `425`, `429` và `5xx`; tôn trọng `Retry-After`; dùng backoff + jitter. Retry window baseline 24 giờ, sau đó chuyển `DEAD`; đây là product assumption cần xác nhận. | Mô phỏng outage 2 giờ rồi recovery; không có retry storm và backlog drain theo endpoint rate limit. |
+| **REQ-7 — Ordering** | Không guarantee global ordering. Chỉ event type thật sự cần mới giữ order theo `(endpoint_id, aggregate_id)`. | Hai aggregate vẫn chạy song song; event sau trong cùng aggregate không vượt event trước khi strict ordering được bật. |
+| **REQ-8 — Security** | Chỉ HTTPS; HMAC ký `event_id + timestamp + raw body`; secret riêng theo endpoint. URL customer-controlled không được truy cập private, loopback, link-local, metadata hoặc cluster network. | Test signature replay ngoài tolerance, DNS rebinding, redirect và các dạng IPv4/IPv6 private address. |
+| **REQ-9 — Support và replay** | Support tra được event → delivery → từng attempt; resend/bulk replay có RBAC, audit, rate limit và vẫn qua normal dispatcher. Payload/replay retention baseline 30 ngày. | Từ một `event_id`, tìm được status, error, latency và actor replay; bulk replay không làm live traffic trễ SLO. |
+
+Các con số `5 giây`, `10 giây`, `24 giờ`, `30 ngày` và peak `10x` không phải industry default. Chúng biến đề bài mơ hồ thành một contract có thể tính và test. Ví dụ, retention 30 ngày với payload trung bình 5 KB đã tương đương khoảng 1,5 TB raw payload, nên nếu Product đổi thành 90 ngày thì storage design cũng phải đổi.
+
+#### Từ yêu cầu đến quyết định thiết kế
+
+| Yêu cầu | Nếu làm ngây thơ sẽ hỏng ở đâu? | Giải pháp chính | Trade-off phải chấp nhận |
+|---|---|---|---|
+| **REQ-1** | Update order xong nhưng crash trước khi publish làm mất event. | Ghi business state + **Transactional Outbox** trong một DB transaction; relay/CDC publish sau. | Relay có thể publish duplicate, nên consumer phải idempotent. |
+| **REQ-2, REQ-3** | Gửi synchronous làm latency và availability của Business API phụ thuộc customer. | Durable broker/ready queue + bounded worker fleet; scale theo peak, HTTP concurrency và oldest queue age. | Thêm eventual consistency; webhook đến sau business response vài giây. |
+| **REQ-4** | Receiver đã commit nhưng response bị mất; sender không biết nên retry hay dừng. | Chọn at-least-once, stable `event_id`, receiver dedupe bằng unique constraint trong cùng transaction với business effect. | Duplicate vẫn xuất hiện trên network; chỉ side effect được làm idempotent. |
+| **REQ-5** | Global FIFO và worker pool chung bị một endpoint timeout chiếm hết slot. | Fair dispatcher, global/customer/endpoint concurrency limit, token bucket, circuit breaker và bounded consumption. | Scheduler và distributed limiter phức tạp hơn FIFO. |
+| **REQ-6** | Retry ngay hoặc lịch cố định tạo thundering herd; `sleep` giữ worker. | Durable `next_attempt_at`, error classifier, exponential backoff + jitter, `Retry-After`, retry budget và `DEAD` state. | Delivery có thể trễ; policy cần version và vận hành DLQ. |
+| **REQ-7** | Kafka giữ thứ tự trong partition nhưng HTTP requests concurrent có thể hoàn tất ngược nhau. | Default không order; khi bắt buộc thì serialize theo aggregate lane đến tận worker. | Strict order tạo head-of-line blocking trong lane đó. |
+| **REQ-8** | HMAC không ngăn worker bị lợi dụng gọi AWS metadata hoặc internal service. | HMAC + timestamp bảo vệ receiver; URL validation tại registration/delivery + egress isolation bảo vệ sender. | DNS resolution và egress proxy cần được vận hành như security boundary. |
+| **REQ-9** | Một Kafka DLQ đơn thuần không giúp support hiểu và replay an toàn. | Tách event/delivery/attempt state; dashboard, audit, replay admission control và retention policy. | Tăng DB writes, storage và yêu cầu cleanup/partitioning. |
+
+Đây là cách đọc phần còn lại của tài liệu:
 
 ```txt
-- Customer tạo, cập nhật, disable endpoint.
-- Customer chọn event types muốn subscribe.
-- Hệ thống tạo immutable event payload theo schema version.
-- Giao event bất đồng bộ qua HTTPS POST.
-- Retry lỗi tạm thời theo policy có giới hạn.
-- Hiển thị delivery và attempt history.
-- Cho phép resend một event hoặc replay theo khoảng thời gian.
-- Rotate signing secret mà không gián đoạn delivery.
-- Có thể pause endpoint lỗi và thông báo customer.
+REQ-1              -> Outbox và relay
+REQ-2 + REQ-3      -> Capacity estimate, broker, worker
+REQ-4              -> State machine, lease, idempotency
+REQ-5              -> Fair dispatcher, limiter, circuit breaker, backpressure
+REQ-6              -> HTTP taxonomy, retry scheduler, DLQ
+REQ-7              -> Ordering boundary
+REQ-8              -> HMAC, secret rotation, SSRF-safe egress
+REQ-9              -> Data model, observability, dashboard và replay
 ```
 
-#### Non-functional requirements
+#### Theo dõi một event qua toàn bộ hệ thống
+
+Với `order.paid`, mỗi bước tồn tại vì một requirement cụ thể:
 
 ```txt
-- Business request không chờ customer endpoint.
-- Không mất event đã commit business transaction.
-- Delivery semantics: at-least-once.
-- Không yêu cầu global ordering.
-- Một endpoint chậm không ảnh hưởng endpoint khỏe.
-- Có backpressure; không dùng retry để tự DDoS receiver.
-- Payload được ký, truyền qua TLS và có replay protection.
-- URL customer-controlled không được truy cập internal network.
-- Có audit, metrics, logs và runbook.
+1. Order API commit order + outbox                    [REQ-1: không mất event]
+2. Relay publish event; fan-out tạo delivery          [REQ-2: xử lý async ở tải peak]
+3. Fair dispatcher chọn endpoint còn quota            [REQ-5: cô lập customer chậm]
+4. Worker claim lease rồi POST request có timeout      [REQ-3, REQ-4: gửi nhanh, crash-safe]
+5. Worker ký HMAC và egress guard kiểm tra target      [REQ-8: authenticity + chống SSRF]
+6. Timeout/429/5xx được schedule lại, không sleep      [REQ-6: retry có kiểm soát]
+7. Receiver dedupe bằng event_id                       [REQ-4: duplicate không lặp side effect]
+8. Mọi attempt được lưu; DEAD có thể replay có audit   [REQ-9: support và recovery]
 ```
 
-#### Câu hỏi cần hỏi Product
+Nếu interviewer thay requirement, ta đổi đúng nhánh thay vì vẽ lại mọi thứ. Ví dụ: nếu Product yêu cầu strict ordering cho `order.*`, ta thêm aggregate lane ở dispatcher/worker; không cần thay HMAC hay SSRF design.
+
+#### Những câu còn phải hỏi Product
 
 ```txt
 - 10 triệu là events trước hay deliveries sau fan-out?
-- Peak/average ratio và growth 12 tháng?
-- Payload trung bình/p99, có file lớn không?
-- Event nào cần ordering?
-- First-attempt latency SLO là bao lâu?
-- Retry window: vài giờ, một ngày hay ba ngày?
-- Customer có được cấu hình retry policy/rate không?
-- Retention và replay window bao lâu?
-- Có PII/financial data trong payload không?
-- Multi-region là availability requirement hay chỉ giảm latency?
+- Peak/average ratio, growth 12 tháng và payload p99 là bao nhiêu?
+- Event nào thật sự cần ordering, theo endpoint hay theo aggregate?
+- First-attempt latency SLO áp dụng cho mọi endpoint hay chỉ endpoint healthy?
+- Retry window, retention và replay window là 24 giờ/30 ngày hay giá trị khác?
+- Customer có được cấu hình retry policy, timeout hoặc rate limit không?
+- Payload có PII/financial data và data residency requirement không?
+- RPO/RTO có bắt buộc multi-region hay single-region multi-AZ là đủ?
 ```
 
-Không có các câu trả lời này, mọi batch size, timeout, retry count và partition count chỉ là đoán.
+Không chốt các câu hỏi này thì batch size, timeout, retry count, retention và partition count chỉ là đoán.
 
 ---
 
 ### 4. Capacity estimate: 10 triệu/ngày không quá lớn, outage mới là bài khó
+
+**Yêu cầu đang giải quyết: REQ-2 và REQ-3.** Ta tính tải để chọn worker/concurrency đủ cho first-attempt SLO; chưa chọn database hay số partition theo cảm tính.
 
 #### Throughput trung bình
 
@@ -275,6 +306,8 @@ Con số này chưa gồm headers, TLS overhead và retries, nhưng vẫn không
 
 ### 5. Từ naive implementation đến production architecture
 
+**Yêu cầu đang giải quyết: từ REQ-1 đến REQ-6.** Mỗi version dưới đây chỉ thêm component khi version trước vi phạm một requirement đã chốt.
+
 #### Version 1 — gửi synchronous trong business request
 
 ```txt
@@ -346,6 +379,8 @@ Một endpoint timeout chỉ tiêu thụ quota của endpoint đó, không chi�
 
 ### 6. High-level architecture
 
+Sơ đồ này là kết quả của requirement map, không phải checklist công nghệ: nhánh outbox bảo vệ **REQ-1**, dispatcher/worker bảo vệ **REQ-2/3/5**, retry/DLQ bảo vệ **REQ-6/9**, còn security boundary của worker bảo vệ **REQ-8**.
+
 ```mermaid
 flowchart LR
     API[Business API] --> DB[(Business DB)]
@@ -386,6 +421,8 @@ Architecture không cần nhiều box nhất; cần ít box nhất mà vẫn đ�
 ---
 
 ### 7. Transactional Outbox giải quyết dual-write như thế nào?
+
+**Yêu cầu đang giải quyết: REQ-1 — business transaction đã commit thì event không được mất.** Outbox không được chọn vì “event-driven system nên có outbox”; nó được chọn để đóng đúng failure window giữa DB commit và broker publish.
 
 Giả sử `OrderService` phải vừa update order vừa publish `order.paid`.
 
@@ -610,6 +647,8 @@ Có thể dùng payload đủ cho fact, không serialize toàn bộ JPA entity.
 
 ### 9. Delivery state machine và worker lease
 
+**Yêu cầu đang giải quyết: REQ-4 — worker crash không làm mất delivery, dù có thể tạo duplicate.** State machine cho biết delivery đang ở đâu; lease cho phép worker khác tiếp quản khi owner chết.
+
 Một state machine rõ giúp recovery dễ hơn:
 
 ```mermaid
@@ -678,6 +717,8 @@ Nếu update count bằng 0, lease có thể đã hết và worker khác đã cl
 ---
 
 ### 10. Fair dispatcher: cô lập noisy neighbor
+
+**Yêu cầu đang giải quyết: REQ-5 — endpoint chậm không làm endpoint khỏe trễ SLO.** Queue durable bảo đảm event còn đó, nhưng chỉ fair scheduling và quota mới bảo đảm tenant khác vẫn được phục vụ.
 
 Một global FIFO queue có thể gây head-of-line blocking theo hai cách:
 
@@ -889,6 +930,8 @@ Không tạo HTTP client mới cho mỗi request. Reuse client để dùng conne
 
 ### 13. Retry taxonomy: lỗi nào retry, lỗi nào fail fast?
 
+**Yêu cầu đang giải quyết: REQ-6 — phục hồi lỗi tạm thời nhưng không tự DDoS receiver.** Vì vậy policy phải quyết định cả *có retry không*, *khi nào retry* và *khi nào dừng*.
+
 Một policy khởi đầu hợp lý:
 
 | Kết quả | Xử lý mặc định | Lý do |
@@ -1018,6 +1061,8 @@ Không nên giả vờ Kafka topic tự hiểu `deliver_at`.
 ---
 
 ### 15. At-least-once: tại sao duplicate không thể tránh hoàn toàn?
+
+**Yêu cầu đang giải quyết: REQ-4 — ưu tiên không mất event và làm duplicate an toàn.** Không component nào có thể atomically commit cả sender state lẫn database của receiver qua một HTTP request.
 
 Failure kinh điển:
 
@@ -1180,6 +1225,8 @@ Kafka chỉ giữ order trong một partition; nó không tự giữ HTTP comple
 
 ### 17. HMAC signing: integrity, authenticity và replay protection
 
+**Yêu cầu đang giải quyết: nửa thứ nhất của REQ-8 — bảo vệ receiver.** TLS bảo vệ kênh truyền; HMAC + timestamp chứng minh request do provider có secret tạo ra, body không bị sửa và request cũ không thể replay vô hạn.
+
 TLS mã hóa dữ liệu trên đường truyền, nhưng receiver vẫn cần biết request thật sự do provider gửi và body không bị sửa.
 
 Mỗi endpoint có signing secret riêng, lưu encrypted bằng AWS KMS/envelope encryption. Không dùng một global secret cho mọi customers.
@@ -1284,6 +1331,8 @@ Hoặc dùng `Webhook-Key-Id` nếu contract hỗ trợ. Không log secret hoặ
 
 ### 18. SSRF: HMAC bảo vệ receiver, egress policy bảo vệ sender
 
+**Yêu cầu đang giải quyết: nửa thứ hai của REQ-8 — bảo vệ hạ tầng sender.** HMAC không giúp nếu worker bị biến thành proxy gọi metadata hoặc internal service; cần validation ở application và chặn ở network layer.
+
 Customer tự nhập URL nghĩa là attacker có thể yêu cầu worker gọi:
 
 ```txt
@@ -1351,6 +1400,8 @@ Application validation có thể có bug; network boundary giảm blast radius.
 ---
 
 ### 19. DLQ và replay không chỉ là một Kafka topic
+
+**Yêu cầu đang giải quyết: REQ-9 — support điều tra và phục hồi có kiểm soát.** `DEAD` là một business/operational state có owner, history và action; chỉ đẩy message vào một topic chưa đáp ứng requirement này.
 
 Khi delivery hết retry budget hoặc gặp permanent error:
 
@@ -1662,6 +1713,8 @@ Nếu business mutation nhỏ và cùng DB, có thể dedupe + mutation trong m�
 ---
 
 ### 23. Observability: đo delivery promise chứ không chỉ pod uptime
+
+**Yêu cầu đang giải quyết: REQ-3, REQ-5 và REQ-9.** Metrics phải trả lời ba câu: event có được attempt đúng hạn không, tenant khỏe có bị tenant lỗi ảnh hưởng không, và support có lần ra từng delivery không?
 
 Tất cả pods có thể `Running` nhưng event cũ nhất đã chờ hai giờ. Các metrics quan trọng:
 
