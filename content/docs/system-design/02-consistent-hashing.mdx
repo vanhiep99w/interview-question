@@ -1,0 +1,1310 @@
+---
+title: "Consistent Hashing là gì và vì sao thêm shard không phải di chuyển gần hết dữ liệu?"
+description: "Hiểu consistent hashing từ bài toán hash modulo, hash ring, virtual node đến rebalancing dữ liệu an toàn trong production."
+---
+
+# Consistent Hashing là gì và vì sao thêm shard không phải di chuyển gần hết dữ liệu?
+
+## Câu hỏi
+
+> Hệ thống đang chia hàng chục triệu user lên 4 shard bằng công thức `hash(userId) % 4`. Khi thêm shard thứ 5, vì sao phần lớn key đổi shard? Consistent hashing giảm lượng dữ liệu phải di chuyển như thế nào, virtual node giải quyết vấn đề gì, và cần làm gì để rebalancing an toàn trong production?
+
+---
+
+## Dành cho level
+
+<Tabs items={["Mid", "Senior", "Staff"]}>
+
+<Tab value="Mid">
+
+Interviewer expect bạn giải thích được vấn đề của `hash(key) % N`, mô hình hash ring, cách tìm node theo chiều kim đồng hồ và vì sao thêm/bớt node chỉ remap một phần key. Bạn cũng cần biết consistent hashing không tự copy dữ liệu và virtual node không phải máy ảo.
+
+</Tab>
+
+<Tab value="Senior">
+
+Interviewer expect bạn định lượng được tỷ lệ remap, giải thích virtual node, replication và hot key, đồng thời mô tả một flow rebalancing không downtime. Bạn cần phân biệt thay đổi ownership metadata với di chuyển dữ liệu thật, xử lý write xảy ra trong lúc backfill và nêu được khi nào fixed slots hoặc rendezvous hashing phù hợp hơn.
+
+</Tab>
+
+<Tab value="Staff">
+
+Interviewer expect bạn thiết kế cả control plane lẫn data plane: ring version, topology propagation, fencing, failure-domain-aware replica placement, weighted capacity, throttled migration, rollback và observability theo token range. Bạn cũng phải nhìn ra rằng consistent hashing chỉ tối ưu key remapping; nó không tự giải quyết skew traffic, cross-shard transaction, data durability hay split-brain.
+
+</Tab>
+
+</Tabs>
+
+---
+
+## Cốt lõi cần nhớ
+
+**Vấn đề của `hash(key) % N` không nằm ở phép hash mà nằm ở việc `N` thay đổi.** Tăng từ 4 lên 5 shard làm khoảng 80% key đổi kết quả modulo; mapping mới không còn trùng với nơi dữ liệu đang nằm.
+
+**Consistent hashing tách vị trí của key khỏi số lượng node.** Key và node cùng nằm trên một hash ring cố định; khi thêm một node cân bằng vào cluster `N → N + 1`, lý tưởng chỉ khoảng `1 / (N + 1)` dữ liệu chuyển sang node mới.
+
+**Hash ring chỉ là ownership map, không phải migration engine.** Production vẫn cần virtual nodes để cân bằng, replica để chịu lỗi, một protocol chuyển dữ liệu trong lúc vẫn có write, version topology và metrics để phát hiện skew hoặc rebalancing quá tải.
+
+---
+
+## Câu trả lời mẫu
+
+> "Tôi sẽ bắt đầu từ failure mode của cách hiện tại: với `hash(userId) % N`, khi tăng từ 4 lên 5 shard thì chỉ khoảng 20% key giữ nguyên mapping, còn khoảng 80% đổi shard dù ta chỉ thêm một máy. Tôi sẽ dùng một hash space cố định, đặt cả key và shard lên ring, rồi route key tới token đầu tiên theo chiều kim đồng hồ; khi thêm node mới, chỉ các token range mà node đó tiếp quản đổi owner. Với 4 node cân bằng lên 5 node, lượng data tối thiểu cần chuyển xấp xỉ 20%, chứ không phải 80%, nhưng một token cho mỗi máy có variance lớn nên production thường dùng nhiều virtual nodes hoặc fixed logical partitions. Tôi không coi việc cập nhật ring là đã hoàn tất migration: node mới phải copy snapshot của các range, bắt kịp write phát sinh bằng CDC hoặc dual-write, verify checksum rồi mới cut over routing. Mọi router phải dùng topology có version, còn node cũ giữ dữ liệu trong một grace period để rollback và tránh request dùng stale ring bị miss. Replica placement phải chọn các physical node khác nhau và khác failure domain; nếu node chết mà không có replica thì consistent hashing chỉ chỉ ra owner mới chứ không khôi phục được dữ liệu. Sau cùng tôi monitor bytes/QPS/latency theo shard và token range vì hash phân bố key đều không có nghĩa traffic đều — một celebrity user vẫn có thể tạo hot key."
+
+---
+
+## Phân tích chi tiết
+
+### 1. Bắt đầu từ production scenario: thêm một shard nhưng 80% routing thay đổi
+
+Giả sử hệ thống có 50 triệu user và 4 database shard:
+
+```txt
+user-service
+    │
+    ├── shard-0
+    ├── shard-1
+    ├── shard-2
+    └── shard-3
+```
+
+Router chọn shard bằng công thức:
+
+```txt
+shard = hash(userId) % numberOfShards
+```
+
+Nếu `userId` đã có phân bố đủ ngẫu nhiên, ví dụ UUID được hash trước, ta có thể hình dung đơn giản:
+
+```txt
+user 10: 10 % 4 = 2  -> shard-2
+user 13: 13 % 4 = 1  -> shard-1
+```
+
+Traffic tăng, storage của mỗi shard sắp đầy nên team thêm `shard-4`. Công thức trở thành:
+
+```txt
+shard = hash(userId) % 5
+```
+
+Hai user trên lập tức có mapping khác:
+
+```txt
+user 10: 10 % 5 = 0  -> shard-0
+user 13: 13 % 5 = 3  -> shard-3
+```
+
+Nhưng dữ liệu thật vẫn đang nằm ở `shard-2` và `shard-1`. Nếu router áp mapping mới ngay, request sẽ gặp một trong các lỗi sau:
+
+```txt
+GET /users/10 -> shard-0 -> NOT_FOUND
+
+POST /users/10/address -> shard-0
+old profile             -> shard-2
+new address              -> shard-0
+=> cùng một user bị split data
+```
+
+Đây là distinction quan trọng đầu tiên:
+
+```txt
+Mapping thay đổi != dữ liệu đã di chuyển
+```
+
+Một thuật toán routing có thể tính ra owner mới trong vài microsecond, nhưng copy hàng terabyte data, đồng bộ write đang chạy và cutover an toàn có thể mất nhiều giờ hoặc nhiều ngày.
+
+#### Vì sao khoảng 80% key đổi shard?
+
+Với `N = 4`, xét một chu kỳ `LCM(4, 5) = 20` hash values. Mapping cũ và mới chỉ trùng ở bốn trường hợp:
+
+```txt
+hash % 4 = hash % 5
+
+hash = 0  -> 0 = 0
+hash = 1  -> 1 = 1
+hash = 2  -> 2 = 2
+hash = 3  -> 3 = 3
+```
+
+Trong 20 giá trị, có 4 giá trị giữ nguyên:
+
+```txt
+4 / 20 = 20% giữ nguyên
+80% thay đổi
+```
+
+Tổng quát, khi tăng từ `N` lên `N + 1` và hash phân bố đều:
+
+```txt
+Tỷ lệ giữ nguyên ≈ 1 / (N + 1)
+Tỷ lệ remap       ≈ N / (N + 1)
+```
+
+Từ 100 lên 101 server còn tệ hơn về tỷ lệ mapping: chỉ gần `1/101` key giữ nguyên theo cùng bucket number. Modulo hashing vẫn rất nhanh và hợp lệ khi số logical bucket cố định; vấn đề xuất hiện khi ta dùng trực tiếp số physical node làm modulo divisor.
+
+---
+
+### 2. Ý tưởng quan trọng nhất: giữ hash space cố định
+
+Consistent hashing không hỏi:
+
+```txt
+Có bao nhiêu server để tôi chia lấy dư?
+```
+
+Nó hỏi:
+
+```txt
+Key nằm ở vị trí nào trong một hash space cố định,
+và node nào đang sở hữu vị trí đó?
+```
+
+Ta có thể dùng hash space minh họa từ `0` đến `999`:
+
+```txt
+0 ---------------------------------------------------------- 999
+```
+
+Trong hệ thống thật, hash space thường lớn hơn rất nhiều, chẳng hạn miền 64-bit. Không phải vì hệ thống cần hàng tỷ node, mà vì miền lớn giúp giảm collision và cho phép đặt nhiều token đủ mịn. Con số bit cụ thể phụ thuộc implementation; nó không phải tuning knob phải tăng theo số record.
+
+Để dễ nhìn, nối điểm cuối `999` về `0` thành một vòng:
+
+```txt
+                         0
+                         │
+                  900    │    100
+                     \   │   /
+                      \  │  /
+                700 ---- + ---- 300
+                      /     \
+                     /       \
+                  600         400
+```
+
+Đây là **hash ring**. Vòng tròn chỉ là cách vẽ một miền số có wrap-around:
+
+```txt
+... 997 -> 998 -> 999 -> 0 -> 1 -> 2 ...
+```
+
+Ta đặt các physical node lên ring bằng cách hash stable node ID:
+
+```txt
+hash("shard-A") = 100
+hash("shard-B") = 400
+hash("shard-C") = 700
+```
+
+Sau đó hash key bằng cùng một hash space:
+
+```txt
+hash("user-10") = 250
+hash("user-13") = 650
+hash("user-99") = 900
+```
+
+Điểm cần nhớ là **node ID phải stable**. Nếu hash hostname chứa một IP thay đổi sau mỗi lần restart, node có thể nhảy sang vị trí khác và gây remap ngoài ý muốn. Production thường dùng một immutable node ID/token assignment được control plane lưu bền vững.
+
+---
+
+### 3. Lookup một key: đi theo chiều kim đồng hồ tới node đầu tiên
+
+Quy tắc phổ biến của hash ring là:
+
+```txt
+1. Hash key thành một token.
+2. Tìm node token đầu tiên >= key token.
+3. Nếu không có node nào ở phía sau, wrap về node đầu ring.
+```
+
+Với ring:
+
+```txt
+A = 100
+B = 400
+C = 700
+```
+
+Ta route như sau:
+
+```txt
+key 80  -> A tại 100
+key 250 -> B tại 400
+key 650 -> C tại 700
+key 900 -> wrap -> A tại 100
+```
+
+Một node sở hữu khoảng ngay sau predecessor của nó đến chính token của nó:
+
+```txt
+A sở hữu (700, 999] và [0, 100]
+B sở hữu (100, 400]
+C sở hữu (400, 700]
+```
+
+Viết gọn theo ring notation:
+
+```txt
+A: (C, A]
+B: (A, B]
+C: (B, C]
+```
+
+Việc thống nhất boundary rất quan trọng. Nếu router A dùng `(previous, current]` nhưng migration job dùng `[previous, current)`, một số key đúng tại boundary có thể bị copy thiếu hoặc xuất hiện ở hai nơi. Implementation phải có một convention duy nhất và test riêng các giá trị ở min, max, token exact và wrap-around.
+
+Lookup trên danh sách token đã sort có thể dùng binary search với complexity:
+
+```txt
+O(log V)
+```
+
+Trong đó `V` là tổng số virtual node/token, không phải số record. Hash ring không cần giữ mọi key trong memory; nó chỉ giữ token-to-node map.
+
+---
+
+### 4. Thêm node mới: chỉ một phần ring đổi owner
+
+Giả sử thêm node D tại token `600`:
+
+```txt
+Before:
+A = 100
+B = 400
+C = 700
+
+After:
+A = 100
+B = 400
+D = 600
+C = 700
+```
+
+Trước khi thêm D, node C sở hữu:
+
+```txt
+C: (400, 700]
+```
+
+Sau khi thêm D:
+
+```txt
+D: (400, 600]
+C: (600, 700]
+```
+
+Chỉ key trong `(400, 600]` đổi từ C sang D:
+
+```txt
+Before: (400, 600] -> C
+After:  (400, 600] -> D
+```
+
+Các range của A và B không đổi. C cũng giữ lại phần `(600, 700]`. Đây là lợi ích cốt lõi: **membership thay đổi chỉ ảnh hưởng các range liền kề về mặt ownership, không làm công thức của toàn bộ keyspace đổi theo số node**.
+
+#### Thực sự phải chuyển bao nhiêu dữ liệu?
+
+Nếu `N` node đang cân bằng và thêm một node có cùng capacity, sau rebalancing mỗi node nên giữ khoảng:
+
+```txt
+1 / (N + 1)
+```
+
+Node mới đang trống nên tối thiểu phải nhận lượng đó. Từ 4 lên 5 node:
+
+```txt
+1 / 5 = 20%
+```
+
+So sánh:
+
+| Cách phân phối | Tăng 4 → 5 node | Mapping bị thay đổi |
+|---|---:|---:|
+| `hash(key) % nodeCount` | Đổi divisor từ 4 thành 5 | Khoảng 80% key |
+| Consistent hashing cân bằng | Node mới nhận phần của mình | Khoảng 20% key |
+
+Cụm từ “consistent hashing di chuyển ít dữ liệu nhất” nên được hiểu có điều kiện. Muốn node mới thực sự nhận 20% capacity, không thuật toán nào có thể chuyển ít hơn 20% từ cluster cũ sang một node đang trống. Consistent hashing giúp lượng remap tiến gần phần **cần thiết để cân bằng**, thay vì làm phần lớn key đổi chỗ không cần thiết.
+
+Nếu mỗi node chỉ có một token ngẫu nhiên, range node mới nhận có thể không đúng 20%. Nó có thể nhận 3%, 20% hoặc 45% tùy khoảng trống mà token rơi vào. Đó là lý do production cần virtual nodes hoặc một cơ chế phân logical partition khác.
+
+---
+
+### 5. Xóa hoặc mất node: ít remap không đồng nghĩa không mất dữ liệu
+
+Giả sử D tại `600` bị remove. Range của D quay lại successor C:
+
+```txt
+Before:
+D owns (400, 600]
+C owns (600, 700]
+
+After removing D:
+C owns (400, 700]
+```
+
+Về routing, chỉ key từng thuộc D đổi owner. Nhưng nếu D là nơi duy nhất chứa dữ liệu và disk đã chết, C không tự nhiên có data chỉ vì ring nói C là owner mới.
+
+```txt
+Consistent hashing -> quyết định ai nên sở hữu key
+Replication        -> đảm bảo còn bản copy khi owner chết
+Repair/recovery     -> đưa các replica về trạng thái đúng
+```
+
+Đây là một lỗi suy luận thường gặp trong phỏng vấn. Consistent hashing hỗ trợ fault handling bằng cách giới hạn phạm vi remap, nhưng **durability đến từ replication hoặc backup**, không đến từ hash ring.
+
+Với cache, mất node có thể chấp nhận được vì request sẽ cache miss rồi đọc database để rebuild. Với database persistent, remove node mà chưa bootstrap replica có thể là data loss.
+
+---
+
+### 6. Vấn đề của một token trên mỗi physical node
+
+Xét ba node có vị trí ngẫu nhiên:
+
+```txt
+A = 100
+B = 180
+C = 900
+```
+
+Ownership gần đúng:
+
+```txt
+A sở hữu (900, 100] -> 20% ring
+B sở hữu (100, 180] -> 8% ring
+C sở hữu (180, 900] -> 72% ring
+```
+
+Hash key có thể phân bố hoàn hảo trong hash space nhưng C vẫn giữ phần lớn dữ liệu vì **node positions phân bố lệch**. C có thể đầy disk và quá tải trong khi B gần như rảnh.
+
+Nếu C chết, toàn bộ 72% load có thể dồn vào successor A. Hệ thống vừa mất một node đã làm node kế tiếp quá tải, rồi A tiếp tục chết. Đây là một con đường dẫn đến cascading failure.
+
+Ta không thể kết luận “hash tốt nên load chắc chắn đều”. Có ba phân phối khác nhau cần đo:
+
+```txt
+1. Token distribution  -> mỗi node sở hữu bao nhiêu hash space?
+2. Data distribution   -> mỗi token range có bao nhiêu bytes/records?
+3. Traffic distribution-> mỗi key/range nhận bao nhiêu QPS và CPU?
+```
+
+Ba thứ này có liên quan nhưng không giống nhau.
+
+---
+
+### 7. Virtual node: một máy xuất hiện nhiều lần trên ring
+
+**Virtual node — vnode** không phải VM, container hay process riêng. Nó chỉ là một logical token thuộc về một physical node.
+
+Thay vì:
+
+```txt
+A -> 1 token
+B -> 1 token
+C -> 1 token
+```
+
+Ta có:
+
+```txt
+A -> A#0, A#1, A#2, ...
+B -> B#0, B#1, B#2, ...
+C -> C#0, C#1, C#2, ...
+```
+
+Các vnode được rải trên ring:
+
+```txt
+0
+│
+A#2 -- B#0 -- C#1 -- A#0 -- C#2 -- B#1 -- A#1 -- B#2 -- C#0
+│                                                                    │
+└──────────────────────────── wrap-around ───────────────────────────┘
+```
+
+Mỗi key vẫn đi tới token kế tiếp, nhưng token đó trỏ về physical node:
+
+```txt
+key -> token B#2 -> physical node B
+```
+
+Virtual nodes mang lại ba lợi ích lớn.
+
+#### 7.1. Data cân bằng hơn
+
+Một physical node nhận nhiều đoạn nhỏ ở nhiều vị trí thay vì phụ thuộc vào một đoạn lớn ngẫu nhiên. Sai lệch của các đoạn có xu hướng bù trừ nhau.
+
+#### 7.2. Scale-out lấy data từ nhiều node cũ
+
+Khi thêm D với nhiều vnode, D có thể lấy các range nhỏ từ A, B và C:
+
+```txt
+A ── 7 GB ──▶ D
+B ── 6 GB ──▶ D
+C ── 7 GB ──▶ D
+```
+
+Thay vì một token làm D lấy toàn bộ 20 GB từ một neighbor duy nhất. Migration bandwidth được phân tán tốt hơn, miễn là có throttle để không đồng thời làm tất cả source node quá tải.
+
+#### 7.3. Hỗ trợ node khác capacity
+
+Nếu node D có capacity lớn hơn, control plane có thể giao cho D nhiều token/range hơn hoặc dùng weight lớn hơn. Tuy nhiên weight phải phản ánh bottleneck thật:
+
+```txt
+Disk capacity?
+Disk IOPS?
+Network bandwidth?
+CPU?
+Memory?
+Read/write mix?
+```
+
+Một node có disk gấp đôi nhưng network bằng nhau chưa chắc chịu được gấp đôi traffic. Weighted ownership cần capacity test và metrics, không nên chỉ dựa vào instance type trên giấy.
+
+#### Bao nhiêu vnode là đủ?
+
+Không có con số đúng cho mọi hệ thống. Quá ít vnode gây imbalance; quá nhiều vnode làm token map lớn hơn, tăng số stream/recovery task, tăng maintenance overhead và có thể làm failure topology phức tạp hơn.
+
+Cần chọn dựa trên:
+
+- Số physical node và mức variance ownership chấp nhận được.
+- Kích thước trung bình của một range và thời gian migrate mong muốn.
+- Cost của repair, backup, compaction và topology propagation.
+- Node có đồng nhất capacity hay không.
+- Replica placement theo rack/AZ.
+- Benchmark trên data distribution thật.
+
+Ví dụ `128` hoặc `256` vnode thường xuất hiện trong tài liệu/hệ thống cũ, nhưng đó không phải universal best practice. Apache Cassandra đã thay đổi token allocation qua các version để có thể cân bằng với ít token hơn; copy một con số mà không xét implementation cụ thể có thể làm cluster-wide operations chậm hơn.
+
+---
+
+### 8. Consistent hashing không loại bỏ hot key
+
+Giả sử 50 triệu user được chia đều theo số record, nhưng một tài khoản celebrity nhận 100.000 request/giây:
+
+```txt
+49.999.999 users -> tổng 100.000 RPS
+1 celebrity user ->       100.000 RPS
+```
+
+Hash ring vẫn đặt celebrity vào đúng một owner. Về số key, cluster cân bằng; về traffic, shard đó có thể nhận gần một nửa workload.
+
+```txt
+Uniform key distribution != uniform request distribution
+```
+
+Tùy loại workload, có thể xử lý bằng:
+
+- Cache hot read ở nhiều layer hoặc replicate read-only data.
+- Request coalescing để nhiều cache miss chỉ tạo một backend request.
+- Tách hot tenant/user sang dedicated shard.
+- Salting hoặc bucketing cho counter/write có thể merge.
+- Read replica và load-aware routing.
+- Rate limit nếu traffic là abusive.
+- Thay đổi data model nếu một key chứa object quá lớn.
+
+Không thể tùy tiện salt mọi key. Nếu `user-123` được đổi thành `user-123#0..15`, mọi read có thể phải fan-out 16 bucket và transaction trở nên khó hơn. Con số bucket phải dựa trên throughput cần chia và fan-out cost; không phải cứ nhiều bucket là tốt.
+
+Ngoài hot key còn có **hot range** và **large item**. Một range có ít key nhưng mỗi value vài trăm MB vẫn có thể chiếm disk/network nhiều hơn range chứa hàng triệu record nhỏ.
+
+---
+
+### 9. Replication trên ring cần hiểu theo physical node và failure domain
+
+Một mô hình Dynamo-style có thể chọn coordinator là owner đầu tiên theo chiều kim đồng hồ, rồi chọn thêm các successor làm replica:
+
+```txt
+Replication factor = 3
+
+key K -> token A#2
+       -> replica 1: physical A
+       -> replica 2: physical C
+       -> replica 3: physical B
+```
+
+Nếu token kế tiếp cũng là vnode của A, không được tính đó là replica thứ hai:
+
+```txt
+A#2 -> A#7 -> C#1
+
+Sai:  A#2 và A#7 là hai replica
+Đúng: cả hai vẫn nằm trên physical node A
+```
+
+Replica placement còn phải nhận biết failure domain:
+
+```txt
+Replica 1 -> node A, AZ-1
+Replica 2 -> node B, AZ-2
+Replica 3 -> node C, AZ-3
+```
+
+Ba replica trên ba máy nhưng cùng một rack/AZ vẫn có thể mất cùng lúc. Production topology thường phải biết region, AZ/rack, host và đôi khi cả power/network domain.
+
+Cũng không nên khẳng định mọi database dùng đúng “ba node kế tiếp trên ring”. Cassandra có replication strategy nhận biết datacenter/rack; những hệ thống khác dùng placement map hoặc consensus group riêng. Hash ring xác định candidate ownership, còn replica policy cụ thể phụ thuộc database.
+
+---
+
+### 10. Thay đổi ring trong production là một distributed protocol
+
+Nếu router trong application tự đọc danh sách pod rồi lập ring, các instance có thể nhìn thấy membership khác nhau:
+
+```txt
+Router R1 thấy: A, B, C
+Router R2 thấy: A, B, C, D
+Router R3 thấy: A, C, D vì health check nhầm B down
+```
+
+Cùng `user-10`, ba router có thể gửi tới ba owner khác nhau. Với cache, hậu quả có thể là giảm hit rate; với database write, hậu quả có thể là split data.
+
+Vì vậy topology cần một nguồn sự thật và version:
+
+```txt
+Ring version 41: A, B, C
+Ring version 42: A, B, C, D
+```
+
+Một thiết kế cơ bản gồm:
+
+```txt
+                 ┌─────────────────────┐
+                 │ Topology control    │
+                 │ ring v41 -> v42     │
+                 └──────────┬──────────┘
+                            │ publish signed/versioned map
+          ┌─────────────────┼─────────────────┐
+          ▼                 ▼                 ▼
+      Router R1         Router R2         Migrator
+          │                 │                 │
+          └─────────────────┴─────────────────┘
+                            │
+                     Data nodes A/B/C/D
+```
+
+Các requirement quan trọng:
+
+- Node ID và token assignment bền vững qua restart.
+- Ring update có version tăng đơn điệu.
+- Router không dùng topology chưa hoàn chỉnh.
+- Node bị remove phải bị fencing, không tiếp tục nhận write như owner cũ.
+- Có compatibility window cho client/router chưa refresh.
+- Rollout topology tách khỏi thời điểm data cutover.
+- Audit được ai thay đổi ownership, lúc nào và vì sao.
+
+Consistent hashing paper/algorithm không cung cấp sẵn control plane này. Đây là phần engineering mà câu trả lời Senior/Staff nên chủ động đề cập.
+
+---
+
+### 11. Flow rebalancing an toàn khi thêm shard
+
+Giả sử D sẽ nhận các token range từ A, B và C. Một flow dễ reason có thể gồm bảy phase.
+
+#### Phase 1 — Measure và lập kế hoạch
+
+Trước khi thêm node, xác nhận bottleneck là storage/write throughput chứ không phải slow query hoặc một hot key duy nhất. Tính:
+
+```txt
+bytes cần chuyển
+÷ bandwidth migration an toàn
+= thời gian tối thiểu
+```
+
+Ví dụ cần chuyển `8 TB`, nhưng chỉ cho migration dùng `100 MB/s` để giữ headroom cho production traffic:
+
+```txt
+8 TB / 100 MB/s ≈ 22,2 giờ theo decimal units
+```
+
+Thời gian thật sẽ dài hơn do retry, checksum, compaction và write phát sinh. `100 MB/s` không phải default; nó phải đến từ load test và latency/error budget của source node.
+
+#### Phase 2 — Join ở trạng thái không phục vụ traffic
+
+D đăng ký node ID, token ranges và ring version dự kiến nhưng chưa trở thành active owner:
+
+```txt
+D state = JOINING
+servingRead  = false
+servingWrite = false
+```
+
+Việc này ngăn router gửi request tới một node chưa có dữ liệu.
+
+#### Phase 3 — Copy snapshot theo token range
+
+Mỗi source node chụp một consistent snapshot hoặc scan ở một watermark rõ ràng, rồi copy đúng các range D sẽ nhận:
+
+```txt
+A range A-17 -> D
+B range B-03 -> D
+C range C-11 -> D
+```
+
+Copy theo batch có throttle, retry idempotent và checkpoint. Batch size phải dựa trên item size, timeout, memory và write amplification; không nên hard-code `10.000 records` chỉ vì đó là số tròn.
+
+#### Phase 4 — Bắt kịp write phát sinh trong lúc copy
+
+Nếu snapshot bắt đầu lúc `T0`, write sau `T0` vẫn đi vào old owner. Có ba pattern phổ biến:
+
+```txt
+A. Snapshot + WAL/CDC catch-up
+B. Dual-write old owner và new owner
+C. Old owner forward/proxy write sang new owner
+```
+
+`Snapshot + CDC` thường dễ kiểm soát ordering hơn nếu database có log sequence number. Dual-write từ application dễ tạo partial failure: write old thành công, write new thất bại. Nếu dùng dual-write, cần idempotency, retry log/outbox và reconciliation; hai network calls đơn thuần không tạo atomicity.
+
+#### Phase 5 — Verify trước cutover
+
+Không chỉ so sánh row count. Có thể verify theo range:
+
+```txt
+record count
+total bytes
+checksum/Merkle tree
+max applied log sequence
+sample business invariants
+```
+
+Row count bằng nhau vẫn có thể chứa giá trị khác nhau. Checksum toàn bộ 8 TB trong một lần cũng quá đắt; chia theo token range/chunk giúp retry và khoanh vùng mismatch.
+
+#### Phase 6 — Cut over bằng ring version mới
+
+Khi D đã catch up đến watermark yêu cầu:
+
+```txt
+ring v41: ranges -> A/B/C
+ring v42: selected ranges -> D
+```
+
+Control plane publish `v42`. Trong compatibility window:
+
+- Old owner có thể redirect/proxy request mang ring version cũ.
+- New owner có thể từ chối write quá cũ hoặc dùng fencing epoch.
+- Metrics tách request theo ring version để biết router nào chưa refresh.
+
+Không nên dựa vào “deploy cùng lúc” vì distributed deployment không bao giờ thực sự đồng thời.
+
+#### Phase 7 — Grace period và cleanup
+
+Old owner giữ bản copy read-only trong một khoảng đủ cho rollback và client convergence. Sau khi xác nhận:
+
+```txt
+error rate bình thường
+p95/p99 latency bình thường
+replication lag = 0 hoặc trong SLO
+không còn router dùng v41
+checksum pass
+```
+
+mới xóa range cũ và reclaim disk. Grace period cần cân bằng rollback safety với storage pressure; phải dựa trên topology refresh TTL, thời gian quan sát và free-space headroom, không chọn tùy ý.
+
+Flow tổng quát:
+
+```txt
+PLAN
+  -> JOINING
+  -> SNAPSHOT_COPY
+  -> CDC_CATCH_UP
+  -> VERIFY
+  -> CUTOVER_RING_VERSION
+  -> GRACE_PERIOD
+  -> CLEANUP
+```
+
+Mỗi transition nên idempotent và có rollback condition. Nếu node D lỗi trong `SNAPSHOT_COPY`, retry từ checkpoint. Nếu lỗi sau cutover, rollback về owner cũ chỉ an toàn khi old owner vẫn nhận hoặc replay được toàn bộ write mới.
+
+---
+
+### 12. Đọc và ghi trong lúc migration: chọn semantics trước khi chọn mechanism
+
+Không có một flow migration đúng cho mọi dữ liệu. Trước hết phải xác định consistency requirement.
+
+<Tabs items={["Cache", "User profile", "Balance/Inventory"]}>
+
+<Tab value="Cache">
+
+Cache có thể chấp nhận miss và rebuild. Khi membership đổi, ta thường không cần copy toàn bộ cache; consistent hashing chủ yếu giảm cache churn để hit rate không rơi quá mạnh. Temporary duplicate hoặc stale entry có thể chấp nhận nếu TTL và source of truth rõ ràng.
+
+</Tab>
+
+<Tab value="User profile">
+
+User profile cần tránh lost update nhưng có thể cho phép một compatibility window ngắn. Snapshot + CDC, version column và read fallback từ old owner có thể đủ. Cần quan sát read-after-write behavior nếu read và write router cập nhật ring ở thời điểm khác nhau.
+
+</Tab>
+
+<Tab value="Balance/Inventory">
+
+Balance hoặc inventory có invariant mạnh, nên arbitrary dual-write giữa hai shard rất nguy hiểm. Có thể cần single-writer ownership với fencing epoch, transaction log, pause theo range trong cutover rất ngắn hoặc một storage engine đã hỗ trợ online resharding. Consistent hashing không thay thế consensus/transaction protocol.
+
+</Tab>
+
+</Tabs>
+
+Một pattern phòng thủ cho read trong migration:
+
+```txt
+1. Read new owner.
+2. Nếu NOT_FOUND và range đang MIGRATING, read old owner.
+3. Nếu old owner có record, trả result và enqueue repair có version check.
+```
+
+Pattern này giảm false `NOT_FOUND`, nhưng không được dùng vô hạn. Nó tăng latency và có thể che giấu migration lỗi. Chỉ bật theo range/state cụ thể, gắn metric fallback rate và tắt sau khi verify.
+
+Với write, single-writer rõ ràng thường dễ reason hơn:
+
+```txt
+Before cutover: old owner là writer, CDC sang new owner
+After cutover:  new owner là writer, old owner read-only
+```
+
+Fencing token/ring epoch giúp old owner từ chối writer cũ:
+
+```txt
+write(key, value, ownershipEpoch = 42)
+
+node accepts only if requestEpoch >= nodeCurrentEpoch
+```
+
+Pseudo-interface trên chỉ mô tả ý tưởng; database cụ thể phải đảm bảo epoch check và data write nằm trong cùng correctness boundary, nếu không vẫn có race.
+
+---
+
+### 13. Java 17 demo: xây hash ring có virtual nodes
+
+Đoạn code sau minh họa lookup, add và remove node. Đây là code học thuật, chưa phải một production membership/migration system.
+
+```java
+import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.util.NavigableMap;
+import java.util.Objects;
+import java.util.TreeMap;
+
+public final class ConsistentHashRing {
+    private final NavigableMap<Long, String> ring = new TreeMap<>();
+    private final int virtualNodesPerPhysicalNode;
+
+    public ConsistentHashRing(int virtualNodesPerPhysicalNode) {
+        if (virtualNodesPerPhysicalNode <= 0) {
+            throw new IllegalArgumentException("virtualNodes must be > 0");
+        }
+        this.virtualNodesPerPhysicalNode = virtualNodesPerPhysicalNode;
+    }
+
+    public void addNode(String nodeId) {
+        Objects.requireNonNull(nodeId, "nodeId");
+
+        for (int vnode = 0; vnode < virtualNodesPerPhysicalNode; vnode++) {
+            long token = hash64(nodeId + "#" + vnode);
+            String previous = ring.putIfAbsent(token, nodeId);
+            if (previous != null && !previous.equals(nodeId)) {
+                throw new IllegalStateException("Hash collision at token " + token);
+            }
+        }
+    }
+
+    public void removeNode(String nodeId) {
+        Objects.requireNonNull(nodeId, "nodeId");
+
+        for (int vnode = 0; vnode < virtualNodesPerPhysicalNode; vnode++) {
+            long token = hash64(nodeId + "#" + vnode);
+            ring.remove(token, nodeId);
+        }
+    }
+
+    public String ownerOf(String key) {
+        Objects.requireNonNull(key, "key");
+        if (ring.isEmpty()) {
+            throw new IllegalStateException("Hash ring has no nodes");
+        }
+
+        long keyToken = hash64(key);
+        var owner = ring.ceilingEntry(keyToken);
+
+        // Không còn token ở bên phải: wrap về đầu ring.
+        return owner != null
+                ? owner.getValue()
+                : ring.firstEntry().getValue();
+    }
+
+    private static long hash64(String value) {
+        try {
+            MessageDigest sha256 = MessageDigest.getInstance("SHA-256");
+            byte[] digest = sha256.digest(value.getBytes(StandardCharsets.UTF_8));
+
+            // Demo dùng 63 bit dương để TreeMap có natural ordering dễ hiểu.
+            return ByteBuffer.wrap(digest).getLong() & Long.MAX_VALUE;
+        } catch (NoSuchAlgorithmException impossibleOnStandardJdk) {
+            throw new IllegalStateException("SHA-256 is unavailable", impossibleOnStandardJdk);
+        }
+    }
+}
+```
+
+Cách dùng:
+
+```java
+public class Demo {
+    public static void main(String[] args) {
+        // 64 chỉ là giá trị demo. Production phải benchmark độ lệch và overhead.
+        ConsistentHashRing ring = new ConsistentHashRing(64);
+
+        ring.addNode("shard-a");
+        ring.addNode("shard-b");
+        ring.addNode("shard-c");
+
+        System.out.println(ring.ownerOf("user-10"));
+        System.out.println(ring.ownerOf("user-13"));
+
+        ring.addNode("shard-d");
+        System.out.println(ring.ownerOf("user-10"));
+    }
+}
+```
+
+#### Những gì demo cố tình chưa giải quyết
+
+- `TreeMap` không thread-safe trong khi add/remove và lookup đồng thời.
+- Không có immutable topology snapshot hoặc ring version.
+- Không lưu token assignment bền vững.
+- Không có weighted node.
+- Không chọn replica theo AZ/rack.
+- Không copy dữ liệu khi owner thay đổi.
+- Không xử lý node health, split-brain hoặc stale membership.
+- Không benchmark hash function và allocation cost.
+- Không giải quyết hash collision ngoài việc fail fast.
+
+SHA-256 được dùng vì có sẵn trong Java 17 và cho output ổn định, không phải vì cryptographic security là requirement. Hot path throughput cao thường cân nhắc non-cryptographic hash chất lượng tốt như MurmurHash hoặc xxHash thông qua library đã được kiểm chứng; không tự viết hash function trong interview code rồi coi đó là production-ready.
+
+Production router thường build một immutable ring snapshot rồi atomically swap reference:
+
+```txt
+AtomicReference<RingSnapshot>
+
+request 1 -> dùng trọn v41
+control  -> publish v42
+request 2 -> dùng trọn v42
+```
+
+Không mutate `TreeMap` giữa lúc request đang lookup vì request có thể nhìn thấy topology nửa cũ nửa mới.
+
+---
+
+### 14. Test consistent hashing như thế nào?
+
+Chỉ test “một key trả về một node” là chưa đủ. Cần test properties.
+
+#### 14.1. Determinism
+
+```txt
+Cùng key + cùng ring version -> luôn cùng owner
+```
+
+Chạy trên nhiều JVM/process vẫn phải cho cùng kết quả. Không dùng `Object.hashCode()` cho routing protocol nếu representation/implementation có thể khác giữa client hoặc version.
+
+#### 14.2. Distribution
+
+Tạo một tập key đủ lớn và đo:
+
+```txt
+keys per physical node
+bytes per physical node
+max deviation from expected ownership
+```
+
+Không chỉ test key tuần tự nếu production key có prefix/structure khác. Dùng sample đã ẩn danh từ production hoặc generator phản ánh key format thật.
+
+#### 14.3. Minimal remapping
+
+Với 4 node cân bằng, thêm node thứ 5:
+
+```txt
+expected moved keys ≈ 20%
+```
+
+Cho phép tolerance theo số vnode và sample size. Quan trọng hơn, key không thuộc range đổi owner phải giữ nguyên.
+
+#### 14.4. Remove node
+
+Sau khi remove B:
+
+```txt
+key trước thuộc A/C/D -> giữ owner
+key trước thuộc B     -> chuyển sang owner hợp lệ
+```
+
+Nếu có replication, verify replica set gồm các physical node distinct và đúng failure-domain policy.
+
+#### 14.5. Boundary và wrap-around
+
+Test riêng:
+
+```txt
+key token = node token
+key token < first token
+key token > last token
+empty ring
+single-node ring
+hash collision
+```
+
+#### 14.6. Topology convergence
+
+Mô phỏng router nhận ring versions khác thứ tự:
+
+```txt
+v41 -> v43 -> v42
+```
+
+Router phải reject/ignore topology cũ `v42` sau khi đã dùng `v43`. Test restart không làm node ID/token assignment thay đổi ngoài ý muốn.
+
+#### 14.7. Migration failure injection
+
+Dừng process ở từng phase:
+
+```txt
+copy được 37% rồi crash
+CDC bị lag
+checksum mismatch
+new owner chết trước cutover
+old owner chết sau cutover
+control plane publish timeout một phần router
+```
+
+Sau restart, workflow phải resume hoặc rollback mà không mất/nhân đôi business state ngoài semantics đã cam kết.
+
+---
+
+### 15. Observability: đừng chỉ nhìn average toàn cluster
+
+Dashboard cluster average có thể trông đẹp trong khi một token range sắp chết. Nên theo dõi theo physical node và range:
+
+```txt
+owned_tokens / owned_hash_space
+record_count, bytes_on_disk
+read_qps, write_qps
+p50, p95, p99 latency
+CPU, memory, disk IOPS, network
+compaction/GC pressure
+replication lag
+migration bytes remaining
+migration throughput và ETA
+checksum mismatch count
+requests by ring_version
+redirect/fallback rate
+```
+
+Các alert hữu ích dựa trên imbalance ratio:
+
+```txt
+max_node_qps / median_node_qps
+max_node_bytes / median_node_bytes
+max_range_latency / cluster_median_latency
+```
+
+Không có threshold universal. Một cluster homogeneous có thể alert ở độ lệch thấp hơn cluster weighted; threshold phải dựa trên headroom và SLO. Alert “disk > 80%” cũng cần giải thích theo tốc độ tăng và thời gian rebalancing: nếu thêm node + migrate mất 24 giờ, phải alert đủ sớm trước khi disk đầy trong 24 giờ đó.
+
+Trong migration, theo dõi tác động lên foreground traffic quan trọng hơn việc đạt tốc độ copy tối đa:
+
+```txt
+Nếu p99 hoặc error rate vượt budget
+-> giảm migration concurrency/bandwidth
+-> không cố giữ ETA bằng mọi giá
+```
+
+---
+
+### 16. Consistent hashing, fixed slots, rendezvous hashing và directory khác nhau thế nào?
+
+Hash ring là một lựa chọn, không phải đáp án duy nhất.
+
+| Cách | Mapping | Khi thêm node | Điểm mạnh | Trade-off |
+|---|---|---|---|---|
+| Modulo physical nodes | `hash(key) % nodeCount` | Phần lớn key remap | Rất đơn giản, lookup O(1) | Scale membership gây churn lớn |
+| Consistent hash ring | Key → token → successor vnode | Chỉ range được tiếp quản remap | Incremental scaling, mô hình trực quan | Cần token map/vnode và control plane |
+| Fixed logical slots | Key → slot cố định → node | Chuyển một số slot sang node mới | Migration theo unit rõ ràng | Cần slot map và chọn số slot từ đầu |
+| Rendezvous hashing | Chấm điểm key với từng node, chọn điểm cao nhất | Chỉ key chọn node mới remap | Không cần ring, implementation dễ hiểu | Lookup cơ bản O(N), cần biến thể khi N lớn |
+| Directory/range map | Metadata map tenant/range → shard | Chuyển range/tenant có chủ đích | Kiểm soát placement, locality tốt | Metadata service và split/merge phức tạp |
+
+#### Fixed logical slots: tách số bucket khỏi số máy
+
+Ta có thể giữ số logical slot cố định:
+
+```txt
+slot = hash(key) % 16_384
+node = slotMap[slot]
+```
+
+Khi thêm node, `16_384` không đổi. Control plane chỉ chuyển một số slot từ node cũ sang node mới. Redis Cluster dùng mô hình `16.384` hash slots với `CRC16(key) mod 16384`; đây **không phải classic consistent-hash ring**, nhưng giải quyết cùng mục tiêu là tránh modulo trực tiếp theo số physical node.
+
+`16.384` là thiết kế cụ thể của Redis Cluster, không phải con số nên copy vào database tự xây. Số logical partition cần cân bằng giữa granularity rebalancing, metadata size, per-partition overhead và quy mô cluster dự kiến.
+
+#### Rendezvous hashing
+
+Với mỗi key, tính score cho từng node:
+
+```txt
+score(key, nodeA)
+score(key, nodeB)
+score(key, nodeC)
+
+owner = node có score cao nhất
+```
+
+Khi thêm D, các key chỉ chuyển nếu D có score cao hơn owner cũ. Rendezvous hashing thường đơn giản hơn ring và hỗ trợ weighted variant, nhưng cách cơ bản phải tính score cho mọi node ở mỗi lookup. Với số backend nhỏ như cache nodes hoặc service instances, trade-off này có thể chấp nhận được.
+
+#### Directory-based sharding
+
+Database nhiều tenant có thể cần:
+
+```txt
+tenant-small-01 -> shard-A
+tenant-small-02 -> shard-B
+tenant-large-99 -> dedicated-shard-X
+```
+
+Directory cho phép chuyển tenant lớn có chủ đích, đáp ứng data residency và giữ transaction của một tenant cùng shard. Đổi lại, directory trở thành critical metadata service cần cache, versioning, HA và migration protocol.
+
+---
+
+### 17. Khi nào nên dùng consistent hashing?
+
+Consistent hashing phù hợp khi:
+
+- Membership có thể thêm/bớt và cần giảm key churn.
+- Access chủ yếu là point lookup theo key.
+- Key có cardinality cao và hash được phân bố tương đối đều.
+- Hệ thống chấp nhận ownership theo hash range.
+- Cache affinity cần giữ phần lớn mapping khi backend thay đổi.
+- Distributed storage muốn incremental scale-out.
+- Load balancer muốn giảm số connection/session bị đổi backend khi backend fail.
+
+Ví dụ:
+
+```txt
+Distributed cache
+Dynamo-style key-value store
+Object/chunk placement
+Request routing với affinity
+Partition ownership cho worker
+```
+
+Với worker, cần cẩn thận: hai worker nhìn membership khác nhau có thể cùng xử lý một partition. Nếu job đòi single owner, vẫn cần lease/fencing hoặc consumer-group protocol; consistent hashing một mình không đảm bảo mutual exclusion.
+
+---
+
+### 18. Khi nào không nên dùng hoặc chưa cần dùng?
+
+Không nên chọn consistent hashing chỉ vì hệ thống có nhiều server.
+
+#### Chưa có nhu cầu scale write/storage
+
+Một PostgreSQL được index, partition và vận hành tốt có thể đơn giản hơn rất nhiều so với application sharding. Read replica, cache, archive và vertical scaling thường nên được đánh giá trước.
+
+#### Cần range query tự nhiên
+
+Query:
+
+```sql
+SELECT *
+FROM orders
+WHERE created_at >= :from
+  AND created_at < :to;
+```
+
+Nếu hash theo `order_id`, time-range query có thể phải fan-out toàn cluster. Range partitioning theo time có thể phù hợp hơn, dù phải xử lý hot range hiện tại.
+
+#### Cần nhiều transaction cross-key
+
+Nếu order, payment, inventory và balance bị hash sang nhiều shard, transaction trở thành distributed transaction hoặc saga. Hash phân bố đều không bù được complexity business correctness.
+
+#### Có tenant placement/compliance rõ ràng
+
+Tenant EU phải ở EU, tenant enterprise cần dedicated shard hoặc dữ liệu cần co-locate theo organization. Directory/placement policy thường rõ hơn một vòng hash thuần túy.
+
+#### Cluster membership rất ổn định và cache có thể rebuild rẻ
+
+Nếu chỉ có vài backend cố định, modulo trên số logical slot cố định có thể đủ. Đừng xây control plane phức tạp khi chi phí cache miss thấp và topology gần như không đổi.
+
+---
+
+### 19. Một flow trả lời phỏng vấn dễ nhớ
+
+Khi interviewer hỏi “consistent hashing là gì?”, có thể đi theo sáu bước thay vì vẽ ring ngay lập tức:
+
+```txt
+1. PROBLEM
+   hash(key) % N remap phần lớn key khi N đổi.
+
+2. QUANTIFY
+   4 -> 5: khoảng 80% remap với modulo.
+
+3. MECHANISM
+   Hash space cố định, key và node trên ring,
+   chọn successor theo chiều kim đồng hồ.
+
+4. BENEFIT
+   Node mới cân bằng chỉ nhận khoảng 1/(N+1) data.
+
+5. PRODUCTION
+   Virtual nodes, replication, ring version,
+   snapshot + CDC/dual-write + verify + cutover.
+
+6. LIMITS
+   Không tự move data, không chữa hot key,
+   không giải quyết durability/transaction/split-brain.
+```
+
+Flow này giúp câu trả lời có nguyên nhân, con số, mechanism và trade-off. Chỉ nói “consistent hashing là đặt server trên vòng tròn” nghe giống định nghĩa học thuộc và bỏ qua phần interviewer thực sự muốn đánh giá: bạn có vận hành được topology change hay không.
+
+---
+
+### 20. Đọc lại ví dụ trong video một cách chính xác
+
+Video mô tả:
+
+```txt
+4 shards
+userId % 4
+thêm shard thứ 5
+userId % 5
+```
+
+Kết luận “gần như toàn bộ data đổi shard” là đúng về hướng, chính xác hơn là khoảng **80% mapping thay đổi** khi hash phân bố đều. Consistent hashing giảm mức này về khoảng phần capacity node mới cần nhận, lý tưởng là **20%** khi từ 4 lên 5 node cân bằng.
+
+Hình chiếc đồng hồ đúng để dạy successor lookup. Nhưng nếu mỗi shard chỉ được đặt tại một điểm trên đồng hồ, phân bố có thể lệch mạnh. Bản production cần nói thêm:
+
+```txt
+physical node
+    -> nhiều virtual nodes/token ranges
+    -> replication trên physical nodes khác nhau
+    -> migration protocol
+    -> versioned topology
+    -> monitoring theo range
+```
+
+Và câu “Alan không move, gần như không ai move” nên hiểu là “chỉ key thuộc range node mới tiếp quản move”. Với 4 lên 5 node cân bằng, 20% không phải gần bằng 0; nếu mỗi shard chứa 10 TB thì vẫn có thể phải chuyển khoảng 10 TB vào node mới. Consistent hashing giảm blast radius, không biến rebalancing thành miễn phí.
+
+---
+
+## Bẫy thường gặp
+
+❌ **"Consistent hashing nghĩa là key luôn ở nguyên một node."**
+→ Tại sao sai: Key vẫn đổi owner khi node được thêm/bớt đúng range của nó. “Consistent” nói về việc giữ phần lớn mapping ổn định, không phải mapping bất biến tuyệt đối.
+✅ Đúng hơn: Khi membership đổi, chỉ một phần nhỏ keyspace remap so với modulo trực tiếp theo số node.
+
+---
+
+❌ **"Tăng từ 4 lên 5 shard với modulo thì 100% dữ liệu phải chuyển."**
+→ Tại sao sai: Một số key vẫn cho cùng remainder; với phân bố đều, khoảng 20% giữ nguyên và khoảng 80% đổi mapping.
+✅ Đúng hơn: Nói “phần lớn, xấp xỉ 80%” và phân biệt mapping đổi với record thật sự đã copy.
+
+---
+
+❌ **"Thêm node vào ring là xong rebalancing."**
+→ Tại sao sai: Ring chỉ đổi ownership metadata. Node mới chưa có snapshot, chưa bắt kịp concurrent writes và router có thể đang dùng topology cũ.
+✅ Đúng hơn: Join không serving → snapshot → CDC/dual-write → verify → versioned cutover → grace period → cleanup.
+
+---
+
+❌ **"Virtual node là chạy nhiều container trên cùng một server."**
+→ Tại sao sai: Vnode chỉ là logical token/position thuộc một physical node, không nhất thiết có process hoặc resource isolation riêng.
+✅ Đúng hơn: Một physical node sở hữu nhiều vnode để nhận nhiều range nhỏ trên ring.
+
+---
+
+❌ **"Càng nhiều vnode càng tốt."**
+→ Tại sao sai: Nhiều vnode giảm variance nhưng làm token map, repair, streaming và maintenance phức tạp hơn. Một số storage engine có token allocator tốt nên không cần số vnode rất cao.
+✅ Đúng hơn: Chọn bằng benchmark distribution và operational cost của implementation cụ thể.
+
+---
+
+❌ **"Hash phân bố đều thì load chắc chắn đều."**
+→ Tại sao sai: Hash có thể cân bằng số key nhưng traffic, item size và CPU cost mỗi key vẫn skew. Một hot key có thể làm một shard quá tải.
+✅ Đúng hơn: Monitor key count, bytes và QPS/latency theo shard/range; xử lý hot key ở data model/cache/replication layer.
+
+---
+
+❌ **"Consistent hashing giúp node chết mà không mất data."**
+→ Tại sao sai: Nó chỉ remap key sang owner khác. Nếu không có replica hoặc backup, owner mới không có dữ liệu cũ.
+✅ Đúng hơn: Kết hợp replication, failure-domain-aware placement, repair và backup/restore.
+
+---
+
+❌ **"Ba vnode kế tiếp là ba replica an toàn."**
+→ Tại sao sai: Nhiều vnode có thể cùng thuộc một physical node hoặc cùng AZ. Mất một host/failure domain có thể mất nhiều “replica logic” cùng lúc.
+✅ Đúng hơn: Replica set phải gồm physical nodes distinct và tuân theo rack/AZ/region policy.
+
+---
+
+❌ **"Dual-write sang old và new shard bảo đảm không mất write."**
+→ Tại sao sai: Một write có thể thành công ở một bên và thất bại ở bên kia. Retry còn có thể đảo ordering hoặc tạo duplicate.
+✅ Đúng hơn: Dùng snapshot + ordered log/CDC, hoặc dual-write có outbox/idempotency/reconciliation và single-writer cutover rõ ràng.
+
+---
+
+❌ **"Redis Cluster dùng classic consistent hashing ring."**
+→ Tại sao sai: Redis Cluster dùng hash space cố định gồm 16.384 slots rồi map slot sang node. Nó đạt mục tiêu giảm remap nhưng không phải mô hình successor-vnode ring cổ điển.
+✅ Đúng hơn: Phân biệt algorithm cụ thể với mục tiêu chung là tách logical partition khỏi số physical node.
+
+---
+
+❌ **"Consistent hashing là lựa chọn mặc định cho mọi database sharding."**
+→ Tại sao sai: Hashing làm range query, cross-shard transaction, tenant placement và compliance khó hơn. Nhiều relational sharding system dùng directory hoặc fixed range/slot map.
+✅ Đúng hơn: Chọn partition strategy theo access pattern, invariant, locality, migration và failure model.
+
+---
+
+## Câu hỏi follow-up
+
+### 1. Vì sao tăng từ 4 lên 5 shard bằng modulo làm khoảng 80% key đổi shard?
+
+Với hash phân bố đều, mapping cũ là `hash % 4`, mapping mới là `hash % 5`. Trong một chu kỳ 20 giá trị chỉ bốn trường hợp có remainder giống nhau ở cả hai phép chia, nên khoảng 20% key giữ nguyên và 80% đổi. Đây là tỷ lệ mapping, không có nghĩa dữ liệu đã tự chuyển. Nếu bật router mới trước migration, các key đổi mapping có thể trả `NOT_FOUND` hoặc bị split write.
+
+### 2. Khi thêm node vào consistent hash ring, bao nhiêu data phải chuyển?
+
+Nếu cluster có `N` node cùng capacity và đang cân bằng, node thứ `N + 1` nên nhận khoảng `1 / (N + 1)` tổng data. Tăng từ 4 lên 5 tương ứng khoảng 20%. Với một token ngẫu nhiên trên mỗi node, tỷ lệ thực tế có thể lệch lớn; virtual nodes hoặc fixed logical partitions giúp tiến gần phân phối mục tiêu. Dữ liệu cần chuyển còn phụ thuộc bytes/item skew chứ không chỉ số key.
+
+### 3. Virtual node khác replica như thế nào?
+
+Virtual node là một logical token/range thuộc physical node, dùng để chia ownership mịn và cân bằng hơn. Replica là một bản copy dữ liệu trên physical node khác để tăng durability và availability. Mười vnode cùng trỏ vào node A vẫn không tạo ra mười bản dữ liệu độc lập. Replica placement phải bỏ qua vnode cùng physical host và cân nhắc AZ/rack.
+
+### 4. Node mới nhận read/write lúc nào trong quá trình rebalancing?
+
+Node mới không nên nhận traffic chỉ vì đã xuất hiện trong membership list. Nó cần copy snapshot, bắt kịp write sau snapshot và verify đủ điều kiện trước khi control plane publish ring version mới. Trước cutover, old owner là single writer; sau cutover, new owner là writer và old owner nên read-only hoặc redirect trong grace period. Với invariant mạnh, dùng fencing epoch để writer cũ không tiếp tục ghi.
+
+### 5. Nếu một storage node chết đột ngột thì consistent hashing xử lý được gì?
+
+Hash ring tính được key trước thuộc node chết sẽ được route tới owner nào tiếp theo. Nó giới hạn phạm vi key bị remap và có thể phân tán load tốt hơn khi dùng vnode. Tuy nhiên owner mới chỉ trả được dữ liệu nếu hệ thống đã có replica hoặc có source of truth để rebuild. Không có replication/backup thì consistent hashing không ngăn data loss.
+
+### 6. Vì sao consistent hashing không giải quyết hot key?
+
+Thuật toán phân phối dựa trên key hash, không biết một key nhận một request hay một triệu request mỗi giây. Một celebrity user, viral post hoặc global counter vẫn nằm trên một owner và có thể làm shard đó nóng. Cách xử lý có thể là cache/replicate hot read, split counter thành bucket, tách tenant hoặc rate limit. Phải đo QPS và latency theo key/range, không chỉ số record mỗi node.
+
+### 7. Redis Cluster có dùng consistent hashing không?
+
+Redis Cluster không dùng classic consistent hash ring với successor và vnode. Nó hash key vào một trong 16.384 logical slots bằng `CRC16(key) mod 16384`, rồi cluster map từng slot sang master node. Khi reshard, slot và key trong slot được chuyển giữa các node trong khi key-to-slot không đổi. Mô hình này giải quyết cùng bài toán tách logical keyspace khỏi số physical node nhưng có implementation khác.
+
+### 8. Rendezvous hashing khác hash ring ở đâu?
+
+Rendezvous hashing tính một score cho cặp `(key, node)` và chọn node có score cao nhất, nên không cần duy trì ring đã sort. Khi thêm node, chỉ những key mà node mới thắng score mới đổi owner, do đó cũng có minimal disruption. Bản cơ bản cần tính score với mọi node nên lookup là `O(N)`, trong khi ring lookup theo token map thường là `O(log V)`. Với số backend nhỏ, rendezvous hashing có thể đơn giản và dễ weight hơn.
+
+### 9. Làm sao rollback nếu cutover sang node mới rồi mới phát hiện lỗi?
+
+Old owner cần được giữ trong grace period và phải có cách nhận toàn bộ write phát sinh sau cutover, chẳng hạn reverse CDC hoặc durable migration log. Nếu chỉ giữ snapshot cũ, đổi ring về version cũ sẽ làm mất write mới. Rollback plan phải được thiết kế trước cutover, kèm checkpoint, ownership epoch và tiêu chí tự động dừng migration. Với dữ liệu critical, rehearsal trên staging và failure injection quan trọng hơn một runbook chỉ tồn tại trên giấy.
+
+### 10. Chọn shard key tốt có còn quan trọng khi đã dùng consistent hashing không?
+
+Vẫn rất quan trọng vì consistent hashing chỉ quyết định cách key được map tới node. Shard key quyết định transaction boundary, query fan-out, cardinality và khả năng xuất hiện hot tenant/key. Nếu chọn `country` làm shard key, một quốc gia lớn vẫn có thể thành hotspot dù ring được thiết kế đẹp. Nên chọn key từ access pattern và business invariant trước, rồi mới chọn thuật toán placement.
+
+---
+
+## Xem thêm
+
+- [Cluster, Sharding, Replication, Primary/Replica là gì?](/system-design/01-distributed-system-terms) — nền tảng về shard, partition key, replica, quorum, failover và split-brain.
+- [SQL vs NoSQL: chọn database như thế nào?](/database/01-sql-vs-nosql) — trade-off về access pattern, transaction, consistency và horizontal scaling.
+- [Redis vs Memcached — chọn gì cho hệ thống caching?](/caching/01-redis-vs-memcached) — client-side sharding, Redis Cluster, cache failure và hotspot.
+- [Scale từ 1,000 lên 50,000 users](/system-design/03-scale-1k-to-50k-users) — cách đo bottleneck và tránh sharding quá sớm.
+- [Amazon Dynamo paper](https://www.allthingsdistributed.com/files/amazon-dynamo-sosp2007.pdf) — consistent hashing, virtual nodes, replication và kinh nghiệm vận hành Dynamo.
+- [Apache Cassandra — Dataset Partitioning: Consistent Hashing](https://cassandra.apache.org/doc/latest/cassandra/architecture/dynamo.html) — token ring, vnode và failure-domain-aware replication.
+- [Redis Cluster Specification](https://redis.io/docs/latest/operate/oss_and_stack/reference/cluster-spec/) — mô hình 16.384 hash slots, routing và online resharding semantics.
