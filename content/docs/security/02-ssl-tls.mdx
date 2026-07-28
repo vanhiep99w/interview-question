@@ -1,0 +1,1222 @@
+---
+title: "SSL/TLS hoạt động như thế nào?"
+description: "Giải thích từ mã hóa, certificate, CA đến TLS 1.3 handshake, mTLS, triển khai và debug lỗi TLS trong production."
+---
+
+# SSL/TLS hoạt động như thế nào?
+
+## Câu hỏi
+
+> SSL/TLS giải quyết vấn đề gì? Certificate và CA tạo ra trust như thế nào? Hãy mô tả TLS 1.3 handshake, cách triển khai HTTPS/mTLS và quy trình debug một lỗi certificate trong production.
+
+---
+
+## Dành cho level
+
+<Tabs items={["Mid", "Senior", "Staff"]}>
+
+<Tab value="Mid">
+
+Interviewer expect bạn giải thích được ba mục tiêu **confidentiality, integrity, authentication**; phân biệt certificate, public key và private key; mô tả được certificate chain và flow cơ bản của TLS handshake. Bạn cũng cần biết SSL đã lỗi thời, HTTPS hiện đại dùng TLS, và không bao giờ được gửi private key cho client hoặc CA.
+
+</Tab>
+
+<Tab value="Senior">
+
+Interviewer expect bạn sửa được mental model cũ “client gửi session key đã mã hóa bằng RSA”: TLS 1.3 thường dùng ephemeral key exchange để hai bên **cùng suy ra** traffic secrets, còn certificate/private key dùng để ký và xác thực handshake. Bạn phải debug được hostname mismatch, expired certificate, missing intermediate, truststore riêng của Java, SNI, TLS termination và mTLS; đồng thời giải thích Forward Secrecy, session resumption và rủi ro replay của 0-RTT.
+
+</Tab>
+
+<Tab value="Staff">
+
+Interviewer expect bạn thiết kế TLS/PKI như một capability cấp tổ chức: quyết định trust boundary và nơi terminate TLS, public CA hay private CA, identity lifecycle cho workload, certificate automation/rotation, policy TLS theo compatibility, observability, incident response và migration không downtime. Bạn cũng phải phân biệt “connection đã encrypt” với “hệ thống end-to-end an toàn”, rồi kiểm soát plaintext ở load balancer, service mesh, log, trace, queue và storage.
+
+</Tab>
+
+</Tabs>
+
+---
+
+## Cốt lõi cần nhớ
+
+- **TLS tạo một secure channel với ba thuộc tính:** dữ liệu khó bị đọc trộm, sửa đổi sẽ bị phát hiện, và client xác thực được endpoint mà nó định kết nối. TLS không tự xác thực user, không chứng minh website “tốt”, và không bảo vệ plaintext sau điểm terminate TLS.
+- **Certificate không phải secret và không chứa private key.** Nó liên kết identity — thường là DNS name trong `subjectAltName` — với public key; chữ ký của CA cùng trust store của client tạo nên certificate chain.
+- **Trong TLS 1.3, đừng nói client gửi session key cho server.** Hai bên trao đổi ephemeral key shares, độc lập tính cùng shared secret, dùng HKDF sinh nhiều handshake/application traffic keys; certificate private key chủ yếu chứng minh server sở hữu identity bằng digital signature.
+
+---
+
+## Câu trả lời mẫu
+
+> Khi giải thích TLS, tôi bắt đầu từ threat model: network có thể bị nghe lén, sửa gói hoặc giả mạo server, nên chỉ mã hóa thôi chưa đủ mà còn phải xác thực endpoint và bảo vệ integrity. Trong TLS 1.3, client và server gửi ephemeral key shares để tự tính cùng shared secret; session key không được gửi nguyên vẹn qua mạng như cách mô tả RSA key exchange cũ. Server gửi certificate chain và ký handshake transcript bằng private key, còn client kiểm tra SAN, thời hạn, chain tới trust anchor và chữ ký trước khi chấp nhận server. Sau đó hai bên dùng HKDF sinh các traffic key riêng theo từng chiều và AEAD như AES-GCM hoặc ChaCha20-Poly1305 để bảo vệ application data. Trong production tôi từng debug lỗi chỉ xảy ra ở Java service vì browser dựng được chain còn custom truststore của JVM thiếu CA intermediate/root cần thiết, nên tôi kiểm tra đồng thời bằng `openssl s_client`, `curl` và `javax.net.debug` thay vì chỉ nhìn biểu tượng ổ khóa. Khi triển khai trên EKS, tôi xác định rõ TLS terminate ở ALB hay ở pod, tự động hóa certificate bằng ACM hoặc private PKI, theo dõi expiry và thử rotation trước khi certificate cũ hết hạn. Với mTLS, tôi vẫn tách authentication khỏi authorization vì một client certificate hợp lệ không tự động có nghĩa workload đó được phép gọi mọi API.
+
+---
+
+## Phân tích chi tiết
+
+### 1. Production scenario: request an toàn trên Internet nhưng vẫn lộ sau ALB
+
+Giả sử mobile app gọi:
+
+```txt
+https://api.example.com/payments
+```
+
+Trên Internet, TLS có thể bảo vệ cả HTTP header lẫn body. Một người nghe lén Wi-Fi thường vẫn thấy client đang trao đổi với một IP, lượng dữ liệu và timing, nhưng không đọc được `Authorization` header hay JSON body.
+
+Hệ thống production lại có thể đi qua nhiều chặng:
+
+```txt
+Mobile App
+   │ HTTPS: public TLS
+   ▼
+AWS ALB                     ← TLS có thể terminate tại đây
+   │ HTTP hoặc HTTPS
+   ▼
+Ingress / Spring Boot Pod   ← request tồn tại dưới dạng plaintext trong process
+   │
+   ├── log / trace / metric
+   ├── Kafka
+   └── RDS / Redis
+```
+
+Nếu ALB terminate TLS rồi forward HTTP tới pod, secure channel đầu tiên kết thúc ở ALB. Điều này không mặc định là sai: traffic có thể nằm trong private VPC với security group chặt, và managed termination giúp đơn giản hóa certificate rotation. Nhưng nó **không phải end-to-end encryption tới application**; một packet capture đúng vị trí, sidecar lỗi, access log thiếu redaction hoặc pod bị compromise vẫn có thể lộ plaintext.
+
+Senior engineer phải trả lời hai câu riêng:
+
+1. TLS có bảo vệ đúng network hop không?
+2. Sau mỗi điểm decrypt, dữ liệu được bảo vệ thế nào?
+
+Đây là lý do “đã có HTTPS” không phải kết luận cuối cùng của security review.
+
+### 2. SSL, TLS và HTTPS là ba khái niệm khác nhau
+
+| Thuật ngữ | Ý nghĩa đúng | Trạng thái |
+|---|---|---|
+| SSL 2.0/3.0 | Tiền thân của TLS | Đã lỗi thời và không nên bật |
+| TLS | Giao thức tạo secure channel cho application protocol | Dùng TLS 1.3; TLS 1.2 còn gặp vì compatibility |
+| HTTPS | HTTP chạy qua TLS | `https://`, thường port 443 |
+| “SSL certificate” | Tên gọi phổ thông của X.509 certificate dùng cho TLS | Certificate không “chạy SSL” |
+
+Trong giao tiếp hàng ngày, “cài SSL” thường có nghĩa “cài certificate và bật HTTPS”. Trong câu trả lời kỹ thuật nên nói rõ protocol thực tế là TLS.
+
+Theo chuẩn hiện hành năm 2026, TLS 1.3 được mô tả bởi **RFC 9846**, bản cập nhật tương thích ngược thay thế RFC 8446. RFC 9846 cũng cấm negotiation TLS 1.0/1.1; với hệ thống mới nên ưu tiên TLS 1.3, chỉ giữ TLS 1.2 khi client compatibility thực sự cần và dùng cipher suite hiện đại.
+
+### 3. TLS bảo vệ gì — và không bảo vệ gì?
+
+#### Confidentiality — tính bí mật
+
+Application data được encrypt để người không có traffic key không đọc được. Với HTTPS, phần path, query, header, cookie và body nằm bên trong TLS application data; DNS lookup, destination IP, packet size và timing có thể vẫn lộ qua các lớp khác.
+
+Ví dụ, observer có thể suy ra client kết nối tới một IP của `example.com`, nhưng thường không thấy:
+
+```http
+POST /payments/123/confirm HTTP/1.1
+Authorization: Bearer eyJ...
+Content-Type: application/json
+
+{"otp":"482910"}
+```
+
+TLS không phải công cụ ẩn toàn bộ metadata traffic. DNS cần DoH/DoT nếu muốn bảo vệ riêng truy vấn DNS; SNI trong ClientHello truyền thống cũng có thể lộ hostname, còn ECH — Encrypted ClientHello — là một cơ chế riêng và không nên giả định mọi client/network đều đã hỗ trợ.
+
+#### Integrity — tính toàn vẹn
+
+Attacker không thể bí mật đổi “chuyển 1 triệu” thành “chuyển 100 triệu” mà receiver vẫn chấp nhận record. TLS 1.3 chỉ dùng AEAD cipher; authentication tag sẽ làm record bị sửa fail verification.
+
+Integrity không ngăn attacker drop packet, reset connection hoặc làm dịch vụ unavailable. TLS chống sửa đổi không bị phát hiện, không chống DoS.
+
+#### Authentication — xác thực endpoint
+
+Trong HTTPS thông thường, server chứng minh nó sở hữu private key tương ứng với certificate cho DNS name client mong đợi. Client thường chưa chứng minh danh tính ở TLS layer; user được authenticate sau đó bằng session cookie, OAuth token, passkey hoặc username/password.
+
+Với mTLS, server yêu cầu thêm client certificate nên cả hai phía được authenticate ở TLS layer. Tuy nhiên application vẫn phải map certificate identity vào principal và thực hiện authorization.
+
+#### Những thứ TLS không hứa hẹn
+
+- CA cấp DV certificate thường chỉ xác minh quyền kiểm soát domain, không audit source code hay đạo đức chủ website.
+- HTTPS tới một phishing domain vẫn có thể hoàn toàn hợp lệ về TLS.
+- TLS không sửa SQL injection, XSS, SSRF, broken access control hoặc credential bị đánh cắp ở endpoint.
+- Dữ liệu được decrypt tại endpoint; malware trên client hoặc compromise trên server vẫn đọc được.
+- TLS không mặc định ẩn IP, độ dài record, timing hay volume traffic.
+
+### 4. Hộp công cụ mật mã: symmetric, key agreement và digital signature
+
+Một cách giải thích dễ hiểu thường gọi public key là “ổ khóa” và private key là “chìa khóa”. Analogy này hữu ích ở mức nhập môn nhưng sẽ sai nếu dùng để mô tả mọi thuật toán trong TLS 1.3. Cần tách ba primitive có nhiệm vụ khác nhau.
+
+#### 4.1. Symmetric encryption: nhanh, dùng cho lượng dữ liệu lớn
+
+Symmetric cryptography dùng shared secret. TLS 1.3 thường dùng:
+
+- `AES-128-GCM` hoặc `AES-256-GCM`;
+- `ChaCha20-Poly1305`.
+
+Đây đều là AEAD — Authenticated Encryption with Associated Data — nên vừa encrypt payload vừa tạo authentication tag. TLS không dùng đúng một key cho tất cả mọi việc; key schedule sinh key/IV riêng cho handshake, application data và từng chiều client→server, server→client.
+
+```txt
+client_application_traffic_key  ≠ server_application_traffic_key
+handshake_traffic_key           ≠ application_traffic_key
+```
+
+Tách key theo purpose và direction giới hạn tác động nếu một key bị dùng sai và tránh nhiều lớp traffic dùng chung key material.
+
+#### 4.2. Asymmetric key agreement: hai bên cùng tạo secret, không gửi secret
+
+TLS 1.3 full handshake thường dùng ephemeral Diffie-Hellman, phổ biến là ECDHE. Mental model đơn giản:
+
+```txt
+Client tạo: client_private_ephemeral + client_public_share
+Server tạo: server_private_ephemeral + server_public_share
+
+Client tính:
+  DH(client_private_ephemeral, server_public_share) = shared_secret
+
+Server tính:
+  DH(server_private_ephemeral, client_public_share) = shared_secret
+```
+
+Public shares đi qua network; hai ephemeral private values không rời endpoint. Attacker thấy cả hai public shares nhưng không thực tế tính ra shared secret với thuật toán và parameter an toàn.
+
+Điểm quan trọng: **shared secret được hai bên độc lập suy ra, không phải client tạo một AES key rồi gửi key đó cho server.** Từ shared secret và handshake transcript, HKDF tiếp tục derive nhiều traffic secrets/keys.
+
+#### 4.3. Digital signature: private key ký, public key verify
+
+Server dùng certificate private key ký handshake transcript trong `CertificateVerify`. Client dùng public key trong certificate để verify chữ ký, qua đó kiểm tra hai điều:
+
+1. server hiện tại thật sự sở hữu private key tương ứng;
+2. chữ ký gắn identity đó với chính handshake đang diễn ra, không phải một message cũ bị copy.
+
+Không nên giải thích digital signature là “encrypt bằng private key, decrypt bằng public key”. Cách nói đó chỉ là phép giản lược nguy hiểm từ textbook RSA; nó không mô tả đúng ECDSA, EdDSA hoặc RSA-PSS và làm lẫn confidentiality với authenticity.
+
+#### 4.4. Vì sao dùng cả symmetric lẫn asymmetric cryptography?
+
+| Việc cần làm | Primitive phù hợp | Lý do |
+|---|---|---|
+| Tạo shared keying material qua network không tin cậy | ECDHE/KEM hoặc PSK | Không truyền shared secret trực tiếp |
+| Chứng minh endpoint sở hữu identity key | Digital signature | Private key holder ký transcript |
+| Encrypt hàng MB/GB application data | Symmetric AEAD | Nhanh, overhead thấp, có integrity |
+| Derive nhiều key theo context | HKDF | Key separation và bind vào handshake |
+
+Asymmetric cryptography không được dùng để encrypt toàn bộ video, JSON stream hoặc file upload vì chậm và có giới hạn input. Nó thiết lập/authenticate keying material; record layer dùng symmetric AEAD cho traffic thực tế.
+
+### 5. Certificate thực sự chứa gì?
+
+X.509 certificate là một object được CA ký. Một leaf/server certificate thường có:
+
+| Field/extension | Ý nghĩa |
+|---|---|
+| Subject | Thông tin chủ thể; không còn là nơi chuẩn để match DNS name |
+| Subject Alternative Name — SAN | DNS name/IP mà certificate đại diện, ví dụ `api.example.com` |
+| Subject Public Key Info | Public key và algorithm |
+| Issuer | CA certificate đã phát hành certificate này |
+| Serial Number | ID certificate trong phạm vi issuer |
+| `notBefore`, `notAfter` | Khoảng thời gian validity |
+| Key Usage | Public key được phép dùng cho mục đích nào |
+| Extended Key Usage | Ví dụ `serverAuth`, `clientAuth` |
+| Basic Constraints | Leaf hay CA, CA được phép ký certificate khác hay không |
+| Authority/Subject Key Identifier | Hỗ trợ dựng chain |
+| CA signature | Chữ ký bảo vệ nội dung certificate |
+
+Certificate có thể public; server gửi nó cho mọi client. **Private key không nằm trong certificate** và không được gửi tới CA khi xin certificate.
+
+RFC 9525 yêu cầu kiểm tra DNS identity qua `subjectAltName` loại `dNSName`, không fallback sang Common Name. Wildcard chỉ nên là toàn bộ label ngoài cùng bên trái:
+
+```txt
+*.example.com      khớp api.example.com
+*.example.com      không khớp a.b.example.com
+*.example.com      không khớp example.com
+```
+
+Một certificate hợp lệ cho `login-example.com` không hợp lệ cho `example.com`; browser so khớp DNS name chính xác chứ không dựa vào việc chuỗi “trông giống nhau”.
+
+### 6. Từ private key tới certificate: key, CSR, CA và ACME
+
+Flow phát hành certificate nên được hiểu như sau:
+
+```txt
+1. Chủ domain tạo key pair
+      private key: giữ kín
+      public key: có thể chia sẻ
+
+2. Tạo CSR
+      subject/SAN mong muốn
+      public key
+      chữ ký bằng private key để chứng minh possession
+
+3. CA xác minh theo policy
+      DV: kiểm soát DNS/HTTP challenge
+      OV/EV: thêm kiểm tra tổ chức theo policy
+
+4. CA tạo và ký certificate
+      identity + public key + validity + extensions
+
+5. Server cài
+      leaf certificate + intermediate chain + private key
+```
+
+Nói chính xác hơn, CA không đơn giản “ký lại file CSR rồi trả về”. CA đọc và xác minh CSR, thực hiện validation, tạo certificate với serial/validity/extensions theo policy riêng, rồi ký phần certificate đó bằng CA private key.
+
+#### CSR không chứng minh quyền sở hữu domain
+
+CSR signature chỉ chứng minh requester giữ private key tương ứng với public key trong CSR. Attacker hoàn toàn có thể tạo CSR ghi SAN là `bank.example`; vì vậy CA còn phải thực hiện domain validation.
+
+Với ACME DNS-01, CA yêu cầu một TXT record ngẫu nhiên dưới `_acme-challenge`. Khả năng publish đúng challenge chứng minh requester kiểm soát DNS ở thời điểm validation. Với HTTP-01, requester phải phục vụ token đúng tại path do ACME quy định.
+
+#### DV, OV và EV không tạo mức encryption khác nhau
+
+Cả ba có thể dùng cùng TLS protocol, key type và cipher. Khác biệt nằm ở mức thông tin/validation identity của CA, không phải AES “mạnh hơn”. Giao diện browser hiện đại cũng không nên được mô tả bằng “EV luôn hiện thanh xanh”; UI đó không còn là mental model đáng tin cậy.
+
+#### Private CA dùng khi nào?
+
+Public CA phù hợp cho public DNS names mà browser/client phổ thông cần trust. Private CA phù hợp cho service nội bộ, device hoặc workload identity khi tổ chức kiểm soát trust store.
+
+Private CA không tự động an toàn hơn. Tổ chức phải tự chịu trách nhiệm:
+
+- bảo vệ root/intermediate signing key bằng HSM/KMS phù hợp;
+- issuance policy và approval;
+- phân phối trust anchor;
+- rotation/revocation;
+- audit và incident response;
+- tránh cấp identity quá rộng.
+
+### 7. Certificate chain: vì sao cần Root và Intermediate CA?
+
+Production server thường không được ký trực tiếp bằng root:
+
+```txt
+Trust Store
+└── Root CA                    ← trust anchor, thường giữ signing key offline
+    └── Intermediate CA        ← ký leaf certificate hằng ngày
+        └── api.example.com    ← leaf/end-entity certificate
+```
+
+Root private key được giữ offline để giảm exposure. Intermediate có scope, path length và lifecycle nhỏ hơn; nếu intermediate bị compromise, CA có thể revoke/replace nó mà không nhất thiết thay toàn bộ root trust anchor.
+
+Khi handshake, server thường gửi:
+
+```txt
+leaf certificate
++ intermediate certificate(s)
+```
+
+Server thường **không cần gửi root certificate**, vì client phải có root/trust anchor từ trust store độc lập. Gửi root không làm một CA lạ trở nên trusted; attacker cũng có thể gửi bất kỳ self-signed root nào.
+
+Một lỗi production rất phổ biến là server chỉ gửi leaf. Một số browser có thể đã cache hoặc tải được intermediate nên vẫn chạy, trong khi Java service/container mới không dựng được chain và báo:
+
+```txt
+PKIX path building failed
+unable to find valid certification path to requested target
+```
+
+Đó là lý do phải test bằng nhiều client và một môi trường sạch, không chỉ browser trên laptop của developer.
+
+### 8. Browser/client kiểm tra certificate như thế nào?
+
+Khi client định truy cập `https://api.example.com`, validation không chỉ là “chữ ký đúng”. Một flow rút gọn:
+
+<Steps>
+
+<Step>
+
+**Xác định reference identity.** Client lấy DNS name mong đợi từ URL/config là `api.example.com`; không thay nó bằng reverse DNS của IP.
+
+</Step>
+
+<Step>
+
+**Dựng certification path.** Leaf nối qua một hoặc nhiều intermediate tới trust anchor nằm trong trust store của client.
+
+</Step>
+
+<Step>
+
+**Verify chữ ký và constraint trên toàn chain.** Client kiểm tra issuer signature, `Basic Constraints`, path length, key usage, extended key usage và algorithm policy.
+
+</Step>
+
+<Step>
+
+**Kiểm tra thời gian.** Thời điểm hiện tại phải nằm trong `notBefore` và `notAfter`; clock sai cũng gây lỗi giống certificate sai.
+
+</Step>
+
+<Step>
+
+**So khớp identity.** `api.example.com` phải khớp một SAN phù hợp. Chain valid nhưng SAN sai vẫn phải reject.
+
+</Step>
+
+<Step>
+
+**Áp dụng policy bổ sung.** Tùy client có thể kiểm tra revocation qua CRL/OCSP, OCSP stapling, Certificate Transparency, local enterprise policy hoặc pinning policy.
+
+</Step>
+
+</Steps>
+
+Trust store không hoàn toàn giống nhau. Chrome, Firefox, OS, JVM và container image có thể lấy root set từ nguồn khác nhau hoặc cập nhật ở nhịp khác nhau. “Browser vào được” không chứng minh Java client với custom truststore sẽ vào được.
+
+#### Self-signed certificate có phải certificate giả không?
+
+Không. Self-signed chỉ có nghĩa certificate được ký bởi chính private key tương ứng thay vì chain tới public CA. Nó có thể hợp lệ trong lab/private PKI nếu client được provision trust anchor qua một kênh đáng tin cậy.
+
+Vấn đề là client Internet bình thường không có lý do để trust self-signed certificate vừa nhận từ chính server đó. Nếu user bấm bỏ qua cảnh báo mà không verify fingerprint qua kênh khác, MITM cũng có thể đưa một self-signed certificate của attacker.
+
+#### Revocation không đơn giản là một checkbox
+
+CA có thể công bố CRL hoặc OCSP status khi private key bị compromise hay certificate bị cấp sai. Nhưng client behavior khác nhau, OCSP responder có thể unavailable và nhiều ecosystem dùng short-lived certificates hoặc browser-specific revocation mechanism để giảm phụ thuộc kiểm tra online.
+
+Do đó không nên chỉ dựa vào revocation. Production cần private-key protection, certificate lifetime ngắn hợp lý, automated renewal và khả năng thay/revoke credential nhanh.
+
+### 9. TLS 1.3 handshake: flow đúng từ đầu đến cuối
+
+Trước TLS, HTTPS qua TCP cần thiết lập TCP connection. Sau đó TLS 1.3 full handshake đi theo flow khái quát:
+
+```txt
+CLIENT                                                     SERVER
+   │                                                          │
+   │ ClientHello                                              │
+   │ • supported_versions: TLS 1.3                            │
+   │ • cipher_suites: AES-GCM / ChaCha20-Poly1305             │
+   │ • supported_groups + signature_algorithms                │
+   │ • key_share: client ephemeral public share               │
+   │ • SNI: api.example.com                                   │
+   │ • ALPN: h2, http/1.1                                     │
+   ├─────────────────────────────────────────────────────────>│
+   │                                                          │
+   │                                      Server chọn params   │
+   │                           + tạo server ephemeral key pair  │
+   │                           + tính shared secret             │
+   │                                                          │
+   │ ServerHello                                              │
+   │ • TLS version/cipher được chọn                           │
+   │ • server key_share                                       │
+   │ {EncryptedExtensions}                                    │
+   │ {Certificate}                                            │
+   │ {CertificateVerify: ký handshake transcript}             │
+   │ {Finished: MAC trên transcript}                          │
+   │<─────────────────────────────────────────────────────────┤
+   │                                                          │
+   │ Client tính cùng shared secret                           │
+   │ + verify certificate chain/SAN/signature/Finished         │
+   │                                                          │
+   │ {Finished}                                               │
+   ├─────────────────────────────────────────────────────────>│
+   │                                                          │
+   │ [HTTP application data được AEAD bảo vệ hai chiều]       │
+   │<════════════════════════════════════════════════════════>│
+```
+
+Dấu `{}` biểu thị handshake message sau `ServerHello` đã được bảo vệ bằng handshake traffic keys; dấu `[]` biểu thị application traffic keys.
+
+#### 9.1. ClientHello — client đưa ra khả năng và key share
+
+Client gửi:
+
+- protocol versions hỗ trợ;
+- TLS 1.3 cipher suites;
+- supported groups/key exchange groups;
+- signature algorithms có thể verify;
+- ephemeral `key_share`;
+- SNI để server chọn virtual host/certificate;
+- ALPN để negotiate `h2`, `http/1.1` hoặc protocol khác;
+- PSK identity nếu muốn session resumption.
+
+Client không gửi plaintext AES session key. `key_share` là public contribution cho key agreement.
+
+#### 9.2. ServerHello — chốt parameter và shared secret
+
+Server chọn version, cipher/hash pair và key share phù hợp. Từ client public share + server ephemeral private value, server tính shared secret; client sẽ dùng server public share + client ephemeral private value để ra cùng kết quả.
+
+Nếu client chưa gửi group server chấp nhận, server có thể trả `HelloRetryRequest`. Trường hợp đó thêm latency, nên supported groups cần cấu hình theo client population thật thay vì tùy ý giới hạn.
+
+#### 9.3. HKDF key schedule — từ một secret thành nhiều secret
+
+TLS 1.3 dùng HKDF và handshake transcript để derive key material theo nhiều stage:
+
+```txt
+(shared secret / PSK)
+        │
+        ├── client handshake traffic secret
+        ├── server handshake traffic secret
+        ├── client application traffic secret
+        ├── server application traffic secret
+        ├── exporter secret
+        └── resumption secret
+```
+
+Đây là sơ đồ tư duy, không phải pseudo-code để tự implement TLS. Transcript hash bind negotiated parameters và toàn bộ handshake vào keys, giúp phát hiện attacker sửa message hoặc làm hai phía nhìn thấy negotiation khác nhau.
+
+#### 9.4. Certificate + CertificateVerify — certificate thôi chưa đủ
+
+`Certificate` cung cấp public key và chain. Nhưng bất kỳ ai cũng có thể copy public certificate từ website thật. Vì vậy server còn gửi `CertificateVerify`: chữ ký trên handshake transcript bằng private key tương ứng.
+
+Client vừa kiểm tra CA/hostname của certificate, vừa verify chữ ký để biết peer hiện tại thật sự giữ private key. Attacker copy certificate nhưng không có private key sẽ không tạo được `CertificateVerify` hợp lệ.
+
+#### 9.5. Finished — xác nhận keys và integrity của handshake
+
+`Finished` là MAC trên transcript bằng key đã derive. Nó cung cấp key confirmation và phát hiện handshake bị thay đổi. Client chỉ gửi `Finished` sau khi chấp nhận server authentication; với mTLS, client còn gửi certificate và `CertificateVerify` của nó khi được yêu cầu.
+
+### 10. Record layer: dữ liệu được bảo vệ sau handshake ra sao?
+
+TLS record layer chia byte stream từ application thành records. Với mỗi direction, sender dùng traffic key và per-record nonce để AEAD-encrypt plaintext và tạo authentication tag.
+
+```txt
+HTTP bytes
+   ↓ chia thành TLS records
+AEAD(key, nonce, plaintext, associated_data)
+   ↓
+ciphertext + authentication tag
+```
+
+Receiver tính/kiểm tra tag trước khi chấp nhận plaintext. Record bị sửa, sai key hoặc sai sequence/nonce sẽ fail; connection thường bị đóng thay vì trả về dữ liệu “gần đúng”.
+
+TLS 1.3 hỗ trợ `KeyUpdate` để thay traffic keys trên connection dài. RFC 9846 yêu cầu implementation thực hiện update trước khi vượt giới hạn an toàn của key usage; application không nên tự chế cách rotate record key bên ngoài TLS library.
+
+### 11. Forward Secrecy: lộ certificate private key có giải mã được traffic cũ không?
+
+Với ephemeral key exchange, certificate private key dùng để **ký**, còn shared secret đến từ ephemeral private values. Nếu attacker hôm nay lấy certificate private key và trước đó đã capture encrypted traffic, họ vẫn không có ephemeral secrets cũ đã bị xóa nên không thể đơn giản giải mã lại các session cũ.
+
+Đó là Forward Secrecy — FS/PFS.
+
+FS không phải phép màu:
+
+- compromise server trong lúc session đang chạy có thể lấy plaintext hoặc traffic secrets trong memory;
+- application log vẫn có thể chứa dữ liệu;
+- PSK-only resumption không có cùng FS property như resumption kết hợp ephemeral key exchange;
+- implementation phải sinh ephemeral key tốt và xóa secret đúng cách.
+
+TLS 1.3 loại static RSA key exchange và các public-key based key exchange chuẩn cung cấp Forward Secrecy.
+
+### 12. Session resumption và 0-RTT
+
+Full handshake có chi phí CPU, certificate bytes và latency. Sau một TLS 1.3 handshake, server có thể cấp `NewSessionTicket`; client dùng PSK gắn với ticket để resume connection sau này.
+
+Resumption vẫn tạo keys mới theo key schedule, nhưng có thể bỏ qua việc gửi/verify certificate lại trong resumed handshake vì authentication được liên kết mật mã với session trước. Ticket encryption/signing keys trở thành secret production quan trọng; chia sẻ chúng quá rộng làm tăng blast radius, còn rotate quá gấp có thể giảm hit rate chứ không làm request sai.
+
+#### 0-RTT nhanh nhưng có replay risk
+
+TLS 1.3 cho phép client quen thuộc gửi early data ngay cùng ClientHello trong một số cấu hình. Early data có thể bị attacker replay dù không đọc hay sửa được nội dung.
+
+Vì vậy không dùng 0-RTT cho operation không idempotent hoặc có side effect như:
+
+```http
+POST /payments
+POST /orders
+POST /password/reset
+```
+
+Nếu bật, server/application cần anti-replay design và chỉ chấp nhận operation replay-safe. Tắt 0-RTT thường là trade-off hợp lý khi vài millisecond không đáng đổi lấy complexity ở payment/auth flow. AWS ALB có TLS resumption nhưng tài liệu hiện tại nêu ALB không implement 0-RTT early data.
+
+### 13. TLS 1.2 khác TLS 1.3 ở đâu?
+
+| Chủ đề | TLS 1.2 | TLS 1.3 |
+|---|---|---|
+| Full handshake | Thường 2 RTT ở TLS layer | Thường 1 RTT |
+| Key exchange | Có nhiều lựa chọn, gồm cơ chế legacy; cấu hình hiện đại dùng ECDHE | Static RSA/DH bị loại; asymmetric exchange cung cấp FS |
+| Cipher suite | Gộp key exchange, authentication, cipher, MAC vào tên | Chỉ tập trung AEAD + hash; auth/key exchange negotiate riêng |
+| Record protection | Có cả AEAD và construction legacy | Chỉ AEAD |
+| Handshake encryption | Nhiều message để plaintext | Sau `ServerHello` phần lớn handshake được encrypt |
+| Resumption | Session ID/ticket kiểu cũ | PSK-based resumption thống nhất |
+| 0-RTT | Không | Có tùy chọn, có replay risk |
+
+Flow “browser tạo pre-master secret rồi RSA-encrypt bằng public key của server” từng tồn tại với static RSA key exchange trong TLS 1.2 và cũ hơn. Nó hữu ích để giới thiệu vì sao public/private key giải quyết việc trao secret, nhưng **không phải flow nên dùng để mô tả TLS 1.3**, và cũng không đại diện cho TLS 1.2 cấu hình ECDHE hiện đại.
+
+Khi trả lời interview, hãy nói rõ version và key exchange đang mô tả. Nếu chỉ nói “TLS gửi symmetric key bằng RSA”, interviewer Senior thường xem đó là kiến thức đã cũ.
+
+### 14. SNI, ALPN và virtual hosting
+
+Một IP/load balancer có thể phục vụ nhiều domain. Client cần nói hostname mong muốn đủ sớm để server chọn certificate; đó là vai trò của SNI:
+
+```txt
+ClientHello.SNI = api.example.com
+                       ↓
+Load balancer chọn certificate có SAN api.example.com
+```
+
+Nếu debug bằng IP mà không gửi SNI, server có thể trả default certificate của domain khác. Vì vậy command production phải có `-servername`:
+
+```bash
+openssl s_client \
+  -connect 203.0.113.10:443 \
+  -servername api.example.com \
+  -verify_hostname api.example.com \
+  -verify_return_error </dev/null
+```
+
+ALPN giải quyết việc chọn application protocol bên trong TLS, ví dụ HTTP/2 `h2` hay HTTP/1.1. SNI chọn virtual host/certificate; ALPN chọn protocol; SAN validation kiểm tra identity. Ba khái niệm liên quan handshake nhưng không thay thế nhau.
+
+### 15. TLS termination trên AWS EKS: phải vẽ đúng trust boundary
+
+Ba kiến trúc phổ biến:
+
+#### 15.1. Terminate tại ALB
+
+```txt
+Client ──HTTPS──> ALB ──HTTP──> Pod
+```
+
+Ưu điểm:
+
+- ACM quản lý public certificate và renewal;
+- pod không giữ public certificate private key;
+- cấu hình cipher/TLS policy tập trung;
+- giảm vận hành certificate trong application.
+
+Trade-off: ALB→pod là plaintext. Cần private subnet, security group, network policy và đánh giá compliance/threat model.
+
+Ví dụ Ingress dùng AWS Load Balancer Controller:
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: interview-api
+  annotations:
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTPS":443}]'
+    alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:ap-southeast-1:123456789012:certificate/11111111-2222-3333-4444-555555555555
+    alb.ingress.kubernetes.io/ssl-redirect: '443'
+    alb.ingress.kubernetes.io/ssl-policy: ELBSecurityPolicy-TLS13-1-2-Res-2021-06
+spec:
+  ingressClassName: alb
+  rules:
+    - host: api.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: interview-api
+                port:
+                  number: 8080
+```
+
+Policy trên giữ TLS 1.2 để tương thích và TLS 1.3 cho client mới, đồng thời dùng nhóm cipher restricted. Đây là lựa chọn ví dụ, không phải policy bất biến: AWS đã có policy hybrid post-quantum mới hơn; team cần inventory client, canary và đọc tài liệu AWS hiện hành trước khi đổi vì default giữa Console và IaC cũng có thể khác.
+
+ACM certificate là regional resource đối với ALB; certificate phải ở cùng region với load balancer. CloudFront là trường hợp đặc biệt dùng certificate ở `us-east-1`.
+
+#### 15.2. Re-encrypt từ ALB tới pod
+
+```txt
+Client ──HTTPS/public cert──> ALB ──HTTPS/internal cert──> Pod
+```
+
+Cách này bảo vệ thêm backend hop, nhưng phải quản lý certificate/private key ở pod hoặc ingress và hiểu validation behavior của load balancer. Chỉ “bật HTTPS target” mà không có workload identity/authorization phù hợp chưa tương đương mTLS.
+
+#### 15.3. mTLS/service mesh giữa workloads
+
+```txt
+Client ──HTTPS──> Gateway
+Service A ──mTLS──> Service B
+```
+
+Service mesh/private PKI có thể cấp short-lived workload certificate và enforce service identity. Đổi lại có thêm control plane, sidecar/ambient data plane, certificate lifecycle, policy và failure mode. Không nên triển khai chỉ để có biểu tượng “zero trust”; phải xác định attacker, authorization model và operational ownership.
+
+### 16. Spring Boot: keystore khác truststore
+
+Hai khái niệm thường bị trộn:
+
+| Store | Thường chứa gì? | Dùng để làm gì? |
+|---|---|---|
+| Keystore | Private key + certificate chain của chính endpoint | Endpoint chứng minh identity |
+| Truststore | CA certificate/trust anchor được chấp nhận | Verify certificate của peer |
+
+Một service vừa là HTTPS server vừa gọi HTTPS/mTLS service khác có thể cần cả hai. Không import ngẫu nhiên leaf certificate vào global `cacerts` để “fix cho chạy”; hãy xác định trust boundary và CA nào thực sự cần trust.
+
+Spring Boot 3.x hỗ trợ SSL bundle. Ví dụ embedded server dùng PEM:
+
+```yaml
+spring:
+  ssl:
+    bundle:
+      pem:
+        web-server:
+          keystore:
+            certificate: file:/etc/tls/tls.crt
+            private-key: file:/etc/tls/tls.key
+server:
+  ssl:
+    bundle: web-server
+```
+
+Nếu application terminate TLS trực tiếp, secret nên được mount read-only từ secret manager/CSI driver; không commit private key hoặc password vào Git. Nếu ALB terminate TLS và pod chỉ nghe HTTP, Spring Boot không cần public certificate private key.
+
+Với PKCS#12:
+
+```yaml
+spring:
+  ssl:
+    bundle:
+      jks:
+        web-server:
+          key:
+            alias: application
+          keystore:
+            location: file:/etc/tls/application.p12
+            password: ${TLS_KEYSTORE_PASSWORD}
+            type: PKCS12
+server:
+  ssl:
+    bundle: web-server
+```
+
+Password bảo vệ file at rest, nhưng container có thể đọc password thì vẫn có thể dùng private key. Security chính đến từ secret distribution, file permission, IAM, pod isolation, rotation và việc không xuất key vào log/backup ngoài kiểm soát.
+
+### 17. mTLS: xác thực hai chiều nhưng chưa phải authorization
+
+Flow TLS thường:
+
+```txt
+Client ── verify server certificate ──> Server
+Client identity được xác thực ở application layer sau đó
+```
+
+Flow mTLS:
+
+```txt
+Client <── verify server certificate ──> Server
+Client ── gửi client certificate + CertificateVerify ──> Server
+Server verify chain/SAN hoặc identity extension theo private PKI policy
+```
+
+mTLS phù hợp cho:
+
+- service-to-service workload identity;
+- partner API có tập client nhỏ và quản lý được lifecycle;
+- device/fleet identity;
+- admin endpoint yêu cầu hardware-backed client credential.
+
+mTLS khó ở vận hành hơn ở thuật toán:
+
+- cấp và renew client certificate trước khi hết hạn;
+- revoke identity khi employee/device/workload bị loại;
+- map certificate subject/SAN/SPIFFE ID vào principal ổn định;
+- rotate CA/intermediate mà cả hai trust bundle overlap đủ lâu;
+- phân biệt authentication failure với authorization denial;
+- tránh dùng một client certificate chung cho toàn bộ fleet.
+
+Một certificate chain hợp lệ chỉ nói credential đến từ CA được trust và peer giữ private key. Authorization vẫn phải trả lời principal đó được gọi resource/action nào.
+
+### 18. TLS và SSH: giống primitive, khác trust model
+
+Cả TLS và SSH đều negotiate algorithms, tạo shared session keys, encrypt traffic và authenticate peer. Nhưng flow SSH key login thường bị giải thích sai là “server khóa cửa bằng public key, client mở bằng private key”.
+
+Thực tế rút gọn:
+
+1. SSH server có **host key** để client authenticate server; lần đầu thường dùng TOFU và lưu fingerprint vào `known_hosts`, hoặc dùng SSH CA/DNS policy.
+2. User public key nằm trong `authorized_keys` để khai báo credential nào được phép login.
+3. Client dùng private key ký dữ liệu gắn với SSH session; server dùng authorized public key verify chữ ký.
+4. Private key không được gửi tới server và không trực tiếp “decrypt cánh cửa”.
+
+| Chủ đề | HTTPS/TLS phổ biến | SSH key login phổ biến |
+|---|---|---|
+| Authenticate server | X.509 chain tới CA trong trust store | Host key + `known_hosts`/SSH CA |
+| Authenticate client | Thường ở application layer; mTLS nếu cần | Password, public-key signature hoặc cơ chế khác |
+| Scale trust | Public/private PKI | TOFU phù hợp tập server nhỏ; SSH CA phù hợp fleet lớn |
+| Application | HTTP, gRPC, database protocol... | Remote shell, SFTP, tunneling |
+
+`ssh-keygen` tạo SSH key theo format/protocol của SSH; OpenSSL thường xử lý X.509/PEM/PKCS#12 và nhiều primitive khác. Không nên lấy file `id_rsa.pub` rồi coi nó là TLS certificate: public key đơn lẻ không có SAN, issuer, validity hay CA signature của X.509.
+
+### 19. File format và extension: đừng đoán chỉ từ tên file
+
+| Format/file | Nội dung thường gặp | Ghi chú |
+|---|---|---|
+| PEM | Text Base64 có `BEGIN/END` | Có thể chứa certificate, public key, private key hoặc chain |
+| DER | Binary ASN.1 | Cùng object X.509 nhưng encoding binary |
+| `.crt`, `.cer`, `.pem` | Thường là certificate | Extension không đảm bảo PEM hay DER |
+| `.key` | Thường là private key | Chỉ là convention; phải đọc header/inspect |
+| `.csr` | PKCS#10 Certificate Signing Request | Không phải certificate |
+| `.p12`, `.pfx` | PKCS#12 container | Có thể chứa private key + leaf + chain, thường có password |
+| `.jks` | Java KeyStore | Java-specific store; PKCS#12 thường portable hơn |
+
+PEM private key có thể bắt đầu bằng:
+
+```txt
+-----BEGIN PRIVATE KEY-----
+```
+
+Certificate PEM bắt đầu bằng:
+
+```txt
+-----BEGIN CERTIFICATE-----
+```
+
+Certificate không có chữ `KEY` trong tên vẫn chứa **public key**. Quy tắc “file có chữ key là private, không có là public” chỉ là convention đặt tên, không phải security control.
+
+### 20. Thực hành OpenSSL: tạo, inspect và kiểm tra đúng thứ cần kiểm tra
+
+#### 20.1. Tạo self-signed certificate cho localhost
+
+Command sau dành cho local development, không phải public production:
+
+```bash
+openssl req -x509 \
+  -newkey rsa:3072 \
+  -sha256 \
+  -days 30 \
+  -nodes \
+  -keyout localhost.key \
+  -out localhost.crt \
+  -subj "/CN=localhost" \
+  -addext "subjectAltName=DNS:localhost,IP:127.0.0.1" \
+  -addext "basicConstraints=critical,CA:FALSE" \
+  -addext "keyUsage=critical,digitalSignature" \
+  -addext "extendedKeyUsage=serverAuth"
+```
+
+`3072` là RSA key size có security margin thực dụng cho ví dụ; không giảm xuống key rất nhỏ để “test nhanh”. `30` ngày giới hạn lifetime của credential local nếu file bị bỏ quên; production nên dùng automation và policy của CA thay vì copy con số này. `-nodes` để private key không có passphrase, tiện cho process tự khởi động nhưng làm file permission đặc biệt quan trọng.
+
+#### 20.2. Inspect certificate
+
+```bash
+openssl x509 -in localhost.crt -noout \
+  -subject \
+  -issuer \
+  -serial \
+  -dates \
+  -fingerprint -sha256 \
+  -ext subjectAltName \
+  -ext basicConstraints \
+  -ext extendedKeyUsage
+```
+
+Đọc toàn bộ object khi cần:
+
+```bash
+openssl x509 -in localhost.crt -noout -text
+```
+
+#### 20.3. Kiểm tra certificate có khớp private key không
+
+Cách generic là so fingerprint của public key derive từ cả hai file:
+
+```bash
+openssl x509 -in localhost.crt -pubkey -noout \
+  | openssl pkey -pubin -outform DER \
+  | sha256sum
+
+openssl pkey -in localhost.key -pubout -outform DER \
+  | sha256sum
+```
+
+Hai hash phải giống nhau. Không in private key ra terminal hoặc paste vào ticket để so sánh.
+
+#### 20.4. Tạo CSR có SAN
+
+```bash
+openssl req -new \
+  -newkey rsa:3072 \
+  -nodes \
+  -keyout api.example.com.key \
+  -out api.example.com.csr \
+  -subj "/CN=api.example.com" \
+  -addext "subjectAltName=DNS:api.example.com,DNS:api.internal.example.com"
+```
+
+Inspect CSR trước khi gửi CA:
+
+```bash
+openssl req -in api.example.com.csr -noout -text -verify
+```
+
+Private key `api.example.com.key` ở lại hệ thống sở hữu certificate. CSR chứa public key và chữ ký chứng minh possession, không chứa private key.
+
+### 21. Debug endpoint bằng `openssl`, `curl` và Java
+
+#### 21.1. Một lệnh OpenSSL có đủ SNI, hostname và fail-fast validation
+
+```bash
+openssl s_client \
+  -connect api.example.com:443 \
+  -servername api.example.com \
+  -showcerts \
+  -verify_hostname api.example.com \
+  -verify_return_error </dev/null
+```
+
+Đọc các phần:
+
+- `Protocol`: TLS 1.2 hay 1.3;
+- `Ciphersuite`: cipher đã negotiate;
+- `Certificate chain`: server thực sự gửi những certificate nào;
+- `Verification`: chain/hostname có pass không;
+- `Verify return code: 0 (ok)`: validation của command thành công.
+
+`-showcerts` chỉ hiển thị list server gửi, **không khẳng định đó là verified chain**. Cần `-verify_return_error` và hostname check để tránh command tiếp tục dù verification lỗi.
+
+Ép TLS 1.3 để kiểm tra compatibility:
+
+```bash
+openssl s_client \
+  -connect api.example.com:443 \
+  -servername api.example.com \
+  -tls1_3 </dev/null
+```
+
+Ép TLS 1.2 trong test riêng:
+
+```bash
+openssl s_client \
+  -connect api.example.com:443 \
+  -servername api.example.com \
+  -tls1_2 </dev/null
+```
+
+Không dùng việc “ép version cũ chạy được” làm lý do bật TLS 1.0/1.1; mục tiêu là xác định client population và migration blocker.
+
+#### 21.2. Dùng `curl` để nhìn cả TLS lẫn HTTP
+
+```bash
+curl --verbose https://api.example.com/health
+```
+
+Test endpoint ở IP mới nhưng vẫn giữ đúng SNI/Host và hostname validation:
+
+```bash
+curl --verbose \
+  --resolve api.example.com:443:203.0.113.10 \
+  https://api.example.com/health
+```
+
+`--resolve` tốt hơn gọi thẳng `https://203.0.113.10` vì URL vẫn giữ reference identity `api.example.com`.
+
+#### 21.3. Java truststore
+
+Liệt kê trust anchors mặc định của JDK:
+
+```bash
+keytool -list -cacerts
+```
+
+Bật debug tạm thời ở môi trường kiểm soát:
+
+```bash
+java \
+  -Djavax.net.debug=ssl,handshake,trustmanager \
+  -jar application.jar
+```
+
+Output có thể rất lớn và chứa hostname/certificate metadata; không bật lâu trên toàn fleet. So sánh runtime JDK/container image, `javax.net.ssl.trustStore`, truststore password/type và chain server gửi trước khi import thêm certificate.
+
+<Callout type="warn" title="Không tắt certificate validation để chữa cháy">
+
+`TrustAllCertificates`, custom `X509TrustManager` trả về thành công cho mọi chain, `curl -k` hoặc `NODE_TLS_REJECT_UNAUTHORIZED=0` biến kết nối thành encrypt với một peer không được authenticate. Attacker MITM cũng hoàn thành handshake được. Chỉ dùng option bỏ verify trong lab cô lập để thu thập bằng chứng, không commit hoặc rollout thành fix.
+
+</Callout>
+
+### 22. Runbook debug lỗi TLS trong production
+
+Đi theo thứ tự từ ngoài vào trong; đừng đổi cipher hoặc import CA trước khi biết failure nằm ở hop nào.
+
+#### Bước 1: Xác định endpoint và TLS hop thật
+
+Ghi rõ:
+
+```txt
+client → CDN/WAF → ALB/NLB → ingress → service → downstream
+```
+
+Error xảy ra ở mobile→ALB hay service A→service B? Certificate browser hiển thị có thể là certificate của CDN, không phải certificate pod dùng cho internal mTLS.
+
+#### Bước 2: Chụp bằng chứng nhưng không chụp secret
+
+Thu thập:
+
+- timestamp và timezone;
+- source environment/JDK/OpenSSL version;
+- hostname, port, resolved IP;
+- SNI và ALPN nếu có;
+- TLS alert/error class;
+- certificate subject, issuer, serial, SAN, validity, fingerprint;
+- chain server gửi;
+- protocol/cipher đã negotiate.
+
+Không paste private key, session secret, bearer token hoặc full packet capture chưa được kiểm soát vào Jira/Teams.
+
+#### Bước 3: Phân loại failure
+
+| Symptom | Khả năng cao | Kiểm tra tiếp |
+|---|---|---|
+| `certificate has expired` | Leaf/intermediate hết hạn hoặc clock sai | `notAfter`, NTP, chain từng cert |
+| `certificate is not yet valid` | Clock skew hoặc deploy cert quá sớm | `notBefore`, node time |
+| `hostname mismatch` | SAN thiếu/sai hoặc gọi bằng IP | URL, SNI, SAN, service discovery |
+| `unable to get local issuer certificate` | Missing intermediate hoặc trust anchor | `-showcerts`, truststore |
+| `PKIX path building failed` | JVM không dựng chain tới root trusted | custom truststore, server chain |
+| `handshake_failure` | Không chung version/cipher/group, mTLS thiếu cert | server policy, ClientHello, server logs |
+| `bad_certificate` | Peer reject certificate | EKU, chain, expiry, signature, client cert |
+| `unknown_ca` | Peer không trust issuer | đúng trust bundle/CA rotation chưa |
+| `no application protocol` | ALPN không có protocol chung | `h2`, `http/1.1`, gRPC config |
+| Default cert của domain khác | Thiếu/sai SNI hoặc listener rule | `-servername`, virtual host config |
+| Chỉ một pod lỗi | Secret mount/stale cert/config khác | diff pod, checksum, rollout status |
+
+#### Bước 4: So sánh working path và failing path
+
+Một diff hữu ích hơn đoán:
+
+```txt
+Working: browser / JDK 21 / corporate network / cached intermediate
+Failing: JDK 17 / distroless image / custom truststore / direct private endpoint
+```
+
+So certificate fingerprint, chain length, truststore, SNI và negotiated protocol. Nếu cùng DNS trả nhiều IP/load balancer, test từng IP bằng `curl --resolve` để tìm node cấu hình lệch.
+
+#### Bước 5: Fix đúng tầng
+
+- Missing intermediate → cấu hình server gửi full chain.
+- SAN sai → phát hành certificate đúng identity; không disable hostname verification.
+- Expired leaf → renew/attach certificate, rồi sửa automation/alert.
+- Custom truststore thiếu CA → phân phối CA bundle có version; không import từng leaf vô hạn.
+- TLS policy quá mới với client legacy → đo usage, có migration window hoặc endpoint compatibility riêng; không hạ security toàn fleet vô thời hạn.
+- mTLS client cert hết hạn → rotate credential và kiểm tra issuer/EKU/identity mapping.
+
+#### Bước 6: Verify và ngăn tái diễn
+
+Test từ cùng network/runtime từng fail, sau đó từ synthetic probe độc lập. Xác nhận không chỉ handshake pass mà application request đúng, protocol/cipher đúng policy và certificate mới được phục vụ trên **mọi** IP/pod/listener.
+
+Post-incident action phải loại bỏ class of problems: renewal automation, expiry metric, full-chain validation trong CI, canary rotation và inventory owner — không chỉ calendar reminder.
+
+### 23. Các lỗi thiết kế và vận hành thường gặp
+
+#### Certificate hết hạn dù “đã bật auto-renew”
+
+Auto-renew có thể fail vì DNS validation record bị xóa, IAM thay đổi, certificate không còn attached đúng resource, ACME challenge route lỗi hoặc secret được renew nhưng workload không reload. Monitor **certificate đang được serve**, không chỉ object trong secret manager.
+
+Với ACM, metric `DaysToExpiry` có thể dùng để alert. Threshold 30 ngày cho team đủ nhiều chu kỳ on-call để xử lý validation/deployment failure trước outage; nếu certificate lifetime rất ngắn, threshold phải tính theo tỷ lệ lifetime và renewal schedule thay vì copy `30`.
+
+#### Missing intermediate
+
+Bundle đúng thường là leaf trước, sau đó intermediate(s). Chỉ cài leaf có thể pass trên máy đã cache intermediate nhưng fail trên client mới. Gửi root trong bundle không thay thế missing intermediate.
+
+#### Private key không khớp certificate
+
+Deployment lấy `tls.crt` từ secret version mới nhưng `tls.key` từ version cũ sẽ fail load hoặc handshake. So public-key fingerprint như phần OpenSSL; không log private material.
+
+#### Clock skew
+
+Certificate validity và nhiều handshake check phụ thuộc thời gian. NTP lỗi trên node/container host có thể làm certificate “chưa có hiệu lực” hoặc “đã hết hạn” dù CA không có vấn đề.
+
+#### Rotate CA không có overlap
+
+Nếu server đổi sang chain mới trước khi client nhận trust anchor mới, toàn bộ mTLS/private PKI traffic có thể fail. Safe rotation thường theo thứ tự:
+
+```txt
+1. Phân phối trust bundle chứa old CA + new CA
+2. Xác nhận toàn fleet trust cả hai
+3. Phát hành/serve certificate từ new CA
+4. Xác nhận không còn certificate old CA
+5. Gỡ old CA sau rollback window
+```
+
+Rollback window phải dài hơn độ trễ rollout và có inventory certificate còn sống; không chọn một số ngày tùy ý mà không đo fleet.
+
+### 24. Hardening checklist cho production
+
+#### Protocol và cipher
+
+```txt
+[ ] Ưu tiên TLS 1.3
+[ ] Chỉ giữ TLS 1.2 khi compatibility yêu cầu
+[ ] Tắt SSLv2/SSLv3/TLS 1.0/TLS 1.1
+[ ] Dùng managed/recommended policy đã test với client population
+[ ] Không tự implement TLS hoặc crypto primitive
+[ ] Không bật 0-RTT cho non-idempotent operations
+```
+
+#### Certificate và private key
+
+```txt
+[ ] SAN chứa đúng DNS/IP identity; không dựa vào Common Name
+[ ] Server gửi đầy đủ intermediate chain
+[ ] Private key nằm trong ACM/KMS/HSM/secret store phù hợp
+[ ] Không commit key vào Git, image, Jira hoặc chat
+[ ] Có automated issuance, renewal, reload và canary
+[ ] Theo dõi certificate thực sự được serve trên mọi endpoint
+[ ] Có owner, inventory, expiry alert và rotation runbook
+```
+
+#### HTTP security quanh TLS
+
+Redirect HTTP→HTTPS giúp usability nhưng request HTTP đầu tiên vẫn có thể bị intercept. HSTS yêu cầu browser tiếp tục dùng HTTPS:
+
+```http
+Strict-Transport-Security: max-age=31536000; includeSubDomains
+```
+
+`31536000` là một năm tính bằng giây, phù hợp khi team đã xác nhận toàn bộ subdomain hoạt động qua HTTPS và renewal đáng tin cậy. Khi rollout, nên bắt đầu `max-age` ngắn để quan sát rồi tăng dần; `includeSubDomains` có thể làm hỏng legacy subdomain HTTP. Chỉ đăng ký preload sau khi hiểu yêu cầu và tác động dài hạn — không copy header mạnh nhất ngay lần đầu.
+
+Ngoài ra:
+
+```txt
+[ ] Không có mixed content HTTP trong trang HTTPS
+[ ] Cookie nhạy cảm có Secure, HttpOnly, SameSite phù hợp
+[ ] Log/trace redact Authorization, Cookie, token, PII
+[ ] Redirect không tạo open redirect
+[ ] TLS termination hop được ghi rõ trong architecture diagram
+```
+
+#### Observability
+
+Theo dõi:
+
+- handshake success/failure theo endpoint và reason;
+- protocol/cipher distribution để biết có thể bỏ TLS 1.2 chưa;
+- certificate expiry/fingerprint/issuer/SAN;
+- renewal attempt và reload result;
+- mTLS failure theo `unknown_ca`, expired, identity mapping;
+- latency full handshake so với resumed handshake;
+- config drift giữa region/load balancer/pod.
+
+Không gắn raw certificate client subject vào metric label nếu cardinality lớn hoặc chứa PII. Dùng bounded error category và audit log có retention/access control phù hợp.
+
+### 25. Cách trả lời câu hỏi TLS có flow trong interview
+
+Một câu trả lời rõ nên đi theo thứ tự:
+
+1. **Threat model:** attacker có thể nghe, sửa, giả mạo network peer.
+2. **Ba property:** confidentiality, integrity, authentication.
+3. **Identity:** certificate bind SAN với public key; trust chain đi tới root trong client trust store.
+4. **TLS 1.3 key establishment:** ephemeral shares → shared secret → HKDF traffic keys; không gửi session key.
+5. **Proof of possession:** server ký transcript bằng certificate private key; client verify certificate + signature + Finished.
+6. **Record layer:** symmetric AEAD encrypt application data theo từng chiều.
+7. **Production boundary:** TLS terminate ở đâu, private key ở đâu, renewal/monitor/debug thế nào.
+8. **Trade-off:** compatibility TLS 1.2, mTLS lifecycle, resumption và 0-RTT replay.
+
+Flow này bắt đầu từ vấn đề production rồi mới đi vào cryptography, tránh biến câu trả lời thành danh sách định nghĩa.
+
+### 26. Nguồn chuẩn và điểm cần cập nhật theo thời gian
+
+- [RFC 9846 — TLS 1.3](https://www.rfc-editor.org/rfc/rfc9846) — chuẩn TLS 1.3 hiện hành, thay RFC 8446 nhưng giữ version 1.3 và tương thích ngược.
+- [RFC 9525 — Service Identity in TLS](https://www.rfc-editor.org/rfc/rfc9525) — quy tắc verify service identity, SAN và wildcard.
+- [MDN — Transport Layer Security](https://developer.mozilla.org/en-US/docs/Web/Security/Transport_Layer_Security) — secure channel, HTTPS, HSTS và mixed content.
+- [OpenSSL `s_client`](https://docs.openssl.org/3.6/man1/openssl-s_client/) — option SNI, hostname verification, chain, protocol và trace.
+- [AWS ALB security policies](https://docs.aws.amazon.com/elasticloadbalancing/latest/application/describe-ssl-policies.html) — protocol/cipher, resumption và policy hiện hành.
+- [AWS Certificate Manager](https://docs.aws.amazon.com/acm/latest/userguide/acm-overview.html) — certificate lifecycle và ràng buộc region.
+- [Spring Boot SSL](https://docs.spring.io/spring-boot/reference/features/ssl.html) — PEM/JKS SSL bundle, keystore/truststore và reload.
+
+Tên AWS policy, CA chain, browser trust program và recommendation có thể thay đổi. Khi triển khai, dùng nguyên lý trong tài liệu này nhưng kiểm tra lại vendor documentation và client compatibility tại thời điểm rollout.
+
+---
+
+## Bẫy thường gặp
+
+❌ **"TLS 1.3 hoạt động bằng cách client tạo symmetric key, mã hóa bằng public key trong certificate rồi gửi server."**
+→ Tại sao sai: Đây là mental model của static RSA key exchange cũ, không phải full TLS 1.3 handshake thông thường. TLS 1.3 dùng asymmetric key shares để hai bên tự derive shared secret; certificate key ký handshake.
+✅ Đúng hơn: Nói rõ version; mô tả ephemeral key agreement/KEM, HKDF key schedule, `CertificateVerify` và traffic keys.
+
+---
+
+❌ **"Private key encrypt, public key decrypt; đó là digital signature."**
+→ Tại sao sai: Cách nói textbook RSA này không đúng cho ECDSA, EdDSA, RSA-PSS và làm lẫn signature với confidentiality.
+✅ Đúng hơn: Private key tạo signature trên message/transcript; public key verify signature theo signature algorithm.
+
+---
+
+❌ **"Certificate chứa cả public key và private key, server gửi certificate cho browser."**
+→ Tại sao sai: Nếu private key nằm trong object public gửi mọi client thì bất kỳ ai cũng impersonate server được.
+✅ Đúng hơn: Certificate chứa public key và metadata có chữ ký CA; private key được lưu riêng ở server/load balancer/HSM.
+
+---
+
+❌ **"Có ổ khóa HTTPS nghĩa là website chính chủ và an toàn để nhập thông tin."**
+→ Tại sao sai: TLS chỉ xác thực domain trong certificate theo trust policy; phishing domain cũng lấy DV certificate hợp lệ và application vẫn có thể có lỗ hổng.
+✅ Đúng hơn: Ổ khóa cho biết connection tới domain đang hiển thị được TLS bảo vệ, không phải endorsement nội dung hay business.
+
+---
+
+❌ **"CA xác minh website không phải hacker rồi mới cấp certificate."**
+→ Tại sao sai: Với DV, CA chủ yếu xác minh requester kiểm soát domain; CA không audit application hay ý định chủ domain.
+✅ Đúng hơn: Nêu rõ CA validation level và security guarantee thực tế của certificate.
+
+---
+
+❌ **"Server gửi root certificate nên browser sẽ trust root đó."**
+→ Tại sao sai: Trust anchor phải đến từ trust store/kênh độc lập; attacker cũng gửi được self-signed root của họ.
+✅ Đúng hơn: Server gửi leaf + intermediate; client nối chain tới root đã trust sẵn.
+
+---
+
+❌ **"Browser mở được nên certificate chain chắc chắn đúng cho mọi client."**
+→ Tại sao sai: Browser có thể dùng trust store khác, cache intermediate hoặc có path-building behavior khác JVM/container.
+✅ Đúng hơn: Test từ runtime/network thực tế bằng SNI, hostname verification và truststore tương ứng.
+
+---
+
+❌ **"Fix nhanh `PKIX path building failed` bằng TrustAll hoặc `curl -k`."**
+→ Tại sao sai: Encryption không có peer authentication vẫn cho phép MITM dựng hai TLS connection và đọc/sửa plaintext ở giữa.
+✅ Đúng hơn: Xác định missing intermediate, wrong truststore, hostname, expiry hoặc CA rotation rồi sửa đúng tầng.
+
+---
+
+❌ **"mTLS đã xác thực client nên không cần authorization."**
+→ Tại sao sai: Certificate hợp lệ chỉ chứng minh peer có credential từ CA được trust; nó không cấp quyền truy cập mọi resource.
+✅ Đúng hơn: Map certificate identity vào principal ổn định và áp dụng authorization least privilege.
+
+---
+
+❌ **"TLS terminate ở ALB nghĩa là dữ liệu được encrypt end-to-end tới Spring Boot."**
+→ Tại sao sai: Nếu target protocol là HTTP, plaintext tồn tại trên hop ALB→pod và trong application process.
+✅ Đúng hơn: Vẽ từng TLS hop, xác định nơi decrypt và chọn HTTP, re-encryption hoặc mTLS theo threat model.
+
+---
+
+❌ **"Self-signed certificate luôn là certificate giả."**
+→ Tại sao sai: Self-signed có thể là trust anchor hợp lệ trong private PKI/lab nếu được provision qua kênh tin cậy; vấn đề là client không tự nhiên trust nó.
+✅ Đúng hơn: Phân biệt tính hợp lệ mật mã với trust decision và identity verification.
+
+---
+
+❌ **"Bật 0-RTT luôn tốt vì TLS vẫn encrypt request."**
+→ Tại sao sai: Early data có thể bị replay dù attacker không đọc được; payment/order mutation có thể chạy nhiều lần.
+✅ Đúng hơn: Chỉ chấp nhận replay-safe operation kèm anti-replay design, hoặc tắt 0-RTT.
+
+---
+
+## Câu hỏi follow-up
+
+### 1. Nếu attacker copy được certificate public của server thì sao?
+
+Certificate vốn là public nên việc copy là bình thường. Attacker không có private key tương ứng sẽ không tạo được `CertificateVerify` hợp lệ trên handshake transcript mới. Nếu họ dùng key pair khác, public key đó không khớp certificate đã được CA ký; nếu tự tạo certificate mới, chain/hostname/trust validation sẽ fail trừ khi họ compromise CA/trust store hoặc user bỏ qua cảnh báo.
+
+### 2. Tại sao CA root thường self-signed mà vẫn được trust?
+
+Root không được trust vì nó tự ký; self-signature chỉ giúp kiểm tra object nhất quán và proof of possession. Nó được trust vì browser/OS/JVM root program đã phân phối root đó qua một kênh quản trị độc lập sau quá trình policy/audit. Trust chain phải dừng ở một trust anchor có từ trước, nếu không sẽ rơi vào vòng lặp “ai xác nhận người xác nhận”.
+
+### 3. Lộ certificate private key có giải mã được traffic cũ không?
+
+Với TLS 1.3 ephemeral key exchange và secret cũ đã được xóa, chỉ có certificate private key thường không đủ giải mã packet capture trước đây; đó là Forward Secrecy. Nhưng attacker có private key có thể impersonate endpoint cho tới khi certificate/key bị thay/revoke, và compromise live server vẫn có thể đọc plaintext hoặc session secrets. Incident response vẫn phải rotate key/certificate, điều tra thời gian exposure và bảo vệ endpoint.
+
+### 4. Vì sao certificate hợp lệ nhưng browser vẫn báo hostname mismatch?
+
+Chain signature và thời hạn chỉ chứng minh CA đã ký một certificate còn hạn; client còn phải kiểm tra identity mong đợi có trong SAN. Certificate cho `*.example.com` không cover `example.com` hoặc `a.b.example.com`, và certificate cho DNS name thường không cover request trực tiếp tới IP. Fix là phát hành SAN đúng hoặc gọi đúng hostname, không tắt hostname verification.
+
+### 5. TLS 1.3 có nhanh hơn TLS 1.2 bao nhiêu?
+
+Full TLS 1.3 handshake thường cần 1 RTT ở TLS layer, còn full TLS 1.2 thường cần 2 RTT; trên TCP còn có TCP handshake và có thể thêm DNS. Lợi ích thực tế phụ thuộc network latency, connection reuse, HTTP/2/HTTP/3, resumption, certificate size và server CPU. Đừng đổi security chỉ dựa vào benchmark localhost; đo p50/p95 theo region và tỷ lệ resumed handshake trong production.
+
+### 6. Khi nào nên dùng mTLS thay vì OAuth/JWT?
+
+mTLS mạnh ở transport/workload or device identity và proof of private-key possession; OAuth/JWT mạnh ở delegated user/application authorization và claims. Hai cơ chế không loại trừ nhau: mTLS có thể authenticate workload/channel, còn token biểu diễn user/action/scope. Nếu client fleet lớn nhưng không có certificate issuance/rotation/revocation automation, mTLS có thể tạo operational risk lớn hơn lợi ích.
+
+### 7. Certificate pinning có an toàn hơn CA validation không?
+
+Pinning có thể giảm trust vào hệ CA rộng, nhưng tạo availability risk khi rotate leaf/intermediate/key hoặc app cũ không được update. Nếu mobile app pin, thường pin nhiều backup SPKI hợp lệ, có rotation drill và recovery path; không pin một leaf sắp hết hạn mà không có kế hoạch. Với nhiều hệ thống, public CA validation cộng Certificate Transparency và lifecycle automation đáng tin cậy hơn custom pinning mong manh.
+
+### 8. Tại sao gọi service bằng IP thường lỗi certificate?
+
+Client dùng identity trong URL/config làm reference identity. Nếu gọi `https://10.0.1.20`, certificate phải có SAN loại `iPAddress` đúng IP; SAN `DNS:service.internal` không match IP dù DNS đó resolve về cùng địa chỉ. Dùng stable DNS service identity và gửi đúng SNI thường phù hợp hơn pin IP động trong Kubernetes/cloud.
+
+### 9. Rotate private CA cho mTLS không downtime như thế nào?
+
+Đầu tiên phân phối trust bundle chứa cả old và new CA tới mọi verifier, rồi quan sát cho tới khi rollout hoàn tất. Sau đó mới phát hành và deploy leaf certificate từ new CA, giữ old trust trong rollback window cho tới khi inventory xác nhận không còn credential cũ đang dùng. Cuối cùng revoke/gỡ old CA theo runbook; đảo thứ tự sẽ làm client hoặc server mất trust giữa rollout.
+
+### 10. TLS có encrypt URL không?
+
+TLS encrypt HTTP path, query string, headers và body sau handshake. Destination IP và nhiều metadata network vẫn quan sát được; DNS query có thể lộ nếu không dùng cơ chế bảo vệ riêng, và SNI truyền thống trong ClientHello có thể để lộ hostname nếu ECH không được dùng. Vì query string còn xuất hiện trong browser history, proxy/application log và analytics sau terminate TLS, không đặt secret vào URL chỉ vì HTTPS.
+
+---
+
+## Xem thêm
+
+- [Phân biệt Encoding, Encryption và Hashing](/security/01-encoding-vs-encryption) — nền tảng về confidentiality, AEAD, hashing, HMAC và key management.
+- [CORS là gì và debug lỗi CORS trong production như thế nào?](/web/01-cors) — phân biệt TLS/network security với browser same-origin policy, authentication và authorization.
