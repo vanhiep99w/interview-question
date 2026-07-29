@@ -1,0 +1,496 @@
+---
+title: "Long-running transaction: khi transaction mở quá lâu"
+description: "Nhận diện long-running database transaction, tác động lên lock, connection pool và MVCC, cùng cách thu hẹp transaction boundary trong production."
+---
+
+# Long-running transaction: khi transaction mở quá lâu
+
+## Câu hỏi
+
+> Long-running transaction là gì? Vì sao transaction mở quá lâu nguy hiểm và bạn xử lý vấn đề này như thế nào trong production?
+
+---
+
+## Dành cho level
+
+**Mid / Senior / Staff** — Mid cần nhận diện được transaction boundary quá rộng và biết không gọi external service trong `@Transactional`. Senior cần truy tìm lock wait, connection pool exhaustion, query/transaction duration và thiết kế lại workflow với batch, outbox hoặc idempotency. Staff cần đặt ra transaction boundary ở cấp business process, phân biệt local transaction với distributed workflow, và thiết kế observability cùng cơ chế recovery.
+
+---
+
+## Cốt lõi cần nhớ
+
+- **Transaction chỉ nên bao quanh phần database cần atomicity, không phải toàn bộ business method.** Network call, xử lý file, sleep, retry hoặc chờ người dùng không nên nằm trong transaction.
+- Một transaction kéo dài có thể giữ **lock, database connection, phiên bản MVCC và undo/WAL** lâu hơn cần thiết. Vì vậy một request chậm có thể biến thành lock contention, cạn connection pool và latency tăng trên toàn service.
+- Cách sửa đúng là **đo transaction duration và lock wait trước**, sau đó thu hẹp boundary, tách workflow thành các bước có trạng thái/idempotency, hoặc chia bulk operation thành các batch có thể resume. Tăng pool size hay thêm timeout chỉ là safety net.
+
+---
+
+## Câu trả lời mẫu
+
+> Khi điều tra một API thanh toán bị tăng P99, tôi không chỉ nhìn vào thời gian chạy SQL mà kiểm tra cả thời gian từ lúc transaction bắt đầu tới lúc commit. Tôi từng gặp trường hợp method có `@Transactional` cập nhật order rồi gọi payment API, khiến row lock và JDBC connection bị giữ trong lúc chờ network. Cách xử lý là tách transaction thành các bước ngắn: ghi order ở trạng thái `PAYMENT_PENDING`, commit, gọi payment bên ngoài transaction, rồi mở transaction mới để ghi kết quả. Vì payment có thể thành công nhưng request cập nhật kết quả có thể fail, tôi thêm idempotency key, retry có giới hạn và reconciliation job; nếu cần publish event thì dùng transactional outbox. Với batch lớn, tôi chia thành các chunk và commit từng chunk để giảm lock duration, đồng thời monitor transaction age, lock wait và connection pool. Tôi chỉ chọn timeout hoặc tăng pool sau khi đã sửa boundary, vì hai cách đó không loại bỏ nguyên nhân khiến transaction bị giữ quá lâu.
+
+---
+
+## Phân tích chi tiết
+
+### 1. Một transaction thực sự kéo dài từ thời điểm nào?
+
+Trong ứng dụng, transaction thường được hiểu là khoảng thời gian từ `BEGIN` tới `COMMIT` hoặc `ROLLBACK`. Nhưng cần phân biệt ba loại thời gian:
+
+```text
+Transaction duration = thời gian BEGIN → COMMIT/ROLLBACK
+Query duration       = thời gian một câu SQL chạy
+Lock wait            = thời gian chờ lock của transaction/query
+```
+
+Một transaction có thể có query nhanh nhưng vẫn là long-running transaction:
+
+```text
+BEGIN
+  → INSERT order (20 ms)
+  → gọi payment API (8 giây)
+  → gửi email (2 giây)
+  → COMMIT (10 ms)
+```
+
+Trong ví dụ này database chỉ thực thi khoảng vài chục mili giây, nhưng transaction tồn tại hơn 10 giây. Nếu phần `INSERT` đã tạo lock, lock có thể được giữ trong gần như toàn bộ thời gian chờ external service.
+
+Ngược lại, một query có thể chạy 30 giây nhưng transaction chỉ chứa đúng query đó. Đó là **slow query**, có thể đồng thời là long-running transaction, nhưng cách chẩn đoán ban đầu khác nhau: slow query cần xem execution plan; long-running transaction cần xem transaction boundary, lock và connection lifecycle.
+
+### 2. Vì sao một transaction dài ảnh hưởng tới request khác?
+
+#### Lock contention
+
+Transaction ghi dữ liệu thường giữ row lock cho tới khi commit. Ví dụ:
+
+```sql
+BEGIN;
+
+UPDATE inventory
+SET available = available - 1
+WHERE product_id = 42
+  AND available > 0;
+
+-- Application đang gọi service khác, chưa COMMIT
+```
+
+Request khác muốn update cùng product phải chờ transaction đầu tiên. Khi có nhiều row bị khóa, các request không đụng cùng một row vẫn có thể bị ảnh hưởng gián tiếp vì thread và connection pool bị chiếm.
+
+Lock wait có thể tạo thành chuỗi:
+
+```text
+Transaction dài
+    ↓
+Giữ lock lâu
+    ↓
+Request khác chờ lock
+    ↓
+Các request giữ connection lâu hơn
+    ↓
+Connection pool đầy
+    ↓
+Latency và error rate tăng
+```
+
+#### Connection pool exhaustion
+
+Một transaction thường giữ JDBC connection cho tới khi transaction kết thúc. Nếu pool có 20 connection mà 20 request cùng giữ connection trong lúc chờ API, request thứ 21 không thể lấy connection dù database có thể vẫn còn CPU.
+
+Vì vậy metric cần theo dõi không chỉ là database CPU mà còn là:
+
+- Connection đang active và idle.
+- Số request đang pending để lấy connection.
+- Thời gian acquire connection.
+- Transaction duration và P95/P99 của nó.
+
+Tăng pool size có thể làm giảm lỗi trong thời gian ngắn, nhưng nếu database là bottleneck thì sẽ chỉ chuyển vấn đề thành nhiều query/lock đồng thời hơn.
+
+#### MVCC, undo log và WAL
+
+Ở database dùng MVCC, transaction cũ có thể buộc database giữ lại phiên bản row cũ mà transaction đó vẫn có khả năng nhìn thấy. Với PostgreSQL, transaction lâu hoặc session `idle in transaction` có thể cản trở việc cleanup dead tuples của `VACUUM`, dẫn tới table/index bloat. Với InnoDB, lịch sử phiên bản và undo log cũng có thể tăng khi transaction giữ snapshot quá lâu.
+
+Hệ quả vận hành có thể là:
+
+- Storage tăng.
+- Vacuum hoặc purge không theo kịp.
+- Query và index kém hiệu quả hơn.
+- Replication/WAL hoặc history backlog tăng.
+
+Chi tiết phụ thuộc database và isolation level, nên không nên phát biểu rằng mọi transaction đọc đều giữ row lock. Điểm chung là transaction mở lâu giữ nhiều state database lâu hơn và làm việc cleanup/coordination khó hơn.
+
+#### Rollback đắt
+
+Một transaction update hàng triệu rows rồi fail phải rollback toàn bộ thay đổi. Rollback không phải là thao tác miễn phí; nó tạo thêm I/O và có thể tiếp tục giữ lock trong lúc hoàn tác. Chia thành batch giúp giới hạn blast radius: fail ở batch nào thì chỉ cần retry batch đó, với điều kiện job có checkpoint và idempotency phù hợp.
+
+### 3. Những nguyên nhân thường gặp trong code
+
+#### Gọi external API trong `@Transactional`
+
+Đây là anti-pattern phổ biến:
+
+```java
+@Transactional
+public void createOrder(CreateOrderRequest request) {
+    Order order = orderRepository.save(Order.pending(request));
+
+    paymentClient.charge(request.payment()); // Không kiểm soát được latency
+    emailClient.sendConfirmation(order);     // Có thể retry hoặc timeout
+
+    order.markPaid();
+}
+```
+
+Payment API hoặc email service không thuộc cùng local database transaction. Để chúng bên trong transaction vừa kéo dài transaction, vừa tạo ảo tưởng rằng toàn bộ workflow sẽ rollback nguyên tử.
+
+#### Xử lý file hoặc CPU-intensive work trong transaction
+
+```java
+@Transactional
+public void importFile(MultipartFile file) {
+    List<Row> rows = parseLargeExcel(file);
+    validate(rows);
+    repository.saveAll(rows);
+}
+```
+
+Parse và validate file nên thực hiện trước khi mở transaction nếu không cần đọc/ghi database trong quá trình đó. Với dữ liệu lớn, nên dùng staging table và batch merge thay vì giữ một transaction cho toàn bộ file.
+
+#### Chờ người dùng hoặc chờ message
+
+Không thể giữ transaction trong lúc chờ người dùng thanh toán, ký hợp đồng hoặc upload bước tiếp theo. Những business process kéo dài từ vài giây tới vài ngày phải được mô hình hóa bằng trạng thái như `PENDING`, `PROCESSING`, `COMPLETED`, `FAILED`, chứ không phải một transaction duy nhất.
+
+#### Batch quá lớn
+
+Một job nightly cập nhật toàn bộ bảng trong một transaction có thể làm online traffic bị block và khi fail phải rollback từ đầu. Batch size không có con số đúng cho mọi hệ thống. Cần chọn dựa trên lock duration, I/O, transaction log/WAL, latency của production traffic và chi phí retry; bắt đầu với chunk vừa phải rồi điều chỉnh bằng metric thực tế.
+
+### 4. Cách thiết kế transaction boundary trong Spring
+
+Một nguyên tắc thực dụng là để method bên ngoài điều phối workflow, còn method transaction chỉ thực hiện một bước database ngắn:
+
+```java
+@Service
+public class OrderService {
+    private final OrderTransactionService transactions;
+    private final PaymentClient paymentClient;
+
+    public OrderService(
+            OrderTransactionService transactions,
+            PaymentClient paymentClient) {
+        this.transactions = transactions;
+        this.paymentClient = paymentClient;
+    }
+
+    public void createAndPay(CreateOrderRequest request) {
+        Long orderId = transactions.createPendingOrder(request);
+
+        PaymentResult result = paymentClient.charge(
+                request.payment(),
+                "order-" + orderId); // Idempotency key
+
+        transactions.completePayment(orderId, result);
+    }
+}
+```
+
+```java
+@Service
+public class OrderTransactionService {
+    private final OrderRepository orderRepository;
+
+    public OrderTransactionService(OrderRepository orderRepository) {
+        this.orderRepository = orderRepository;
+    }
+
+    @Transactional
+    public Long createPendingOrder(CreateOrderRequest request) {
+        Order order = orderRepository.save(Order.pending(request));
+        return order.getId();
+    }
+
+    @Transactional
+    public void completePayment(Long orderId, PaymentResult result) {
+        Order order = orderRepository.findById(orderId).orElseThrow();
+
+        if (result.successful()) {
+            order.markPaid();
+        } else {
+            order.markPaymentFailed(result.errorCode());
+        }
+    }
+}
+```
+
+Tách bean ở đây không chỉ để code dễ đọc. Với Spring proxy-based transaction management, gọi một method `@Transactional` khác trực tiếp trong cùng object có thể không đi qua proxy, nên annotation không tạo ra transaction boundary như developer tưởng. Tách service hoặc gọi qua proxy giúp boundary rõ ràng hơn.
+
+Thiết kế này tạo ra trạng thái trung gian: payment có thể thành công nhưng bước `completePayment` có thể fail. Vì vậy phải bổ sung idempotency, retry có giới hạn và reconciliation. Không được đánh đổi atomicity của database bằng cách giả định external API luôn thành công.
+
+### 5. Transactional Outbox khi cần publish event
+
+Nếu vừa cập nhật database vừa phát event Kafka, đoạn code sau có dual-write problem:
+
+```java
+@Transactional
+public void createOrder(CreateOrderRequest request) {
+    Order order = orderRepository.save(Order.pending(request));
+    kafkaTemplate.send("order-created", new OrderCreated(order.getId()));
+}
+```
+
+Database có thể commit nhưng publish thất bại, hoặc message đã được publish nhưng transaction database rollback. Transaction của database không tự động bao phủ Kafka.
+
+Transactional Outbox ghi order và event vào cùng database transaction:
+
+```java
+@Transactional
+public void createOrder(CreateOrderRequest request) {
+    Order order = orderRepository.save(Order.pending(request));
+
+    outboxRepository.save(OutboxEvent.orderCreated(
+            order.getId(),
+            serializeOrderCreated(order)));
+}
+```
+
+Một publisher riêng đọc outbox sau khi commit và gửi event. Publisher có thể gửi lại khi gặp lỗi, nên consumer vẫn phải idempotent. Outbox không làm toàn bộ workflow phân tán thành một transaction; nó chỉ giải quyết chắc chắn hơn việc ghi local state cùng với event cần phát ra.
+
+### 6. Batch operation: mỗi batch là một transaction
+
+Với bulk update, tránh pattern giữ một transaction cho toàn bộ job:
+
+```java
+// Không nên: toàn bộ job là một transaction
+@Transactional
+public void archiveAll() {
+    for (Order order : orderRepository.findAllExpired()) {
+        order.archive();
+    }
+}
+```
+
+Thay vào đó, một service điều phối lặp qua các batch và một method khác commit từng batch:
+
+```java
+public void archiveExpiredOrders() {
+    long lastId = 0;
+    int updated;
+
+    do {
+        updated = transactionService.archiveBatch(lastId);
+        lastId = transactionService.findLastProcessedId(lastId);
+    } while (updated > 0);
+}
+```
+
+Trong production, cách lấy checkpoint cần được thiết kế cẩn thận. Có thể dùng keyset pagination theo primary key, bảng job checkpoint hoặc claim rows bằng trạng thái `PROCESSING`. Nếu nhiều worker chạy song song, cần tránh hai worker claim cùng row và cần lock rows theo thứ tự nhất quán để giảm deadlock.
+
+Mục tiêu của batch không phải là chọn một con số “chuẩn”. Batch phải đủ lớn để giảm overhead của quá nhiều lần commit, nhưng đủ nhỏ để transaction hoàn thành nhanh, lock nhả sớm và retry không tốn kém. Hãy đo thời gian từng batch, lock wait, WAL/undo, database I/O và ảnh hưởng lên P95/P99 của traffic online.
+
+### 7. Chẩn đoán trong production
+
+#### Ở application
+
+Gắn metric hoặc trace cho các mốc:
+
+```text
+transaction.begin
+  → first SQL
+  → last SQL
+  → transaction.commit/rollback
+```
+
+Một trace tốt phải cho thấy transaction đang mở trong lúc nào: chạy SQL, chờ lock, gọi HTTP, serialize file hay retry. Các metric hữu ích gồm:
+
+- Transaction duration theo endpoint/job.
+- Query duration và lock-wait duration.
+- HikariCP active, pending và timeout.
+- HTTP downstream latency bên trong workflow.
+- Error, rollback và retry rate.
+
+#### PostgreSQL
+
+Tìm transaction lâu nhất:
+
+```sql
+SELECT
+    pid,
+    usename,
+    application_name,
+    state,
+    xact_start,
+    now() - xact_start AS transaction_age,
+    wait_event_type,
+    wait_event,
+    query
+FROM pg_stat_activity
+WHERE xact_start IS NOT NULL
+ORDER BY xact_start;
+```
+
+Tìm session đã dừng query nhưng vẫn giữ transaction:
+
+```sql
+SELECT
+    pid,
+    now() - xact_start AS transaction_age,
+    state,
+    query
+FROM pg_stat_activity
+WHERE state = 'idle in transaction'
+ORDER BY xact_start;
+```
+
+`idle in transaction` thường chỉ ra application đã lấy connection và mở transaction nhưng đang không làm việc. Cần kiểm tra code path, connection handling và việc có chờ external operation giữa các query hay không.
+
+#### MySQL/InnoDB
+
+Có thể xem transaction đang hoạt động bằng:
+
+```sql
+SELECT *
+FROM information_schema.innodb_trx
+ORDER BY trx_started;
+```
+
+Kết hợp với:
+
+```sql
+SHOW FULL PROCESSLIST;
+```
+
+để tìm session, query và thời điểm transaction bắt đầu. Câu query chẩn đoán cụ thể phụ thuộc phiên bản và cấu hình database; nên chạy ở môi trường production với quyền tối thiểu cần thiết và tránh tạo thêm tải không cần thiết.
+
+### 8. Timeout và các biện pháp bảo vệ
+
+Timeout là hàng rào an toàn, không thay thế cho việc sửa transaction boundary. Trong Spring có thể đặt timeout cho transaction:
+
+```java
+@Transactional(timeout = 5)
+public void updateOrder() {
+    // Chỉ nên chứa database work ngắn
+}
+```
+
+Nhưng cần phân biệt:
+
+- Transaction timeout.
+- SQL/query timeout.
+- Lock timeout.
+- Connection acquisition timeout.
+- HTTP connect/read timeout.
+
+Một transaction timeout không đảm bảo external HTTP call sẽ tự dừng đúng lúc. HTTP client cũng phải có timeout riêng. Các timeout nên được suy ra từ SLO và số liệu production; timeout quá dài giữ resource quá lâu, còn timeout quá ngắn tạo lỗi giả và retry không cần thiết.
+
+Với database, có thể dùng thêm giới hạn cho statement, lock hoặc session `idle in transaction` tùy engine. Hãy thử nghiệm trước vì các thiết lập này có thể làm thay đổi hành vi của batch job, migration và request hợp lệ.
+
+### 9. Khi workflow đi qua nhiều service
+
+Không nên cố giữ một transaction ACID từ Order Service qua Payment Service và Inventory Service. Network failure khiến việc rollback toàn bộ trở nên không đáng tin cậy.
+
+Một Saga có thể mô hình hóa workflow như sau:
+
+```text
+1. Order Service tạo order = PENDING
+2. Inventory Service reserve stock
+3. Payment Service charge tiền
+4. Order Service chuyển order = CONFIRMED
+
+Nếu payment thất bại:
+5. Inventory Service release stock
+6. Order Service chuyển order = PAYMENT_FAILED
+```
+
+Các bước compensation không phải rollback theo nghĩa database. Chúng là command/event nghiệp vụ riêng và cũng có thể fail, nên cần retry, idempotency, trạng thái rõ ràng và reconciliation job.
+
+### 10. Runbook xử lý sự cố
+
+Khi alert transaction age hoặc lock wait tăng:
+
+1. Xác định transaction nào lâu nhất và endpoint/job tạo ra nó.
+2. Kiểm tra transaction đang chạy SQL, chờ lock, gọi HTTP hay ở trạng thái `idle in transaction`.
+3. Xác định lock holder và các query bị block; không kill session một cách mù quáng.
+4. Nếu có nguy cơ làm cạn pool hoặc ảnh hưởng diện rộng, giảm traffic/job concurrency hoặc pause consumer theo runbook.
+5. Chỉ terminate transaction khi đã hiểu side effect và có cách retry/reconcile an toàn.
+6. Sau khi ổn định, thu hẹp boundary, tách external call, thêm batch/checkpoint và test failure giữa các bước.
+7. Bổ sung metric, trace và alert để phát hiện trước khi connection pool hoặc database bị bão hòa.
+
+---
+
+## Bẫy thường gặp
+
+❌ **"Transaction càng lớn càng an toàn vì rollback được toàn bộ."**
+
+→ Tại sao sai: Một transaction rất lớn giữ lock và connection lâu, tạo rollback đắt, làm blast radius của một lỗi lớn hơn. Atomicity chỉ cần trong phạm vi invariant thực sự phải thay đổi cùng nhau.
+
+✅ Đúng hơn: Xác định invariant cần atomic, giữ phần đó trong transaction ngắn. Workflow dài dùng state machine, outbox, retry và compensation.
+
+---
+
+❌ **"Đặt `@Transactional` ở method controller/service lớn là đủ."**
+
+→ Tại sao sai: Annotation ở boundary quá cao có thể bao phủ validation, gọi API, xử lý file và nhiều logic không cần database transaction.
+
+✅ Đúng hơn: Đặt transaction ở method application ghi database; phần orchestration bên ngoài transaction. Kiểm tra cả self-invocation vì gọi nội bộ trong cùng bean có thể không đi qua Spring proxy.
+
+---
+
+❌ **"Tăng HikariCP pool size sẽ giải quyết long-running transaction."**
+
+→ Tại sao sai: Pool lớn hơn chỉ cho phép nhiều transaction cùng chạy/chờ hơn. Database có thể bị quá tải, lock contention nặng hơn và sự cố khó kiểm soát hơn.
+
+✅ Đúng hơn: Tìm transaction đang giữ connection, sửa query hoặc boundary, rồi mới tune pool dựa trên giới hạn database và workload đo được.
+
+---
+
+❌ **"Gọi payment API trong transaction thì payment cũng rollback được cùng database."**
+
+→ Tại sao sai: External service không tham gia local database transaction. Database rollback không hoàn tiền tự động, và payment thành công không đảm bảo bước commit của application thành công.
+
+✅ Đúng hơn: Dùng trạng thái `PENDING`, idempotency key, retry có giới hạn, reconciliation và Saga/compensation khi workflow cần nhiều service.
+
+---
+
+❌ **"Dùng timeout ngắn là đã xử lý xong."**
+
+→ Tại sao sai: Timeout có thể cắt lỗi nhưng không giải quyết việc transaction boundary sai; nếu retry tự động, hệ thống còn có thể tạo retry storm.
+
+✅ Đúng hơn: Timeout là safety net. Kết hợp nó với query/lock/HTTP timeout phù hợp, retry có backoff và metric để tìm nguyên nhân gốc.
+
+---
+
+❌ **"Một batch càng lớn thì throughput càng tốt."**
+
+→ Tại sao sai: Batch lớn giảm số lần commit nhưng tăng lock duration, transaction log/WAL, memory và chi phí retry khi fail.
+
+✅ Đúng hơn: Chọn batch size bằng benchmark và production metrics. Có checkpoint, keyset pagination và khả năng resume; không dùng một magic number cho mọi database.
+
+---
+
+## Câu hỏi follow-up
+
+### 1. Long-running transaction khác slow query như thế nào?
+
+Slow query là một statement mất nhiều thời gian thực thi; long-running transaction là toàn bộ khoảng thời gian từ `BEGIN` tới `COMMIT/ROLLBACK` kéo dài. Một transaction có query rất nhanh nhưng vẫn long-running vì nó chờ HTTP API, xử lý file hoặc bị bỏ ở trạng thái `idle in transaction`. Vì vậy cần đo cả query duration, transaction duration và lock wait thay vì chỉ nhìn slow-query log.
+
+### 2. Có nên dùng `REQUIRES_NEW` để tách transaction không?
+
+`REQUIRES_NEW` tạo transaction độc lập, nhưng transaction bên ngoài thường vẫn giữ connection trong khi transaction bên trong cần connection khác. Dùng nhiều có thể làm pool cạn nhanh hơn và không giải quyết external side effect. Chỉ dùng khi thực sự cần commit độc lập, hiểu rõ propagation và đã kiểm tra pool/concurrency; nhiều trường hợp nên refactor orchestration để không mở transaction ngoài quá rộng.
+
+### 3. Làm thế nào để retry an toàn sau khi transaction bị timeout?
+
+Trước tiên cần biết transaction đã commit hay rollback, vì timeout ở client không luôn có nghĩa database chưa commit. Operation cần idempotency key hoặc unique constraint để retry không tạo dữ liệu trùng. Với workflow nhiều bước, lưu trạng thái và chạy reconciliation để kiểm tra các record bị bỏ dở thay vì chỉ retry vô hạn.
+
+### 4. Khi nào nên dùng pessimistic locking thay vì optimistic locking?
+
+Optimistic locking phù hợp khi conflict hiếm và có thể đọc, kiểm tra version rồi retry khi version thay đổi. Pessimistic locking phù hợp khi invariant cần giữ ngay trong khoảng update ngắn và conflict cao, nhưng nó làm tăng lock wait nếu transaction boundary rộng. Dù dùng cơ chế nào, không nên giữ lock trong lúc gọi network hoặc chờ người dùng.
+
+### 5. Batch commit từng phần có làm mất tính atomic không?
+
+Có. Commit từng batch không còn đảm bảo toàn bộ job thành công hoặc thất bại như một đơn vị duy nhất. Vì vậy cần thiết kế job có trạng thái, checkpoint, idempotency, retry và cách xử lý dữ liệu đã hoàn thành một phần. Nếu business bắt buộc all-or-nothing trên toàn bộ tập dữ liệu, phải cân nhắc chi phí của transaction lớn hoặc chuyển sang staging/swap strategy phù hợp thay vì âm thầm chia batch.
+
+---
+
+## Xem thêm
+
+- [Merge 1 triệu bản ghi vào bảng 1 tỷ rows](/docs/java/bulk-upsert-billion-rows) — batch processing, lock contention, checkpoint và retry.
+- [SQL vs NoSQL: chọn database như thế nào?](/docs/database/sql-vs-nosql) — transaction boundary, consistency và trade-off khi chọn database.
+- [Distributed system terms](/docs/system-design/distributed-system-terms) — eventual consistency, distributed transaction và các failure mode liên quan.
