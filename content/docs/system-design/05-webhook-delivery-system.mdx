@@ -81,8 +81,9 @@ Một câu trả lời mạnh không tự phát minh requirement rồi giấu ch
 
 Các con số trên không phải “best practice” áp dụng cho mọi công ty. Chúng là baseline có thể đo, load test và thay đổi khi Product đưa ra contract khác.
 
-> [!IMPORTANT]
-> Không đưa endpoint lỗi vào cùng latency SLO với endpoint khỏe. Hệ thống không thể bảo đảm giao trong 5 giây nếu server của khách hàng đang tắt; nó chỉ có thể bảo đảm event không mất, retry đúng policy và tenant khác không bị ảnh hưởng.
+<Callout type="info" title="Quan trọng">
+Không đưa endpoint lỗi vào cùng latency SLO với endpoint khỏe. Hệ thống không thể bảo đảm giao trong 5 giây nếu server của khách hàng đang tắt; nó chỉ có thể bảo đảm event không mất, retry đúng policy và tenant khác không bị ảnh hưởng.
+</Callout>
 
 ### 3. Ước lượng tải: average nhỏ, tail latency mới đắt
 
@@ -259,8 +260,9 @@ Bảng lookup nhanh phải nằm trước các kịch bản để người vận
 | Delivery vào `DEAD` ngay | Permanent error hoặc payload/config sai | `4xx`, policy version, response excerpt | 5 |
 | Request chạm private IP hoặc signature fail hàng loạt | SSRF attempt / secret rotation lỗi | DNS result, egress deny, signature version | 6 |
 
-> [!WARNING]
-> Support không nên “retry thử” trước khi biết delivery đã ở state nào. Một retry thủ công có thể lặp side effect ở receiver hoặc biến endpoint đang phục hồi thành quá tải lần nữa.
+<Callout type="warn" title="Cẩn thận">
+Support không nên “retry thử” trước khi biết delivery đã ở state nào. Một retry thủ công có thể lặp side effect ở receiver hoặc biến endpoint đang phục hồi thành quá tải lần nữa.
+</Callout>
 
 ### 7. Kịch bản 1 — Business transaction đã commit nhưng webhook event biến mất
 
@@ -644,8 +646,9 @@ Receiver verify theo thứ tự:
 
 Secret riêng theo endpoint, được encrypt bằng KMS hoặc envelope encryption. Rotation có overlap; một request có thể mang chữ ký của key cũ và mới trong thời gian chuyển đổi.
 
-> [!CAUTION]
-> HMAC bảo vệ receiver khỏi request giả mạo. SSRF-safe egress bảo vệ sender khỏi URL độc hại. Có một lớp không đồng nghĩa đã có lớp còn lại.
+<Callout type="warn" title="Cảnh báo bảo mật">
+HMAC bảo vệ receiver khỏi request giả mạo. SSRF-safe egress bảo vệ sender khỏi URL độc hại. Có một lớp không đồng nghĩa đã có lớp còn lại.
+</Callout>
 
 **Takeaway:** URL của customer là untrusted input; application validation chỉ giảm rủi ro, network egress policy mới là hàng rào cuối.
 
@@ -789,8 +792,9 @@ Success criterion không chỉ là “không crash”. Phải chứng minh endpo
 
 ### 17. Góc nhìn Staff — biến hệ thống thành một product có thể vận hành lâu dài
 
-> [!NOTE]
-> Senior thường chứng minh đường delivery đúng dưới failure. Staff phải chứng minh tổ chức có thể sở hữu contract, chi phí và rủi ro của nó trong nhiều năm.
+<Callout type="info" title="Góc nhìn Staff">
+Senior thường chứng minh đường delivery đúng dưới failure. Staff phải chứng minh tổ chức có thể sở hữu contract, chi phí và rủi ro của nó trong nhiều năm.
+</Callout>
 
 Một câu trả lời Staff nên bổ sung:
 
