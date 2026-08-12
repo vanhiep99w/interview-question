@@ -23,7 +23,7 @@ Interviewer kỳ vọng bạn phân biệt được `SharedWorker`, `DedicatedWo
 
 <Tab value="Senior">
 
-Interviewer kỳ vọng bạn thiết kế được protocol giữa tab ↔ worker ↔ server, quản lý subscription theo từng tab, reconnect có exponential backoff + jitter, resync sau reconnect, authentication không làm lộ token, và cleanup client không phụ thuộc hoàn toàn vào `unload`. Bạn cũng cần xử lý backpressure, duplicate/gap sau reconnect, rollout worker mới và quan sát được số logical clients trên mỗi physical socket.
+Interviewer kỳ vọng bạn thiết kế được protocol giữa tab ↔ worker ↔ server, quản lý subscription theo từng tab, reconnect có exponential backoff + **jitter** (thêm một khoảng ngẫu nhiên vào thời gian chờ), resync sau reconnect, authentication không làm lộ token, và cleanup client không phụ thuộc hoàn toàn vào `unload`. Bạn cũng cần xử lý backpressure, duplicate/gap sau reconnect, rollout worker mới và quan sát được số logical clients trên mỗi physical socket.
 
 Điểm cộng: chỉ ra rằng “một WebSocket” chỉ đúng trong phạm vi một SharedWorker instance của cùng origin/browser profile, không phải một connection toàn cầu cho mọi thiết bị.
 
@@ -69,7 +69,7 @@ Nó đúng về chức năng, nhưng chi phí tăng theo số tab:
 10 tabs mất mạng = 10 reconnect loops cùng chạy
 ```
 
-Server phải giữ thêm file descriptor, session state, heartbeat và outbound buffer. Client cũng parse cùng payload nhiều lần. Nếu reconnect không có jitter, các tab của hàng nghìn users còn có thể tạo một reconnect storm cùng lúc.
+Server phải giữ thêm file descriptor, session state, heartbeat và outbound buffer. Client cũng parse cùng payload nhiều lần. **Jitter** là việc thêm một khoảng ngẫu nhiên vào thời gian chờ reconnect. Nếu không có jitter, hàng nghìn tab có thể cùng reconnect đúng giây thứ 1, 2, 4, 8 và đồng loạt dồn tải lên server — hiện tượng này gọi là **reconnect storm**.
 
 Mục tiêu của SharedWorker là đổi topology thành:
 
