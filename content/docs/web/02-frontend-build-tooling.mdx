@@ -53,7 +53,7 @@ Một package dùng được trong Node.js chưa chắc dùng được trong bro
 | **Package manager** | Cài, resolve và quản lý dependency | Manifest + lockfile → dependency đã cài | npm, pnpm, Yarn |
 | **Compiler/transpiler** | Chuyển đổi ngôn ngữ hoặc cú pháp | TS/JSX/modern JS → JavaScript | Babel, SWC, TypeScript compiler, Oxc transformer |
 | **Type checker** | Kiểm tra tính đúng đắn của kiểu | Source + type declarations → diagnostics | TypeScript compiler |
-| **Bundler** | Xử lý dependency graph và tạo bundle/chunk | Entry + module graph → output modules/chunks | Webpack, Rollup, esbuild, Rspack, Rolldown, Turbopack |
+| **Bundler** | Lần theo các import và tổ chức code thành các file đầu ra | File khởi đầu + các module được import → bundles/chunks | Webpack, Rollup, esbuild, Rspack, Rolldown, Turbopack |
 | **Minifier** | Giảm kích thước code, giữ nguyên hành vi theo các giả định cấu hình | JavaScript → JavaScript nhỏ hơn | Terser, esbuild, SWC, Oxc minifier |
 | **CSS processor/compiler** | Chuyển đổi và tối ưu stylesheet | SCSS/CSS → CSS | Sass, PostCSS, Lightning CSS |
 | **Build tool** | Tích hợp pipeline và developer experience | Project + config → dev server hoặc production output | Vite, Parcel, Rsbuild |
@@ -74,7 +74,7 @@ Bundler là một phần của build pipeline. Build tool thường bổ sung:
 
 - Dev server, file watching và HMR.
 - Cấu hình mặc định cho ứng dụng.
-- HTML entry, CSS/assets, environment variables.
+- File HTML khởi đầu (HTML entry), CSS/assets và environment variables.
 - Hệ thống plugins và tích hợp framework.
 - CLI thống nhất cho development và production build.
 
@@ -98,20 +98,37 @@ Với project khác, script có thể là `next build`, `rsbuild build`, `webpac
 
 ## 3. Đi qua một build pipeline cụ thể
 
-### 3.1. Source code ban đầu
+### 3.1. Các file của ví dụ và nơi ứng dụng bắt đầu
 
-Giả sử ứng dụng có các file sau:
+Ví dụ này dùng **Vite + React + TypeScript**. Trước khi xem code, hãy xác định vai trò của từng file:
 
 ```text
-index.html
+index.html           ← trang HTML được mở trong browser
 src/
-  main.tsx
-  math.ts
-  admin.ts
-  styles.css
+  main.tsx           ← file khởi động phần JavaScript/React
+  math.ts            ← cung cấp các hàm tính toán
+  admin.ts           ← cung cấp chức năng chỉ tải khi cần
+  styles.css         ← stylesheet của giao diện
 ```
 
-`src/math.ts` có hai export:
+**Ứng dụng không bắt đầu chạy từ `math.ts`.** Browser nhận trang HTML; trang này chỉ ra file nào khởi động phần JavaScript.
+
+Phần liên quan trong **`index.html`**:
+
+```html
+<div id="root"></div>
+
+<script type="module" src="/src/main.tsx"></script>
+```
+
+Hai dòng này làm hai việc khác nhau:
+
+- `div` có ID `root` là chỗ để React đưa giao diện vào.
+- `script` chỉ ra rằng phần JavaScript bắt đầu từ `src/main.tsx`.
+
+Đây là source được phục vụ qua Vite. Browser không trực tiếp hiểu TypeScript/JSX: trong development, Vite chuyển source thành JavaScript trước khi gửi cho browser. Khi build production, HTML được xử lý để tham chiếu các JavaScript files đầu ra, thay vì yêu cầu người dùng tải file TSX gốc.
+
+Tiếp theo, **`src/math.ts`** cung cấp hai hàm cho file khác sử dụng:
 
 ```ts
 export function sum(a: number, b: number): number {
@@ -123,18 +140,22 @@ export function unusedMessage(): string {
 }
 ```
 
-Entry sử dụng một export và tải phần admin khi cần:
+`export` nghĩa là **cho phép module khác import hàm này**. Nó không tự gọi hàm, cũng không biến `math.ts` thành file khởi động ứng dụng.
+
+Trong **`src/main.tsx`**, ứng dụng lấy hàm `sum`, tạo giao diện và đăng ký hành động khi bấm nút:
 
 ```tsx
 import { createRoot } from 'react-dom/client';
-import { sum } from './math';
+import { sum } from './math'; // Chỉ lấy sum, không lấy unusedMessage.
 import './styles.css';
 
+// Hàm này chỉ được gọi khi người dùng bấm nút.
 async function openAdmin() {
   const { getAdminMessage } = await import('./admin');
   console.log(getAdminMessage());
 }
 
+// Tìm chỗ để React hiển thị giao diện trong index.html.
 const root = document.getElementById('root');
 if (!root) throw new Error('Missing root element');
 
@@ -143,22 +164,78 @@ createRoot(root).render(
 );
 ```
 
-HTML cần có một element mang ID `root`. Công cụ build phải xử lý cả TSX, package imports, CSS và dynamic import; không chỉ xóa type annotation.
+**`src/admin.ts`** cung cấp hàm được tải khi bấm nút:
 
-### 3.2. Entry và module resolution
+```ts
+export function getAdminMessage(): string {
+  return 'Admin module đã được tải';
+}
+```
 
-**Entry** là điểm bắt đầu của quá trình phân tích. Tùy công cụ, entry có thể là HTML, JavaScript, TypeScript hoặc do framework xác định từ route/component.
+`styles.css` là stylesheet được import để định dạng giao diện; có thể để trống trong ví dụ tối giản này.
 
-**Module resolution** xác định mỗi import trỏ đến đâu:
+Luồng chạy có thể đọc theo từng bước:
 
-- `./math` cần được resolve thành file phù hợp, ví dụ `math.ts`.
-- `react-dom/client` cần được resolve qua package đã cài và các quy tắc như `exports`.
-- Alias như `@/components/Button` cần có mapping tương ứng.
-- Một dependency có thể cung cấp entry khác nhau cho browser, Node.js, ESM hoặc CommonJS.
+1. Browser nhận `index.html` và thấy script tham chiếu `src/main.tsx`.
+2. Vite xử lý source cùng các import cần thiết và phục vụ JavaScript để browser thực thi.
+3. Code trong `main.tsx` sử dụng `sum(2, 3)` và React hiển thị nút có chữ **“Kết quả: 5”**.
+4. Khi người dùng bấm nút, `openAdmin()` được gọi. Lúc này code mới yêu cầu tải module `admin`, rồi ghi thông báo vào console.
 
-Đây là lý do cùng một tên package nhưng môi trường khác nhau có thể nhận implementation khác nhau.
+Có thể hình dung mối quan hệ giữa các file như sau:
 
-`paths` trong `tsconfig.json` không tự bảo đảm mọi runtime/bundler hiểu alias, và `tsc` không tự rewrite đường dẫn đó trong JavaScript output. Một số build tool hỗ trợ đọc mapping, một số cần cấu hình riêng. Với Vite 8, việc đọc `paths` có thể bật bằng `resolve.tsconfigPaths`; mặc định tính năng này không được bật.
+```text
+index.html
+    └── script tham chiếu src/main.tsx
+            ├── import sum từ math.ts
+            ├── import styles.css
+            └── import admin.ts khi người dùng bấm nút
+```
+
+**Tóm lại:** `src/main.tsx` khởi động phần React và sử dụng hàm `sum` từ `src/math.ts`. `math.ts` cung cấp hai hàm, nhưng chỉ `sum` được dùng. Hàm `unusedMessage` không được sử dụng; việc bundler có thể bỏ nó khỏi output sẽ được giải thích ở phần tree shaking.
+
+### 3.2. Entry: file được chọn làm điểm bắt đầu
+
+**Entry**, hay **entry point**, nghĩa là **điểm bắt đầu**. Trong quá trình build, đó là file/input mà công cụ được yêu cầu bắt đầu xử lý, rồi lần theo các import để tìm những module liên quan.
+
+Với ví dụ Vite ở trên, cần phân biệt hai cách nói:
+
+| Cách nói | File cụ thể | Ý nghĩa |
+|---|---|---|
+| **HTML entry của Vite** | `index.html` | Input HTML mà Vite xử lý, chứa tham chiếu đến script của ứng dụng |
+| **JavaScript entry của ứng dụng** | `src/main.tsx` | File khởi động phần code React, được HTML tham chiếu |
+| **Module được import** | `src/math.ts` | File cung cấp hàm cho `main.tsx`, không phải entry của ví dụ |
+
+**Tên `main.tsx` không tự có tính chất đặc biệt.** Nếu đổi thành `src/start.tsx` và sửa script trong HTML cho đúng, file đó vẫn có thể khởi động ứng dụng. Điều quyết định là tham chiếu/cấu hình, không phải tên file hay số lượng `export`.
+
+Các tool chọn entry theo cách khác nhau:
+
+- Vite app thông thường bắt đầu từ HTML, ví dụ `index.html`.
+- Webpack có thể chọn script bằng cấu hình `entry: './src/main.tsx'`.
+- Rollup có thể chọn source của library bằng `input: 'src/index.js'`.
+- Framework như Next.js xác định các điểm bắt đầu theo quy tắc của framework; không nhất thiết có một file `main.tsx` để bạn tự cấu hình.
+
+Một build cũng có thể có nhiều entries. Không cần coi mọi project là “một ứng dụng luôn có đúng một file main”.
+
+#### Module resolution: tìm file mà import đang nói đến
+
+Sau khi có điểm bắt đầu, công cụ gặp dòng:
+
+```ts
+import { sum } from './math';
+```
+
+Nó cần xác định **`./math` là file nào**. Trong ví dụ, đó là `src/math.ts` vì đường dẫn được tính từ file `src/main.tsx`.
+
+Quá trình tìm đúng file/module cho một import gọi là **module resolution**. Có thể hiểu ngắn gọn là **“tìm địa chỉ thật của thứ đang được import”**.
+
+Với các dạng import khác, quy tắc tìm cũng khác:
+
+- `./math` là đường dẫn tương đối; công cụ tìm file theo extensions được hỗ trợ, chẳng hạn `.ts`.
+- `react-dom/client` là tên package/subpath; công cụ tìm trong dependency đã cài và đọc các quy tắc của package, như trường `exports` trong `package.json`.
+- `@/components/Button` sử dụng alias; công cụ cần mapping cho biết `@` trỏ đến thư mục nào.
+- Một package có thể cung cấp implementation khác nhau cho browser, Node.js, ESM hoặc CommonJS. Môi trường và cấu hình quyết định implementation được chọn.
+
+Alias là nơi dễ gặp tình trạng **“IDE hiểu nhưng build không hiểu”**. `paths` trong `tsconfig.json` không tự bảo đảm mọi runtime/bundler hiểu alias, và `tsc` không tự rewrite đường dẫn đó trong JavaScript output. Một số build tool hỗ trợ đọc mapping, một số cần cấu hình riêng. Với Vite 8, việc đọc `paths` có thể bật bằng `resolve.tsconfigPaths`; mặc định tính năng này không được bật.
 
 ### 3.3. Parsing và transformation
 
@@ -207,15 +284,18 @@ JavaScript đó vẫn chạy. Type checker mới là thành phần phát hiện 
 
 ### 3.5. Xây dependency graph và bundling
 
-Từ entry, bundler lần theo các import để xây graph:
+Sau khi xác định điểm bắt đầu, bundler đọc các import để biết ứng dụng cần những module nào. Trong ví dụ Vite, nó đi từ HTML đến script `src/main.tsx`, rồi lần theo các import của script:
 
 ```text
-main.tsx
-├── react-dom/client
-├── math.ts
-├── styles.css
-└── import('./admin')     ← dependency được tải khi cần
+index.html
+└── src/main.tsx
+    ├── react-dom/client
+    ├── math.ts
+    ├── styles.css
+    └── import('./admin')     ← module được yêu cầu tải khi bấm nút
 ```
+
+Nếu `math.ts` còn import một file khác, bundler tiếp tục đi theo import đó. Tập hợp những file/module cùng quan hệ phụ thuộc này gọi là **dependency graph — sơ đồ phụ thuộc**.
 
 Bundler quyết định cách biểu diễn graph trong output: module nào nằm chung, phần nào dùng chung, phần nào tải riêng và runtime nào cần để kết nối các chunk.
 
