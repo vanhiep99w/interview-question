@@ -38,11 +38,13 @@
     ".source/*.ts",
     "next-env.d.ts",
     "dist/types/**/*.ts",
-    ".next/dev/types/**/*.ts"
+    ".next/dev/types/**/*.ts",
+    "dist/dev/types/**/*.ts"
   ],
   "exclude": [
     "node_modules",
     "dist",
-    "content"
+    "content",
+    "examples"
   ]
 }

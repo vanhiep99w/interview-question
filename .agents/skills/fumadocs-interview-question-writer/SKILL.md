@@ -11,6 +11,7 @@ Write a single technical interview-question page in the deep-dive style used by 
 
 - **`fumadocs-project-init`** — run first if the project/folder doesn't exist yet. It already knows an "Interview questions" collection uses categories-by-subtopic rather than a foundations→production arc; this skill fills in one page within that structure.
 - **`fumadocs-technical-writer`** — general-purpose doc writing (architecture, API, runbook). Its readability rules (jargon-glossing, one-idea-per-sentence, example-before-abstraction, hedge-with-a-landing) **apply here too** — see the "Readability" section below, which restates them in this format's context.
+- **`fumadocs-source-examples`** — combine with this skill when the page needs full source/config, a multi-file runnable example, or code referenced from several sections. Read [its workflow](../fumadocs-source-examples/SKILL.md); use the existing `SourceRef` drawer rather than pasting entire projects into the article.
 - This skill is specifically about the **interview-question page shape** — the section-by-section structure below.
 
 ## Research trước khi viết (bắt buộc cho câu hỏi tình huống thực tế)
@@ -103,6 +104,7 @@ This site is built on Next.js + Fumadocs, so lean on its built-in components ins
 - **`<Cards>`** — a richer alternative to a plain bullet list for "Xem thêm" when the project has it configured; falls back to plain links if not.
 - **`<Accordion>`** — optional: if "Câu hỏi follow-up" grows long (6+ questions), consider collapsing less-common follow-ups into an accordion so the main flow doesn't get overwhelming — but plain `###` headings are the safe default and fine for the typical 3-5.
 - **`<Steps>`** — optional: for a literal ordered checklist section (like an incident checklist), `<Steps>` can replace a plain checkbox list when the project has it configured and the steps benefit from being visually separated.
+- **`<SourceRef>`** — this repository's shared source drawer, not a Fumadocs built-in. Use it for complete configs/projects and reusable file/region references. Keep short illustrative snippets beside their explanation; follow `fumadocs-source-examples` for real source files, registry entries, snapshots and validation.
 - Mermaid code blocks — for any timeline/decision-tree content, per the diagram rule above.
 
 ## Alert syntax: GitHub-style vs Fumadocs `<Callout>`
@@ -119,7 +121,7 @@ There is no length cap and no target length for this format — a page like this
 This format's biggest failure mode observed in the wild: the "Phân tích chi tiết" section turning into dense, jargon-stacked prose that's technically correct but exhausting to read (see `fumadocs-technical-writer`'s readability section for the full rationale). Apply the same rules here, and they matter *more* in this format because it mixes code with prose:
 - Gloss any acronym/term on first use in a scenario (don't assume the reader already knows what every metric/flag means).
 - One idea per sentence, especially in "Nguyên nhân phổ biến" bullets — each bullet should be one cause, not a chain of three.
-- Put the command/code/log line immediately next to the sentence that explains it — never explain for several sentences before showing what you mean.
+- Put the command/code/log line immediately next to the sentence that explains it — never explain for several sentences before showing what you mean. For complete source spanning files or reused in several sections, place a focused `SourceRef` there and keep only the small excerpt needed for the explanation inline.
 - Every "Fix đúng" and "Mitigate ngay" block should end with a plain takeaway, not trail off in caveats.
 - Keep "Cốt lõi cần nhớ" and "Câu trả lời mẫu" especially conversational and jargon-light — those are the sections a nervous reader leans on most; save density for "Phân tích chi tiết".
 - More scenarios, more follow-up questions, more traps, an extra worked example — all welcome if they genuinely help the reader, never trimmed just to shorten the page. The only acceptable cut is genuine redundancy (restating the same point twice) or content irrelevant to the question at hand.

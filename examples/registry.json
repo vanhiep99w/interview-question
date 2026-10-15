@@ -1,0 +1,23 @@
+[
+  {
+    "id": "webpack-react-demo",
+    "title": "Webpack · React + TypeScript",
+    "defaultSnapshot": "basic",
+    "snapshots": [
+      {
+        "id": "basic",
+        "title": "React cơ bản",
+        "root": "examples/webpack-react-demo/basic",
+        "defaultFile": "webpack.config.cjs",
+        "files": ["package.json", "webpack.config.cjs", "tsconfig.json", "index.html", "src/main.tsx", "src/App.tsx", "src/styles.css", "src/env.d.ts"]
+      },
+      {
+        "id": "async-bootstrap",
+        "title": "Thêm async bootstrap",
+        "root": "examples/webpack-react-demo/async-bootstrap",
+        "defaultFile": "src/main.tsx",
+        "files": ["package.json", "webpack.config.cjs", "tsconfig.json", "index.html", "src/main.tsx", "src/bootstrap.tsx", "src/App.tsx", "src/styles.css", "src/env.d.ts"]
+      }
+    ]
+  }
+]

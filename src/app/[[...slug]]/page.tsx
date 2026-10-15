@@ -5,9 +5,12 @@ import {
   DocsPage,
   DocsTitle,
 } from 'fumadocs-ui/layouts/docs/page';
-import { notFound } from 'next/navigation';
+import { notFound, redirect } from 'next/navigation';
 import { getMDXComponents } from '@/components/mdx';
 import type { Metadata } from 'next';
+
+// All valid documentation routes are enumerated at build time.
+export const dynamicParams = false;
 
 export default async function Page({
   params,
@@ -16,7 +19,11 @@ export default async function Page({
 }) {
   const { slug } = await params;
   const page = source.getPage(slug ?? []);
-  if (!page) notFound();
+  if (!page) {
+    // Match public/_redirects in development and on other static hosts too.
+    if (!slug?.length) redirect('/behavioral/01-production-server-down/');
+    notFound();
+  }
 
   const MDX = page.data.body;
   return (
@@ -31,7 +38,12 @@ export default async function Page({
 }
 
 export async function generateStaticParams() {
-  return source.generateParams();
+  const params = source.generateParams().map(({ slug }) => ({ slug }));
+  // Optional catch-all routes also need an explicit root entry with output: export.
+  if (!params.some(({ slug }) => slug.length === 0)) {
+    params.unshift({ slug: [] });
+  }
+  return params;
 }
 
 export async function generateMetadata({

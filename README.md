@@ -61,3 +61,12 @@ description: "Mô tả ngắn"
 1. Tạo folder `content/docs/{category}/`
 2. Tạo `meta.json` với `title` và `pages`
 3. Thêm tên folder vào `content/docs/meta.json`
+
+## Source code tham chiếu trong bài
+
+Dùng `<SourceRef project="webpack-react-demo" file="webpack.config.cjs" region="entry" />`
+để mở source trong explorer thay vì đưa toàn bộ code vào bài. Source thật nằm trong
+`examples/`, được sinh thành tài nguyên tĩnh khi chạy dev/build.
+
+Xem [hướng dẫn Source Explorer](docs/source-explorer.md) để thêm project, snapshot,
+named region và chạy kiểm thử.

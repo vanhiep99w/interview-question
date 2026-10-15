@@ -3,3 +3,8 @@ node_modules/
 dist/
 .source/
 next-env.d.ts
+public/source-examples/
+examples/**/dist/
+playwright-report/
+test-results/
+*.tsbuildinfo

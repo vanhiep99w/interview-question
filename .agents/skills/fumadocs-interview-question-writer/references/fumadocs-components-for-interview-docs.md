@@ -2,6 +2,24 @@
 
 Only the components relevant to this page shape. For the full component set (Tabs, TypeTable, Files, etc.) see `fumadocs-technical-writer`'s `references/fumadocs-components.md` if that skill is also installed.
 
+## SourceRef (complete source without long inline dumps)
+
+Use the repository's shared source drawer for complete configs, runnable multi-file examples or the same source referenced in several places. Keep short excerpts next to the explanation. `SourceRef` is already registered here; do not import or recreate it.
+
+```mdx
+<SourceRef project="webpack-react-demo" file="webpack.config.cjs" region="entry">
+  Xem entry trong config đầy đủ
+</SourceRef>
+
+<SourceRef project="webpack-react-demo" snapshot="async-bootstrap" variant="button">
+  Mở source ví dụ
+</SourceRef>
+```
+
+Register real source in `examples/registry.json` before referencing it. Prefer named regions over brittle line ranges; pin snapshots when tutorial stages differ. Do not assume these example IDs exist in other repositories.
+
+Read [fumadocs-source-examples](../../fumadocs-source-examples/SKILL.md) for the workflow and validation. From that skill, follow the linked repository authoring guide for the full prop/registry contract.
+
 ## Callout
 
 ```mdx

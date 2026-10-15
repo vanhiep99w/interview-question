@@ -9,7 +9,11 @@
     "dev": "next dev",
     "build": "next build",
     "preview": "wrangler pages dev dist",
-    "deploy": "npm run build && wrangler pages deploy dist"
+    "deploy": "npm run build && wrangler pages deploy dist",
+    "source:build": "node scripts/build-source-examples.mjs",
+    "predev": "npm run source:build",
+    "prebuild": "npm run source:build",
+    "test:source": "playwright test"
   },
   "dependencies": {
     "@orama/orama": "^3.1.18",
@@ -21,9 +25,11 @@
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
     "remark-github-admonitions-to-directives": "^2.1.0",
+    "shiki": "^4.5.0",
     "unist-util-visit": "^5.1.0"
   },
   "devDependencies": {
+    "@playwright/test": "^1.64.1",
     "@tailwindcss/postcss": "^4.3.3",
     "@types/mdx": "^2.0.14",
     "@types/node": "^22.0.0",

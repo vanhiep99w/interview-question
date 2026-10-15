@@ -7,11 +7,13 @@ import { Tab, Tabs } from 'fumadocs-ui/components/tabs';
 import { TypeTable } from 'fumadocs-ui/components/type-table';
 import type { MDXComponents } from 'mdx/types';
 import { MermaidDiagram } from '@/components/mermaid';
+import { SourceRef } from '@/components/source-explorer/provider';
 
 export function getMDXComponents(components?: MDXComponents) {
   return {
     ...defaultMdxComponents,
     MermaidDiagram,
+    SourceRef,
     Callout,
     Card,
     Cards,

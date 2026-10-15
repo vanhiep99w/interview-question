@@ -1,0 +1,27 @@
+{
+  "name": "webpack-react-demo",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "webpack serve --config webpack.config.cjs --mode development",
+    "check": "tsc --noEmit",
+    "build": "npm run check && webpack --config webpack.config.cjs --mode production"
+  },
+  "dependencies": {
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "css-loader": "^7.0.0",
+    "html-webpack-plugin": "^5.0.0",
+    "style-loader": "^4.0.0",
+    "ts-loader": "^9.0.0",
+    "typescript": "^5.0.0",
+    "webpack": "^5.0.0",
+    "webpack-cli": "^6.0.0",
+    "webpack-dev-server": "^5.0.0"
+  }
+}
