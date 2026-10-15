@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="vi">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>SharedWorker WebSocket lab</title>
+  </head>
+  <body>
+    <main>
+      <h1>SharedWorker WebSocket lab</h1>
+      <p>Local demo only: fixed demo identity, in-memory history/tickets, not production authentication.</p>
+      <p>Transport: <strong id="transport"></strong> · socket: <strong id="status">starting</strong></p>
+      <label>Topic <select id="topic"><option>orders</option><option>notifications</option></select></label>
+      <label>Message <input id="text" value="hello" maxlength="1000" /></label>
+      <button id="send">Publish through worker</button>
+      <button id="close">Disconnect this tab</button>
+      <p id="latest" aria-live="polite">No events yet</p>
+      <pre id="log" aria-live="polite"></pre>
+      <p>Open another tab at the same URL. Add <code>?mode=dedicated</code> to force the per-tab fallback.</p>
+    </main>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

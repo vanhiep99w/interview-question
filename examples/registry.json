@@ -1,12 +1,12 @@
 [
   {
     "id": "webpack-react-demo",
-    "title": "Webpack \u00b7 React + TypeScript",
+    "title": "Webpack · React + TypeScript",
     "defaultSnapshot": "basic",
     "snapshots": [
       {
         "id": "basic",
-        "title": "React c\u01a1 b\u1ea3n",
+        "title": "React cơ bản",
         "root": "examples/webpack-react-demo/basic",
         "defaultFile": "webpack.config.cjs",
         "files": [
@@ -22,7 +22,7 @@
       },
       {
         "id": "async-bootstrap",
-        "title": "Th\u00eam async bootstrap",
+        "title": "Thêm async bootstrap",
         "root": "examples/webpack-react-demo/async-bootstrap",
         "defaultFile": "src/main.tsx",
         "files": [
@@ -39,7 +39,7 @@
       },
       {
         "id": "output-basic",
-        "title": "Build output \u00b7 React c\u01a1 b\u1ea3n",
+        "title": "Build output · React cơ bản",
         "root": "examples/webpack-react-demo/output/basic",
         "capture": {
           "sourceSnapshot": "basic",
@@ -59,7 +59,7 @@
       },
       {
         "id": "output-async-bootstrap",
-        "title": "Build output \u00b7 Async bootstrap",
+        "title": "Build output · Async bootstrap",
         "root": "examples/webpack-react-demo/output/async-bootstrap",
         "capture": {
           "sourceSnapshot": "async-bootstrap",
@@ -107,7 +107,7 @@
   },
   {
     "id": "module-federation-react-vue",
-    "title": "Module Federation \u00b7 React + Vue",
+    "title": "Module Federation · React + Vue",
     "defaultSnapshot": "react-vue",
     "snapshots": [
       {
@@ -142,6 +142,58 @@
           "vue-sub/src/router.ts",
           "vue-sub/tsconfig.json",
           "vue-sub/webpack.config.cjs"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "frontend-build-lab",
+    "title": "Frontend build tooling · Vite lab",
+    "defaultSnapshot": "lab",
+    "snapshots": [
+      {
+        "id": "lab",
+        "title": "Source chạy được",
+        "root": "examples/frontend-build-lab",
+        "defaultFile": "src/App.tsx",
+        "files": [
+          "index.html",
+          "package.json",
+          "src/App.tsx",
+          "src/admin.ts",
+          "src/main.tsx",
+          "src/math.ts",
+          "src/styles.css",
+          "tsconfig.json",
+          "vite.config.ts"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "shared-worker-websocket",
+    "title": "SharedWorker · WebSocket lab",
+    "defaultSnapshot": "lab",
+    "snapshots": [
+      {
+        "id": "lab",
+        "title": "Source chạy được",
+        "root": "examples/shared-worker-websocket",
+        "defaultFile": "src/connection-manager.ts",
+        "files": [
+          "index.html",
+          "package.json",
+          "server.mjs",
+          "src/connection-manager.ts",
+          "src/main.ts",
+          "src/protocol.ts",
+          "src/realtime-client.ts",
+          "src/realtime.dedicated-worker.ts",
+          "src/realtime.shared-worker.ts",
+          "src/styles.css",
+          "tsconfig.json",
+          "tsconfig.worker.json",
+          "vite.config.ts"
         ]
       }
     ]

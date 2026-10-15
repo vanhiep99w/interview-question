@@ -1,0 +1,15 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "lib": [
+      "ES2022",
+      "WebWorker"
+    ]
+  },
+  "include": [
+    "src/connection-manager.ts",
+    "src/realtime.shared-worker.ts",
+    "src/realtime.dedicated-worker.ts",
+    "src/protocol.ts"
+  ]
+}

@@ -53,6 +53,42 @@ Interviewer kỳ vọng bạn thiết kế được protocol giữa tab ↔ work
 
 ## Phân tích chi tiết
 
+### Chạy lab và mở source đầy đủ
+
+<SourceRef project="shared-worker-websocket" file="src/connection-manager.ts" variant="button">Mở source · SharedWorker, client và WebSocket server</SourceRef>
+
+Từ thư mục gốc repository tài liệu:
+
+```bash
+cd examples/shared-worker-websocket
+npm install
+npm run dev
+```
+
+Mở `http://127.0.0.1:5175/` trong hai tab cùng browser profile. Chọn `orders` ở tab A và `notifications` ở tab B, rồi publish message. Endpoint `/api/demo/metrics` cho biết số **business WebSocket** và hợp subscription; dev còn có socket HMR của Vite nên không đếm mọi dòng WS trong Network là connection realtime.
+
+Để quan sát production output không có HMR:
+
+```bash
+npm run build
+npm run preview
+```
+
+Dừng dev server trước vì preview cũng dùng cổng 5175. Thêm `?mode=dedicated` để thử fallback: mỗi tab có một dedicated worker và một WebSocket riêng.
+
+| Muốn đọc phần nào? | File |
+| --- | --- |
+| Commands, dependencies và build | <SourceRef project="shared-worker-websocket" file="package.json">package.json</SourceRef>, <SourceRef project="shared-worker-websocket" file="vite.config.ts">vite.config.ts</SourceRef> |
+| Tách type checking DOM và WebWorker | <SourceRef project="shared-worker-websocket" file="tsconfig.json">tsconfig.json</SourceRef>, <SourceRef project="shared-worker-websocket" file="tsconfig.worker.json">tsconfig.worker.json</SourceRef> |
+| Wrapper phía tab | <SourceRef project="shared-worker-websocket" file="src/realtime-client.ts">realtime-client.ts</SourceRef> |
+| Entry worker và manager | <SourceRef project="shared-worker-websocket" file="src/realtime.shared-worker.ts">realtime.shared-worker.ts</SourceRef>, <SourceRef project="shared-worker-websocket" file="src/connection-manager.ts">connection-manager.ts</SourceRef> |
+| Ticket, snapshot, replay và metrics local | <SourceRef project="shared-worker-websocket" file="server.mjs">server.mjs</SourceRef> |
+| UI để mở nhiều tab | <SourceRef project="shared-worker-websocket" file="src/main.ts">main.ts</SourceRef>, <SourceRef project="shared-worker-websocket" file="index.html">index.html</SourceRef> |
+
+> [!WARNING]
+> Backend lab chỉ dùng một identity giả lập, ticket dùng một lần và history trong RAM. Nó kiểm tra Origin và topic demo, **không triển khai đăng nhập/phân quyền production**. Không deploy nguyên server này để bảo vệ dữ liệu thật. UI minh họa state mới nhất; event dạng delta cần policy buffer/replay và snapshot reconciliation chặt hơn.
+
+
 ### 1. Vấn đề thực tế: 10 tab tạo 10 physical connections
 
 Cách đơn giản nhất là để mỗi tab tự mở socket:
@@ -234,135 +270,21 @@ sequenceDiagram
 
 Một wrapper nhỏ giúp component không biết chi tiết `MessagePort`:
 
+Code đầy đủ ở <SourceRef project="shared-worker-websocket" file="src/realtime-client.ts">realtime-client.ts</SourceRef>. Giữ API sử dụng ngắn trong bài:
+
 ```ts
-// realtime-client.ts
-export type RealtimeEvent = {
-  topic: string;
-  eventId: string;
-  sequence: number;
-  payload: unknown;
-};
-
-export class SharedRealtimeClient {
-  private readonly clientId = crypto.randomUUID();
-  private readonly worker: SharedWorker;
-  private readonly listeners = new Map<string, Set<(event: RealtimeEvent) => void>>();
-  private heartbeatId: number;
-
-  constructor() {
-    this.worker = new SharedWorker(
-      new URL("./realtime.shared-worker.ts", import.meta.url),
-      { name: "realtime-v1", type: "module" },
-    );
-
-    this.worker.port.addEventListener("message", (event) => {
-      const message = event.data;
-
-      if (message.type === "EVENT") {
-        for (const listener of this.listeners.get(message.topic) ?? []) {
-          listener(message);
-        }
-      }
-
-      if (message.type === "RESYNC_REQUIRED") {
-        // Fetch snapshot bằng HTTPS rồi thay state local.
-        void this.resync(message.topic);
-      }
-    });
-
-    this.worker.port.start();
-    this.register();
-
-    this.heartbeatId = window.setInterval(() => {
-      this.worker.port.postMessage({
-        type: "HEARTBEAT",
-        clientId: this.clientId,
-      });
-    }, 30_000);
-
-    // pagehide hữu ích nhưng không được coi là guaranteed delivery.
-    // Không đóng port nếu page đang đi vào back/forward cache (BFCache),
-    // vì page có thể được khôi phục cùng object client hiện tại.
-    window.addEventListener("pagehide", (event) => {
-      if (!event.persisted) this.close();
-    });
-
-    // Tab có thể ở BFCache hoặc bị freeze lâu hơn lease. Khi hoạt động lại,
-    // đăng ký và gửi lại subscription snapshot.
-    window.addEventListener("pageshow", () => this.register());
-  }
-
-  subscribe(topic: string, listener: (event: RealtimeEvent) => void) {
-    const topicListeners = this.listeners.get(topic) ?? new Set();
-    const wasEmpty = topicListeners.size === 0;
-    topicListeners.add(listener);
-    this.listeners.set(topic, topicListeners);
-
-    if (wasEmpty) {
-      this.worker.port.postMessage({
-        type: "SUBSCRIBE",
-        clientId: this.clientId,
-        topic,
-      });
-    }
-
-    return () => {
-      topicListeners.delete(listener);
-      if (topicListeners.size === 0) {
-        this.listeners.delete(topic);
-        this.worker.port.postMessage({
-          type: "UNSUBSCRIBE",
-          clientId: this.clientId,
-          topic,
-        });
-      }
-    };
-  }
-
-  sendCommand(payload: unknown, idempotencyKey: string) {
-    const requestId = crypto.randomUUID();
-    this.worker.port.postMessage({
-      type: "COMMAND",
-      clientId: this.clientId,
-      requestId,
-      idempotencyKey,
-      payload,
-    });
-    return requestId;
-  }
-
-  close() {
-    window.clearInterval(this.heartbeatId);
-    this.worker.port.postMessage({
-      type: "DISCONNECT",
-      clientId: this.clientId,
-    });
-    this.worker.port.close();
-  }
-
-  private register() {
-    this.worker.port.postMessage({
-      type: "REGISTER",
-      clientId: this.clientId,
-      protocolVersion: 1,
-    });
-
-    for (const topic of this.listeners.keys()) {
-      this.worker.port.postMessage({
-        type: "SUBSCRIBE",
-        clientId: this.clientId,
-        topic,
-      });
-    }
-  }
-
-  private async resync(topic: string) {
-    await fetch(`/api/realtime/snapshot?topic=${encodeURIComponent(topic)}`, {
-      credentials: "include",
-    });
-  }
-}
+const client = new SharedRealtimeClient();
+const unsubscribe = client.subscribe('orders', (event) => console.log(event));
+// Khi không còn cần: unsubscribe(); client.close();
 ```
+
+Các phần cần đối chiếu:
+
+- <SourceRef project="shared-worker-websocket" file="src/realtime-client.ts" region="transport">Transport</SourceRef>: chọn SharedWorker khi dùng được, dedicated worker khi cần fallback.
+- <SourceRef project="shared-worker-websocket" file="src/realtime-client.ts" region="subscriptions">Subscriptions</SourceRef>: ref-count listeners trong tab; không unsubscribe topic khi vẫn còn listener khác.
+- <SourceRef project="shared-worker-websocket" file="src/realtime-client.ts" region="lifecycle">Lifecycle</SourceRef>: heartbeat, pageshow/register, pagehide/BFCache và close idempotent; gỡ listeners khi đóng.
+- <SourceRef project="shared-worker-websocket" file="src/realtime-client.ts" region="snapshot">Snapshot</SourceRef>: tab mới lấy state hiện tại, bỏ snapshot cũ hơn event đã nhận và không giữ response sau khi client đóng.
+
 
 Nếu worker được đặt thẳng trong thư mục static thay vì đi qua bundler, dùng URL ổn định:
 
@@ -389,349 +311,30 @@ Ví dụ sau tập trung vào các invariant production quan trọng:
 - Command không bị queue vô hạn khi offline.
 - `bufferedAmount` được giới hạn.
 
+Entry SharedWorker trong <SourceRef project="shared-worker-websocket" file="src/realtime.shared-worker.ts">source thật</SourceRef> rất ngắn:
+
 ```ts
-// realtime.shared-worker.ts
-/// <reference lib="webworker" />
-
-type ClientState = {
-  port: MessagePort;
-  topics: Set<string>;
-  lastSeenAt: number;
-};
-
-const clients = new Map<string, ClientState>();
-const lastSequence = new Map<string, number>();
-
-const CLIENT_LEASE_MS = 5 * 60_000;
-const MAX_BUFFERED_BYTES = 1_000_000;
-
-let socket: WebSocket | null = null;
-let connectPromise: Promise<void> | null = null;
-let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
-let reconnectAttempt = 0;
-let authGeneration = 0;
-
-const workerScope = self as unknown as SharedWorkerGlobalScope;
-
-workerScope.onconnect = (event: MessageEvent) => {
-  const port = event.ports[0];
-  let boundClientId: string | null = null;
-
-  port.addEventListener("message", (messageEvent) => {
-    const message = messageEvent.data;
-
-    if (message?.type === "REGISTER") {
-      if (message.protocolVersion !== 1 || typeof message.clientId !== "string") {
-        port.postMessage({ type: "PROTOCOL_ERROR" });
-        return;
-      }
-
-      boundClientId = message.clientId;
-      clients.set(boundClientId, {
-        port,
-        topics: clients.get(boundClientId)?.topics ?? new Set(),
-        lastSeenAt: Date.now(),
-      });
-
-      postStatus(port);
-      void ensureSocket();
-      return;
-    }
-
-    if (!boundClientId || message?.clientId !== boundClientId) {
-      port.postMessage({ type: "PROTOCOL_ERROR" });
-      return;
-    }
-
-    const client = clients.get(boundClientId);
-    if (!client) return;
-    client.lastSeenAt = Date.now();
-
-    switch (message.type) {
-      case "HEARTBEAT":
-        break;
-
-      case "SUBSCRIBE":
-        if (isAllowedTopic(message.topic)) {
-          client.topics.add(message.topic);
-          syncSubscriptions();
-        }
-        break;
-
-      case "UNSUBSCRIBE":
-        client.topics.delete(message.topic);
-        syncSubscriptions();
-        break;
-
-      case "COMMAND":
-        forwardCommand(client, message);
-        break;
-
-      case "AUTH_CHANGED":
-        // Cookie/session đã đổi: hủy ticket/socket thuộc identity cũ.
-        resetAuthentication();
-        break;
-
-      case "DISCONNECT":
-        removeClient(boundClientId);
-        boundClientId = null;
-        break;
-    }
-  });
-
-  port.start();
-};
-
-async function ensureSocket() {
-  if (clients.size === 0) return;
-  if (socket?.readyState === WebSocket.OPEN) return;
-  if (socket?.readyState === WebSocket.CONNECTING) return;
-  if (connectPromise) return connectPromise;
-
-  connectPromise = openSocket().finally(() => {
-    connectPromise = null;
-  });
-
-  return connectPromise;
-}
-
-async function openSocket() {
-  broadcast({ type: "STATUS", state: "connecting" });
-  const openingForGeneration = authGeneration;
-
-  let ticketResponse: Response;
-  try {
-    ticketResponse = await fetch("/api/realtime/ticket", {
-      method: "POST",
-      credentials: "include",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ protocolVersion: 1 }),
-    });
-  } catch {
-    if (openingForGeneration === authGeneration) scheduleReconnect();
-    return;
-  }
-
-  // Bỏ toàn bộ response/ticket thuộc auth generation cũ.
-  if (openingForGeneration !== authGeneration) return;
-
-  if (ticketResponse.status === 401) {
-    broadcast({ type: "AUTH_REQUIRED" });
-    return;
-  }
-
-  if (!ticketResponse.ok || clients.size === 0) {
-    scheduleReconnect();
-    return;
-  }
-
-  const { url, ticket } = await ticketResponse.json();
-  if (openingForGeneration !== authGeneration) return;
-  const current = new WebSocket(
-    `${url}?ticket=${encodeURIComponent(ticket)}`,
-    ["realtime.v1"],
-  );
-  socket = current;
-
-  current.addEventListener("open", () => {
-    if (socket !== current) return;
-    reconnectAttempt = 0;
-    broadcast({ type: "STATUS", state: "open" });
-    syncSubscriptions();
-  });
-
-  current.addEventListener("message", (event) => {
-    if (socket !== current) return;
-    handleServerMessage(event.data);
-  });
-
-  current.addEventListener("close", (event) => {
-    if (socket !== current) return;
-    socket = null;
-    broadcast({
-      type: "STATUS",
-      state: "closed",
-      code: event.code,
-    });
-
-    if (clients.size === 0 || event.code === 1000) return;
-
-    // Ví dụ: server dùng private close code 4401 cho session hết hạn.
-    if (event.code === 4401) {
-      broadcast({ type: "AUTH_REQUIRED" });
-      return;
-    }
-
-    scheduleReconnect();
-  });
-}
-
-function resetAuthentication() {
-  authGeneration += 1;
-  reconnectAttempt = 0;
-  lastSequence.clear();
-
-  if (reconnectTimer) clearTimeout(reconnectTimer);
-  reconnectTimer = null;
-
-  const previous = socket;
-  socket = null;
-  previous?.close(4000, "auth changed");
-  broadcast({ type: "STATUS", state: "closed" });
-
-  // Nếu ticket cũ đang được fetch, chờ attempt đó kết thúc rồi mới mở lại.
-  // Logout sẽ nhận 401; login/switch account sẽ lấy ticket identity mới.
-  const pendingAttempt = connectPromise;
-  void (pendingAttempt ?? Promise.resolve()).finally(() => ensureSocket());
-}
-
-function scheduleReconnect() {
-  if (reconnectTimer || clients.size === 0) return;
-
-  const capMs = 30_000;
-  const exponentialMs = Math.min(1_000 * 2 ** reconnectAttempt, capMs);
-  const delayMs = Math.floor(exponentialMs * (0.5 + Math.random()));
-  reconnectAttempt += 1;
-
-  reconnectTimer = setTimeout(() => {
-    reconnectTimer = null;
-    void ensureSocket();
-  }, delayMs);
-}
-
-function syncSubscriptions() {
-  if (socket?.readyState !== WebSocket.OPEN) return;
-
-  const topics = new Set<string>();
-  for (const client of clients.values()) {
-    for (const topic of client.topics) topics.add(topic);
-  }
-
-  sendToServer({
-    type: "sync_subscriptions",
-    topics: [...topics],
-    resumeFrom: Object.fromEntries(lastSequence),
-  });
-}
-
-function handleServerMessage(raw: string | ArrayBuffer | Blob) {
-  if (typeof raw !== "string") return;
-
-  let message: any;
-  try {
-    message = JSON.parse(raw);
-  } catch {
-    return;
-  }
-
-  if (message.type === "event" && isAllowedTopic(message.topic)) {
-    const previous = lastSequence.get(message.topic) ?? 0;
-
-    if (message.sequence > previous + 1) {
-      broadcastToTopic(message.topic, {
-        type: "RESYNC_REQUIRED",
-        topic: message.topic,
-      });
-    }
-
-    // Bỏ event cũ/trùng. Server vẫn phải hỗ trợ idempotency theo eventId.
-    if (message.sequence <= previous) return;
-
-    lastSequence.set(message.topic, message.sequence);
-    broadcastToTopic(message.topic, {
-      type: "EVENT",
-      topic: message.topic,
-      eventId: message.eventId,
-      sequence: message.sequence,
-      payload: message.payload,
-    });
-  }
-
-  if (message.type === "resync_required") {
-    broadcastToTopic(message.topic, message);
-  }
-}
-
-function forwardCommand(client: ClientState, message: any) {
-  if (socket?.readyState !== WebSocket.OPEN) {
-    client.port.postMessage({
-      type: "COMMAND_REJECTED",
-      requestId: message.requestId,
-      reason: "socket_not_open",
-    });
-    return;
-  }
-
-  if (socket.bufferedAmount > MAX_BUFFERED_BYTES) {
-    client.port.postMessage({
-      type: "COMMAND_REJECTED",
-      requestId: message.requestId,
-      reason: "backpressure",
-    });
-    return;
-  }
-
-  sendToServer({
-    type: "command",
-    requestId: message.requestId,
-    idempotencyKey: message.idempotencyKey,
-    payload: message.payload,
-  });
-}
-
-function sendToServer(message: unknown) {
-  if (socket?.readyState !== WebSocket.OPEN) return false;
-  if (socket.bufferedAmount > MAX_BUFFERED_BYTES) return false;
-  socket.send(JSON.stringify(message));
-  return true;
-}
-
-function broadcastToTopic(topic: string, message: unknown) {
-  for (const client of clients.values()) {
-    if (client.topics.has(topic)) client.port.postMessage(message);
-  }
-}
-
-function broadcast(message: unknown) {
-  for (const client of clients.values()) {
-    client.port.postMessage(message);
-  }
-}
-
-function postStatus(port: MessagePort) {
-  const state =
-    socket?.readyState === WebSocket.OPEN
-      ? "open"
-      : socket?.readyState === WebSocket.CONNECTING
-        ? "connecting"
-        : "closed";
-  port.postMessage({ type: "STATUS", state });
-}
-
-function removeClient(clientId: string) {
-  clients.delete(clientId);
-  syncSubscriptions();
-
-  if (clients.size === 0) {
-    if (reconnectTimer) clearTimeout(reconnectTimer);
-    reconnectTimer = null;
-    socket?.close(1000, "no clients");
-  }
-}
-
-function isAllowedTopic(topic: unknown): topic is string {
-  return typeof topic === "string" && /^[a-z0-9:_-]{1,100}$/i.test(topic);
-}
-
-setInterval(() => {
-  const expiredBefore = Date.now() - CLIENT_LEASE_MS;
-  for (const [clientId, client] of clients) {
-    if (client.lastSeenAt < expiredBefore) removeClient(clientId);
-  }
-}, 60_000);
+import { connectPort } from './connection-manager';
+const scope = self as unknown as SharedWorkerGlobalScope;
+scope.onconnect = (event: MessageEvent) => connectPort(event.ports[0]);
 ```
 
-Đây vẫn là skeleton, không phải thư viện drop-in. Production code cần schema validation chặt hơn cho cả hai chiều, giới hạn payload, logging đã redact, test protocol compatibility và policy cụ thể cho từng close code.
+Phần quản lý connection đã tách vào <SourceRef project="shared-worker-websocket" file="src/connection-manager.ts">connection-manager.ts</SourceRef>, không trải hàng trăm dòng trong bài:
+
+| Trách nhiệm | Mở đúng vùng code |
+| --- | --- |
+| Gắn mỗi port với một logical client | <SourceRef project="shared-worker-websocket" file="src/connection-manager.ts" region="clients">connectPort</SourceRef> |
+| Chỉ mở một socket/ticket attempt trong worker | <SourceRef project="shared-worker-websocket" file="src/connection-manager.ts" region="connect">ensureSocket/openSocket</SourceRef> |
+| Bỏ response thuộc auth generation cũ | <SourceRef project="shared-worker-websocket" file="src/connection-manager.ts" region="auth">resetAuthentication</SourceRef> |
+| Backoff và jitter | <SourceRef project="shared-worker-websocket" file="src/connection-manager.ts" region="reconnect">scheduleReconnect</SourceRef> |
+| Hợp subscription của các tab | <SourceRef project="shared-worker-websocket" file="src/connection-manager.ts" region="subscriptions">syncSubscriptions</SourceRef> |
+| Dedupe sequence, báo gap và route event | <SourceRef project="shared-worker-websocket" file="src/connection-manager.ts" region="events">handleServerMessage</SourceRef> |
+| Reject command khi offline/backpressure | <SourceRef project="shared-worker-websocket" file="src/connection-manager.ts" region="commands">forwardCommand</SourceRef> |
+
+Module này có một instance trong mỗi worker. SharedWorker dùng chung instance giữa các tab; fallback dedicated worker dùng instance riêng cho từng tab, nên **không còn bảo đảm một physical socket cho nhiều tab**.
+
+
+Lab có server và UI để chạy thử, nhưng connection manager vẫn không phải thư viện production drop-in. Production code cần schema validation chặt hơn cho cả hai chiều, giới hạn payload, logging đã redact, test protocol compatibility và policy cụ thể cho từng close code.
 
 ---
 
@@ -930,14 +533,10 @@ Không lưu `lastSequence` chỉ trong SharedWorker nếu mất nó gây sai bus
 SharedWorker đã có mặt trên các browser hiện đại, nhưng trong năm 2026 vẫn nên coi đây là feature mới đạt baseline; browser cũ, embedded WebView hoặc policy môi trường có thể khác. Luôn feature-detect:
 
 ```ts
-export function createRealtimeClient() {
-  if ("SharedWorker" in window) {
-    return new SharedRealtimeClient();
-  }
-
-  return new PerTabWebSocketClient();
-}
+const supported = typeof SharedWorker !== 'undefined';
 ```
+
+<SourceRef project="shared-worker-websocket" file="src/realtime-client.ts" region="transport">Client của lab</SourceRef> dùng feature detection và bắt lỗi constructor để chọn transport. <SourceRef project="shared-worker-websocket" file="src/realtime.dedicated-worker.ts">Dedicated worker fallback</SourceRef> tái sử dụng connection manager nhưng không share instance giữa tabs. Mở hai tab với `?mode=dedicated` và xem `/api/demo/metrics` để thấy số connections tăng thành hai. Lỗi load script xảy ra bất đồng bộ vẫn cần error handling/policy riêng; không coi constructor thành công là worker chắc chắn đã sẵn sàng.
 
 Fallback ladder hợp lý:
 
@@ -1030,6 +629,15 @@ Không dùng `clientId`, `eventId` hoặc topic động làm Prometheus label n�
 ---
 
 ### 16. Test plan cho nhiều tabs và failure modes
+
+Kiểm thử runnable lab từ **root repository tài liệu**:
+
+```bash
+npx playwright install chromium
+npm run examples:labs:test
+```
+
+Lệnh chạy cả lab SharedWorker và Vite trong thư mục tạm. Với SharedWorker, nó kiểm tra nhiều tab/một socket, routing theo topic, snapshot cho tab mở muộn, unsubscribe, reconnect, cleanup, fallback mỗi tab một socket, idempotency và ticket dùng một lần. Những mục production rộng hơn bên dưới vẫn cần test riêng theo hệ thống thật.
 
 #### Functional
 

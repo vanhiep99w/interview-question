@@ -80,6 +80,13 @@ Một snapshot có thể chứa cả host và remote, mỗi app có `package.jso
 
 Kiểm tra ví dụ này riêng bằng `npm run examples:federation:test` từ root repository. Đây là kiểm thử opt-in: cài/build hai app trong thư mục tạm và kiểm tra chúng trong browser; `npm run test:source` chỉ kiểm tra website, reference và viewer, không tự cài dependencies của các app mẫu.
 
+### Lab browser đơn app
+
+- `frontend-build-lab`: Vite + React/TypeScript, static/dynamic import, build manifest và tree shaking.
+- `shared-worker-websocket`: UI nhiều tab, SharedWorker, dedicated-worker fallback và backend WebSocket local; authentication trong backend là demo, không dùng cho production.
+
+Chạy `npm run examples:labs:test` từ root repository để cài/build các lab trong thư mục tạm, kiểm tra browser ở dev/preview, lazy request/HMR, nhiều tab dùng chung socket, fallback và reconnect. Các snippet nhỏ vẫn nên giữ inline cạnh giải thích; chỉ reference implementation/config đầy đủ hoặc vùng code cần đối chiếu.
+
 ## Named regions
 
 Dùng comment trong file JS/TS/TSX:

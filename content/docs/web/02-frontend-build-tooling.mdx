@@ -100,35 +100,44 @@ Với project khác, script có thể là `next build`, `rsbuild build`, `webpac
 
 ### 3.1. Các file của ví dụ và nơi ứng dụng bắt đầu
 
-Ví dụ này dùng **Vite + React + TypeScript**. Trước khi xem code, hãy xác định vai trò của từng file:
+Ví dụ dùng **Vite + React + TypeScript**, có source chạy được trong repository:
+
+<SourceRef project="frontend-build-lab" file="src/App.tsx" variant="button">Mở source đầy đủ · Frontend build lab</SourceRef>
 
 ```text
-index.html           ← trang HTML được mở trong browser
+index.html           ← HTML entry của Vite
 src/
-  main.tsx           ← file khởi động phần JavaScript/React
-  math.ts            ← cung cấp các hàm tính toán
-  admin.ts           ← cung cấp chức năng chỉ tải khi cần
-  styles.css         ← stylesheet của giao diện
+  main.tsx           ← khởi động React, render App
+  App.tsx            ← UI, static import math và dynamic import admin
+  math.ts            ← các hàm tính toán
+  admin.ts           ← chức năng tải khi bấm nút
+  styles.css         ← stylesheet
 ```
 
-**Ứng dụng không bắt đầu chạy từ `math.ts`.** Browser nhận trang HTML; trang này chỉ ra file nào khởi động phần JavaScript.
+Cách chạy và quan sát output ở phần 11. Các đoạn ngắn dưới đây vẫn giữ inline để đọc cùng giải thích; mở drawer khi cần toàn bộ config/file.
 
-Phần liên quan trong **`index.html`**:
+Phần quan trọng của <SourceRef project="frontend-build-lab" file="index.html">index.html</SourceRef>:
 
 ```html
 <div id="root"></div>
-
 <script type="module" src="/src/main.tsx"></script>
 ```
 
-Hai dòng này làm hai việc khác nhau:
+`div` là chỗ để React render. `script` chỉ ra file khởi động JavaScript; browser không tự hiểu TSX, Vite phải transform trước khi phục vụ hoặc build.
 
-- `div` có ID `root` là chỗ để React đưa giao diện vào.
-- `script` chỉ ra rằng phần JavaScript bắt đầu từ `src/main.tsx`.
+<SourceRef project="frontend-build-lab" file="src/main.tsx">main.tsx</SourceRef> khởi tạo React và render component:
 
-Đây là source được phục vụ qua Vite. Browser không trực tiếp hiểu TypeScript/JSX: trong development, Vite chuyển source thành JavaScript trước khi gửi cho browser. Khi build production, HTML được xử lý để tham chiếu các JavaScript files đầu ra, thay vì yêu cầu người dùng tải file TSX gốc.
+```tsx
+import { createRoot } from 'react-dom/client';
+import App from './App';
+import './styles.css';
 
-Tiếp theo, **`src/math.ts`** cung cấp hai hàm cho file khác sử dụng:
+const element = document.getElementById('root');
+if (!element) throw new Error('Missing #root');
+createRoot(element).render(<App />);
+```
+
+Trong <SourceRef project="frontend-build-lab" file="src/math.ts">math.ts</SourceRef>:
 
 ```ts
 export function sum(a: number, b: number): number {
@@ -140,31 +149,18 @@ export function unusedMessage(): string {
 }
 ```
 
-`export` nghĩa là **cho phép module khác import hàm này**. Nó không tự gọi hàm, cũng không biến `math.ts` thành file khởi động ứng dụng.
+`export` cho module khác import hàm, không tự chạy hàm và không biến `math.ts` thành entry. `App.tsx` chỉ import `sum`, rồi hiển thị **Kết quả: 5**.
 
-Trong **`src/main.tsx`**, ứng dụng lấy hàm `sum`, tạo giao diện và đăng ký hành động khi bấm nút:
+<SourceRef project="frontend-build-lab" file="src/App.tsx" region="lazy-import">Hàm xử lý nút trong App</SourceRef> dùng dynamic import:
 
 ```tsx
-import { createRoot } from 'react-dom/client';
-import { sum } from './math'; // Chỉ lấy sum, không lấy unusedMessage.
-import './styles.css';
-
-// Hàm này chỉ được gọi khi người dùng bấm nút.
 async function openAdmin() {
   const { getAdminMessage } = await import('./admin');
-  console.log(getAdminMessage());
+  setMessage(getAdminMessage());
 }
-
-// Tìm chỗ để React hiển thị giao diện trong index.html.
-const root = document.getElementById('root');
-if (!root) throw new Error('Missing root element');
-
-createRoot(root).render(
-  <button onClick={openAdmin}>Kết quả: {sum(2, 3)}</button>,
-);
 ```
 
-**`src/admin.ts`** cung cấp hàm được tải khi bấm nút:
+<SourceRef project="frontend-build-lab" file="src/admin.ts">admin.ts</SourceRef> vẫn rất nhỏ:
 
 ```ts
 export function getAdminMessage(): string {
@@ -172,26 +168,7 @@ export function getAdminMessage(): string {
 }
 ```
 
-`styles.css` là stylesheet được import để định dạng giao diện; có thể để trống trong ví dụ tối giản này.
-
-Luồng chạy có thể đọc theo từng bước:
-
-1. Browser nhận `index.html` và thấy script tham chiếu `src/main.tsx`.
-2. Vite xử lý source cùng các import cần thiết và phục vụ JavaScript để browser thực thi.
-3. Code trong `main.tsx` sử dụng `sum(2, 3)` và React hiển thị nút có chữ **“Kết quả: 5”**.
-4. Khi người dùng bấm nút, `openAdmin()` được gọi. Lúc này code mới yêu cầu tải module `admin`, rồi ghi thông báo vào console.
-
-Có thể hình dung mối quan hệ giữa các file như sau:
-
-```text
-index.html
-    └── script tham chiếu src/main.tsx
-            ├── import sum từ math.ts
-            ├── import styles.css
-            └── import admin.ts khi người dùng bấm nút
-```
-
-**Tóm lại:** `src/main.tsx` khởi động phần React và sử dụng hàm `sum` từ `src/math.ts`. `math.ts` cung cấp hai hàm, nhưng chỉ `sum` được dùng. Hàm `unusedMessage` không được sử dụng; việc bundler có thể bỏ nó khỏi output sẽ được giải thích ở phần tree shaking.
+Luồng: browser nhận HTML → Vite xử lý entry/imports → main render App → App dùng `sum` → khi bấm nút mới yêu cầu module admin và hiển thị thông báo. Source `unusedMessage` vẫn tồn tại, nhưng bundler có thể loại nó khỏi runtime output nếu an toàn.
 
 ### 3.2. Entry: file được chọn làm điểm bắt đầu
 
@@ -203,7 +180,7 @@ Với ví dụ Vite ở trên, cần phân biệt hai cách nói:
 |---|---|---|
 | **HTML entry của Vite** | `index.html` | Input HTML mà Vite xử lý, chứa tham chiếu đến script của ứng dụng |
 | **JavaScript entry của ứng dụng** | `src/main.tsx` | File khởi động phần code React, được HTML tham chiếu |
-| **Module được import** | `src/math.ts` | File cung cấp hàm cho `main.tsx`, không phải entry của ví dụ |
+| **Module được import** | `src/math.ts` | File cung cấp hàm cho `App.tsx`, không phải entry của ví dụ |
 
 **Tên `main.tsx` không tự có tính chất đặc biệt.** Nếu đổi thành `src/start.tsx` và sửa script trong HTML cho đúng, file đó vẫn có thể khởi động ứng dụng. Điều quyết định là tham chiếu/cấu hình, không phải tên file hay số lượng `export`.
 
@@ -224,7 +201,7 @@ Sau khi có điểm bắt đầu, công cụ gặp dòng:
 import { sum } from './math';
 ```
 
-Nó cần xác định **`./math` là file nào**. Trong ví dụ, đó là `src/math.ts` vì đường dẫn được tính từ file `src/main.tsx`.
+Nó cần xác định **`./math` là file nào**. Trong ví dụ, đó là `src/math.ts` vì đường dẫn được tính từ file `src/App.tsx` đang import nó.
 
 Quá trình tìm đúng file/module cho một import gọi là **module resolution**. Có thể hiểu ngắn gọn là **“tìm địa chỉ thật của thứ đang được import”**.
 
@@ -290,9 +267,10 @@ Sau khi xác định điểm bắt đầu, bundler đọc các import để bi�
 index.html
 └── src/main.tsx
     ├── react-dom/client
-    ├── math.ts
     ├── styles.css
-    └── import('./admin')     ← module được yêu cầu tải khi bấm nút
+    └── App.tsx
+        ├── math.ts
+        └── import('./admin') ← module được yêu cầu tải khi bấm nút
 ```
 
 Nếu `math.ts` còn import một file khác, bundler tiếp tục đi theo import đó. Tập hợp những file/module cùng quan hệ phụ thuộc này gọi là **dependency graph — sơ đồ phụ thuộc**.
@@ -1189,82 +1167,45 @@ Không cần chạy nhiều bundlers cho cùng một output chỉ vì chúng đ�
 
 ## 11. Bài thực hành: quan sát pipeline bằng Vite
 
-### 11.1. Tạo project riêng để học
+### 11.1. Chạy project mẫu có sẵn
 
-Thực hiện trong một thư mục mới, không cài thêm toàn bộ tools vào repository đang làm việc:
+Từ thư mục gốc repository tài liệu, dùng Node.js **22.12+** và npm:
 
 ```bash
-npm create vite@latest fe-build-lab -- --template react-ts
-cd fe-build-lab
+cd examples/frontend-build-lab
 npm install
 npm ls vite @vitejs/plugin-react typescript
+npm run dev
 ```
 
-Lệnh scaffold dùng template tại thời điểm chạy; đọc versions vừa cài và engine requirements. Nếu major version khác Vite 8, đối chiếu lại phần kiến trúc với docs tương ứng.
+<SourceRef project="frontend-build-lab" file="package.json">package.json</SourceRef> chọn Vite 8, React plugin 6 và các scripts đầy đủ. Không cần scaffold bằng `latest` rồi tự ráp source từ nhiều phần của bài. Nếu chỉ đọc website, copy các file từ drawer vào một thư mục mới theo đúng cấu trúc; không cài tất cả tools minh họa vào repository tài liệu.
 
-Template React/TypeScript thường có project references. Có thể tổ chức scripts theo cấu trúc đó:
+| File | Vai trò |
+| --- | --- |
+| <SourceRef project="frontend-build-lab" file="package.json">package.json</SourceRef> | Dependencies và quality gates |
+| <SourceRef project="frontend-build-lab" file="tsconfig.json">tsconfig.json</SourceRef> | Kiểm tra TS/TSX; lab dùng một tsconfig, không có project references |
+| <SourceRef project="frontend-build-lab" file="vite.config.ts">vite.config.ts</SourceRef> | React plugin, tạo build manifest, không publish source maps trong lab này |
+| <SourceRef project="frontend-build-lab" file="index.html">index.html</SourceRef>, <SourceRef project="frontend-build-lab" file="src/main.tsx">main.tsx</SourceRef> | HTML entry và khởi tạo React |
+| <SourceRef project="frontend-build-lab" file="src/App.tsx">App.tsx</SourceRef> | State, nút tải admin và static import math |
+
+Phần scripts đáng đọc ngay:
 
 ```json
 {
-  "scripts": {
-    "dev": "vite",
-    "typecheck": "tsc -b --pretty false",
-    "build": "npm run typecheck && vite build",
-    "preview": "vite preview"
-  }
+  "typecheck": "tsc --noEmit",
+  "build": "npm run typecheck && vite build"
 }
 ```
 
-Đây là phần `scripts` cần chỉnh, không phải yêu cầu thay toàn bộ `package.json`. Nếu cấu trúc template thay đổi, dùng lệnh checker phù hợp với tsconfig được tạo ra.
+Đây là hai script trong file đầy đủ. Nếu áp dụng vào template có project references, có thể phải dùng `tsc -b`; đừng copy checker của lab sang một cấu trúc tsconfig khác mà không kiểm tra.
 
-### 11.2. Tạo source để quan sát tree shaking và lazy loading
+### 11.2. Đối chiếu source trước khi build
 
-Tạo `src/math.ts`:
+- <SourceRef project="frontend-build-lab" file="src/math.ts">math.ts</SourceRef> có `sum` và `unusedMessage`; chỉ `sum` được sử dụng.
+- <SourceRef project="frontend-build-lab" file="src/admin.ts">admin.ts</SourceRef> được tải từ <SourceRef project="frontend-build-lab" file="src/App.tsx" region="lazy-import">dynamic import trong App</SourceRef>, không phải static import lúc khởi động.
+- Không thêm side effect vào `math.ts` trong thí nghiệm, để việc bỏ export `UNUSED_MATH_SENTINEL` dễ quan sát.
 
-```ts
-export function sum(a: number, b: number): number {
-  return a + b;
-}
-
-export function unusedMessage(): string {
-  return 'UNUSED_MATH_SENTINEL';
-}
-```
-
-Tạo `src/admin.ts`:
-
-```ts
-export function getAdminMessage(): string {
-  return 'Admin module đã được tải';
-}
-```
-
-Thay nội dung `src/App.tsx` trong project lab, giữ entry `src/main.tsx` của template:
-
-```tsx
-import { useState } from 'react';
-import { sum } from './math';
-
-export default function App() {
-  const [message, setMessage] = useState<string | null>(null);
-
-  async function openAdmin() {
-    const { getAdminMessage } = await import('./admin');
-    setMessage(getAdminMessage());
-  }
-
-  return (
-    <main>
-      <h1>Frontend build lab</h1>
-      <p>Kết quả: {sum(2, 3)}</p>
-      <button onClick={openAdmin}>Tải admin module</button>
-      {message && <p>{message}</p>}
-    </main>
-  );
-}
-```
-
-Không thêm side effects vào `math.ts` trong thí nghiệm này, để việc loại export không sử dụng dễ quan sát.
+Các hàm ngắn đã giữ inline ở phần 3; không cần lặp lại toàn bộ component ở đây. Source trong drawer và source chạy local là cùng một bộ file.
 
 ### 11.3. Quan sát development
 
@@ -1282,9 +1223,12 @@ Chạy `npm run dev`, mở Network tab rồi reload:
 ```bash
 npm run build
 find dist -type f
-grep -R 'UNUSED_MATH_SENTINEL' dist/assets
+cat dist/.vite/manifest.json
+grep -R 'UNUSED_MATH_SENTINEL' dist/assets --include='*.js'
 npm run preview
 ```
+
+Build manifest được bật trong <SourceRef project="frontend-build-lab" file="vite.config.ts">config của lab</SourceRef>; đối chiếu `index.html`, entry assets và dynamic entry `admin` thay vì đoán tên hash. Manifest là file phục vụ đối chiếu/build tooling, không phải module ứng dụng cần tải để render.
 
 Lệnh `grep` **không tìm thấy** chuỗi là kết quả mong đợi trong ví dụ này; exit code `1` nghĩa là không có match, không phải Vite build lỗi. Nếu bật source maps chứa source gốc, tìm cả source map có thể thấy chuỗi dù runtime bundle đã được tree-shake.
 
@@ -1321,6 +1265,8 @@ Trong pipeline lab:
 - Checker báo lỗi vì hàm khai báo trả về `number` nhưng thực tế trả `string`.
 - Gọi Vite trực tiếp có thể vẫn tạo JavaScript vì type annotation được bỏ đi.
 - Script `build` đã ghép checker với Vite sẽ dừng khi checker thất bại.
+
+Để kiểm tra tự động lab Vite và SharedWorker, chạy `npm run examples:labs:test` từ root repository tài liệu; script cài/build trong thư mục tạm và quan sát request thật bằng browser.
 
 Sau thí nghiệm, khôi phục `return a + b`. Bài học là **quality gates nằm trong pipeline được cấu hình**, không phải tự động xuất hiện chỉ vì source là TypeScript.
 
