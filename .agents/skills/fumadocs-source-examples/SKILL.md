@@ -25,7 +25,7 @@ Inspect `examples/registry.json` and the target article. For implementation deta
 
 1. **Find or create the example.** Store runnable files in `examples/<project>/<snapshot>/`. Provide all dependencies/config/files needed to run it; do not leave unexplained `...` placeholders in runnable source. State the working directory and run commands in the article.
 2. **Separate stages.** Give materially different tutorial states their own independent snapshots, such as `basic` and `async-bootstrap`. Pin references to the appropriate snapshot; never silently replace earlier examples with the final state.
-3. **Register source.** Update `examples/registry.json` with the project `id`, `title`, `defaultSnapshot` and snapshot entries containing `id`, `title`, `root`, `defaultFile`, `files`. Use stable IDs and an explicit file allowlist. Never publish secrets, `.env`, personal files, dependencies or build output.
+3. **Register source.** Update `examples/registry.json` with the project `id`, `title`, `defaultSnapshot` and snapshot entries containing `id`, `title`, `root`, `defaultFile`, `files`. Use stable IDs and an explicit file allowlist. Never publish secrets, `.env`, personal files, dependencies or unreviewed build output. For intentional output examples, follow the build-capture rules below.
 4. **Mark meaningful regions.** Prefer stable named regions over line numbers for sections likely to move. Use unique names within a file; do not nest regions. For JS/TS/TSX, use the exact markers below. For other file formats, use whole-file references or `lines` unless the generator supports suitable valid markers.
 5. **Write references.** Use static string props in MDX so build-time validation can check them. No component import is needed in this repository. Add a clearly labelled whole-project reference near the example's introduction, then focused file/region references where they are discussed.
 6. **Verify.** Run the checks below. Report the article and example paths and what was actually verified.
@@ -72,7 +72,16 @@ Markers remain in the real source but are removed from display and copied code. 
 - Preserve the compact viewer styling. Do not add a large header, inline full-code dumps, editors or code execution merely to include a new example.
 - Use the same `project`/`snapshot`/`file`/`region` identifiers wherever the same source is discussed. Use the viewer's Copy link when a shareable URL is needed; do not link readers to local absolute filesystem paths.
 - Do not edit or commit generated `public/source-examples/` assets. Modify source/registry and regenerate them.
-- Check supported extensions before promising a new language: the current generator supports TSX, TS, JS/CJS, JSON, HTML and CSS. Extend both its language list and extension map only if the example needs it, then test the generated output.
+- Check supported extensions before promising a new language: the current generator supports TSX, TS, JS/CJS/MJS, Vue SFC, JSON (including `.map`), plain `.txt`, HTML and CSS. Extend both its language list and extension map only if the example needs it, then test the generated output.
+
+## Show generated output when it helps explain the build
+
+- Read the authoring guide's build-capture section. Keep output in a separately labelled snapshot, not mixed into a runnable source snapshot.
+- For the existing Webpack example, run `npm run examples:webpack:build` to create reviewed captures from real temporary builds, then `npm run source:build`. Do not fabricate emitted code or regenerate captures automatically at every site build.
+- Reference real artifacts with stable aliases, e.g. `snapshot="output-async-bootstrap" file="dist/main.js"`. In registry `files`, use `{ "path": "dist/main.js", "source": "artifacts/<actual-hashed-name>.js", "displayPath": "dist/<actual-hashed-name>.js" }`; keep the actual generated filename visible.
+- Keep small raw artifacts byte-for-byte. Label readable runtime extractions and derived stats/map summaries explicitly; never pretend they are separate emitted files. Record transformations, including reconciling intermediate map hashes to final filenames.
+- List large vendor bundles/maps in the build report instead of publishing megabytes of highlighted code. State when a capture is only a selected subset, not deployable output.
+- Set snapshot `capture.sourceSnapshot` and `capture.report`; retain source checksums in the report. Refresh intentionally when the source changes; do not bypass stale-capture validation.
 
 ## Verification checklist
 

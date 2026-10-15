@@ -13,7 +13,7 @@ Ví dụ xuyên suốt là ứng dụng React có nút đếm. Bài viết giả
 
 Bấm **Source code ở góc dưới bên phải** để mở drawer, hoặc bấm tên file trong bài để tới đúng đoạn code. Bạn có thể đọc và cuộn bài bên cạnh source, chuyển file, chọn phiên bản, copy file hoặc copy link. Bấm **Thu source**, **×** hoặc **Esc** để thu drawer; mở lại sẽ giữ file vừa xem.
 
-**Chưa dùng Vue, router hay Module Federation.** Các phần đó nằm trong [Webpack nâng cao: React shell và Vue remote](/web/04-webpack-react-shell-vue-remote).
+**Chưa dùng Vue, router hay Module Federation.** Các phần đó nằm trong [Module Federation: microfrontend React và Vue](/web/04-module-federation-react-vue-microfrontend).
 
 ## 1. Nhìn kết quả trước khi đọc config
 
@@ -117,7 +117,7 @@ Khi người dùng bấm nút, **React cập nhật state và DOM**. Webpack kh�
 <script defer src="/main.abc123.js"></script>
 ```
 
-`defer` giúp script chạy sau khi HTML đã parse xong. Plugin tạo thẻ script; **code gọi React mới render giao diện**.
+`defer` giúp script chạy sau khi HTML đã parse xong. Plugin tạo thẻ script; **code gọi React mới render giao diện**. Đối chiếu ngay với <SourceRef project="webpack-react-demo" snapshot="output-basic" file="dist/index.html">HTML thật sau build</SourceRef>: tên script đã có hash, không còn là tên minh họa `abc123`.
 
 Không thêm `<script src="./src/main.tsx">`: browser không tự hiểu TypeScript và TSX.
 
@@ -245,7 +245,7 @@ TRONG BROWSER
 HTML → tải bundle → main chạy → React render App
 ```
 
-**Webpack CLI không chạy trong browser.** Bundle có thể chứa code hỗ trợ do Webpack sinh ra, gọi là **Webpack runtime**; đó không phải toàn bộ công cụ build.
+**Webpack CLI không chạy trong browser.** Bundle có thể chứa code hỗ trợ do Webpack sinh ra, gọi là **Webpack runtime**; đó không phải toàn bộ công cụ build. Xem <SourceRef project="webpack-react-demo" snapshot="output-basic" file="runtime/module-cache.js" region="runtime">runtime quản lý module và cache</SourceRef>: đoạn này do Webpack sinh, không phải code bạn phải tự viết trong `main.tsx`.
 
 - `npm run dev`: dev middleware thường phục vụ output trong bộ nhớ. Không thấy `dist` đổi không có nghĩa app chưa build.
 - `npm run build`: kiểm tra kiểu, sau đó build production và ghi file vào `dist`. Không tự khởi động production server.
@@ -271,6 +271,35 @@ CSS + style code ───┘
 Đây là hình dung cho cấu hình hiện tại, không phải mọi project Webpack.
 
 File `.js.map` hỗ trợ debug; `.LICENSE.txt`, nếu có, chứa thông báo license. Hai loại này không phải script cần chèn vào HTML.
+
+### 6.1. Mở output thật để đối chiếu
+
+<SourceRef project="webpack-react-demo" snapshot="output-basic" file="build-report.json" variant="button">Mở output đã build · React cơ bản</SourceRef>
+
+Đây là kết quả **build production thật** từ source ở bài, không phải output viết tay. Trong drawer, chọn phiên bản **Build output · React cơ bản** hoặc bấm trực tiếp các file bên dưới:
+
+| File / báo cáo | Được tạo từ đâu? | Nên nhìn gì? |
+| --- | --- | --- |
+| <SourceRef project="webpack-react-demo" snapshot="output-basic" file="dist/index.html">dist/index.html</SourceRef> | HTML template + HtmlWebpackPlugin + entrypoint | Script trỏ tới `main.<hash>.js`; không tải `App.tsx` |
+| <SourceRef project="webpack-react-demo" snapshot="output-basic" file="build-report.json">build-report.json</SourceRef> | Báo cáo rút từ Webpack stats và các file emit | `entrypoints`, `chunks`, `assets`, kích thước và phiên bản packages |
+| <SourceRef project="webpack-react-demo" snapshot="output-basic" file="source-maps/main.summary.json">main.summary.json</SourceRef> | Tóm tắt source map của bundle | `sources` có cả source ứng dụng và dependencies đã được đóng gói |
+| <SourceRef project="webpack-react-demo" snapshot="output-basic" file="runtime/module-cache.js" region="runtime">runtime/module-cache.js</SourceRef> | Phần runtime dễ đọc lấy từ `sourcesContent` của source map | Webpack ghi nhớ module đã chạy và trả lại exports khi được yêu cầu lần sau |
+
+HTML production có thể được nén thành một dòng và bỏ dấu ngoặc kép không cần thiết quanh giá trị thuộc tính; đó vẫn là HTML hợp lệ.
+
+**Phân biệt file emit với tài liệu giải thích output:** `dist/index.html` là file thật. `build-report.json` và `*.summary.json` là báo cáo phục vụ bài học. `runtime/*.js` là các phần code dễ đọc trích từ source map của bundle; Webpack không emit riêng từng file runtime đó vào `dist`.
+
+Bundle React của bản cơ bản khá lớn và đã minify, nên viewer chỉ liệt kê nó trong `assets`, không nhúng cả bundle và source map hơn 1 MB vào bài. Phần 8 có bundle khởi động nhỏ để mở trực tiếp.
+
+### 6.2. Vì sao từ tám file source lại có các file này?
+
+1. `entry` và các import giúp Webpack tìm đủ modules; ts-loader chuyển TS/TSX, CSS loaders tạo phần code xử lý style.
+2. Webpack tổ chức các modules thành chunks. Bản cơ bản có code khởi động và ứng dụng trong nhóm tải ban đầu.
+3. Webpack sinh runtime, tạo JavaScript đầu ra và tối ưu production. `[contenthash]` giúp đặt tên theo nội dung asset.
+4. HtmlWebpackPlugin dùng template và thông tin entrypoint để tạo HTML có script đúng tên bundle.
+5. Với `devtool: 'source-map'`, build tạo thêm mapping để DevTools đối chiếu code đã tối ưu với source. Mapping không phải code dùng để render UI.
+
+Đây là mô hình đọc pipeline, không phải thứ tự đầy đủ của mọi hook nội bộ. Các plugin có thể tham gia nhiều giai đoạn.
 
 Thử phục vụ output đã build:
 
@@ -336,6 +365,36 @@ index.html
 
 Số chunk phụ thuộc graph và tối ưu. File `327.<hash>.js` mang chunk ID, không phải thiếu source `327.tsx`.
 
+### 8.1. So sánh output trước và sau khi tách bootstrap
+
+<SourceRef project="webpack-react-demo" snapshot="output-async-bootstrap" file="build-report.json" variant="button">Mở output đã build · Async bootstrap</SourceRef>
+
+Trong <SourceRef project="webpack-react-demo" snapshot="output-basic" file="build-report.json">báo cáo bản cơ bản</SourceRef>, code `App` và React nằm trong initial chunk của `main`. Trong <SourceRef project="webpack-react-demo" snapshot="output-async-bootstrap" file="build-report.json">báo cáo bản async</SourceRef>, `main` nhỏ hơn, còn bootstrap và dependencies nằm ở những non-initial chunks. Xem `initial`, `files`, `sourceModules` và `packages` thay vì đoán theo ID số.
+
+| Output | Vai trò trong bản async |
+| --- | --- |
+| <SourceRef project="webpack-react-demo" snapshot="output-async-bootstrap" file="dist/index.html">HTML đầu ra</SourceRef> | Chỉ chèn script cần cho entrypoint; không liệt kê mọi chunk |
+| <SourceRef project="webpack-react-demo" snapshot="output-async-bootstrap" file="dist/main.js">main · JavaScript emit nguyên bản</SourceRef> | Entry rất ngắn nhưng bundle còn có runtime để tải các chunk tiếp theo |
+| <SourceRef project="webpack-react-demo" snapshot="output-async-bootstrap" file="dist/bootstrap.js">bootstrap · JavaScript emit nguyên bản</SourceRef> | Code đã biên dịch/minify, đăng ký module của ứng dụng vào cơ chế chunk loading |
+| <SourceRef project="webpack-react-demo" snapshot="output-async-bootstrap" file="dist/main.js.map">source map của main</SourceRef> | JSON mapping thật, có các phần runtime trong `sourcesContent` |
+| <SourceRef project="webpack-react-demo" snapshot="output-async-bootstrap" file="source-maps/vendors.summary.json">tóm tắt source map dependencies</SourceRef> | Thấy React, React DOM và các dependency nằm trong chunk khác mà không phải mở cả bundle lớn |
+
+`dist/main.js` và `dist/bootstrap.js` ở đây là **alias ổn định để reference**, không phải cấu hình bỏ hash. Thanh tên file trong drawer và báo cáo vẫn ghi tên emit thực tế như `main.<hash>.js`. Các file nhỏ được lưu nguyên byte từ build; đây không phải toàn bộ thư mục `dist` đủ để deploy.
+
+### 8.2. Runtime biết tên file và tải chunk bằng cách nào?
+
+Đừng cố đọc hết bundle minified từ trái sang phải. Mở từng phần runtime dễ đọc dưới đây, rồi đối chiếu với file emit:
+
+1. **Từ chunk ID ra tên file:** <SourceRef project="webpack-react-demo" snapshot="output-async-bootstrap" file="runtime/chunk-filename.js" region="runtime">chunk-filename.js</SourceRef> chứa `__webpack_require__.u`. Runtime kết hợp tên `bootstrap` hoặc ID số, hash và đuôi `.js`. Tên `bootstrap` đến từ magic comment, không phải browser tự đặt.
+2. **Tìm base URL:** <SourceRef project="webpack-react-demo" snapshot="output-async-bootstrap" file="runtime/public-path.js" region="runtime">public-path.js</SourceRef> suy ra nơi chứa script đang chạy, rồi gán base cho `__webpack_require__.p`. Đây là phần code do `publicPath: 'auto'` yêu cầu Webpack tạo.
+3. **Chờ các phần cần thiết:** <SourceRef project="webpack-react-demo" snapshot="output-async-bootstrap" file="runtime/ensure-chunk.js" region="runtime">ensure-chunk.js</SourceRef> gom các Promise tải chunk. Một lần `import('./bootstrap')` có thể cần cả chunk bootstrap lẫn chunk dependencies.
+4. **Ghép URL và tải script:** <SourceRef project="webpack-react-demo" snapshot="output-async-bootstrap" file="runtime/jsonp-chunk-loading.js" region="runtime">jsonp-chunk-loading.js</SourceRef> dùng public path và tên chunk, sau đó gọi <SourceRef project="webpack-react-demo" snapshot="output-async-bootstrap" file="runtime/load-script.js" region="runtime">load-script.js</SourceRef> để tạo thẻ `script` và gắn vào trang.
+5. **Nhận modules và chạy tiếp:** chunk <SourceRef project="webpack-react-demo" snapshot="output-async-bootstrap" file="dist/bootstrap.js">bootstrap emit</SourceRef> đăng ký modules; Promise hoàn tất để code khởi động React tiếp tục chạy.
+
+Các tên `__webpack_require__.u`, `.p`, `.l` giúp đọc runtime của bản build này, không phải API bạn cần gọi trong code ứng dụng. Sau minify, tên biến có thể ngắn hơn.
+
+Các runtime view được lấy từ source map; riêng bảng tên chunk được đồng bộ với hash cuối cùng trong Webpack stats, vì `sourcesContent` có thể còn giữ hash trung gian. Báo cáo ghi rõ các thay thế đó. Trường `file` bên trong source map cũng có thể giữ tên trung gian; để kiểm tra request thật, đối chiếu script trong HTML và `sourceMappingURL` cuối bundle. Các artifact `dist/*` vẫn giữ nguyên byte, không sửa nội dung để minh họa.
+
 ### Vì sao tách rồi mà vẫn tải ngay?
 
 Vì `main` gọi `import('./bootstrap')` ngay khi chạy. **Tách chunk không đồng nghĩa với chờ người dùng tương tác.**
@@ -361,7 +420,7 @@ Sau khi sửa config, nên dừng và chạy lại dev server. Thêm dependency 
 
 Chỉ cần nhớ: **package.json chọn lệnh → config nối pipeline → entry dẫn tới source → loaders chuyển đổi → Webpack tạo output → browser tải output → React render.**
 
-Bước tiếp theo: [React shell và Vue remote](/web/04-webpack-react-shell-vue-remote). Chưa cần học `shared`, CORS hay navigation bridge trước khi hiểu ví dụ này.
+Bước tiếp theo: [Module Federation: microfrontend React và Vue](/web/04-module-federation-react-vue-microfrontend). Chưa cần học `shared`, CORS hay navigation bridge trước khi hiểu ví dụ này.
 
 ## Tài liệu tham khảo
 

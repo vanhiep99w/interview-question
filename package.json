@@ -13,7 +13,9 @@
     "source:build": "node scripts/build-source-examples.mjs",
     "predev": "npm run source:build",
     "prebuild": "npm run source:build",
-    "test:source": "playwright test"
+    "test:source": "playwright test",
+    "examples:webpack:build": "node scripts/capture-webpack-output.mjs",
+    "examples:federation:test": "node scripts/test-module-federation.mjs"
   },
   "dependencies": {
     "@orama/orama": "^3.1.18",

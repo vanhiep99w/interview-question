@@ -40,6 +40,12 @@ test('source build validates references, resolves regions and produces determini
       result = run();
       expect(result.status, `Should reject ${attrs}`).not.toBe(0);
     }
+    await writeFile(doc, '<SourceRef project="webpack-react-demo" />');
+    const sourcePath = path.join(root, 'examples/webpack-react-demo/basic/src/App.tsx');
+    await writeFile(sourcePath, `${await readFile(sourcePath, 'utf8')}\n// Changed after the reviewed capture.\n`);
+    result = run();
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain('Stale captured output');
   } finally {
     await rm(root, { recursive: true, force: true });
   }

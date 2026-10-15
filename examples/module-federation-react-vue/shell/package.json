@@ -1,0 +1,29 @@
+{
+  "name": "federation-shell",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "webpack serve --config webpack.config.cjs --mode development",
+    "check": "tsc --noEmit",
+    "build": "npm run check && webpack --config webpack.config.cjs --mode production",
+    "preview": "node ../scripts/preview.mjs shell"
+  },
+  "dependencies": {
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "react-router-dom": "^6.30.1"
+  },
+  "devDependencies": {
+    "css-loader": "^7.0.0",
+    "html-webpack-plugin": "^5.0.0",
+    "style-loader": "^4.0.0",
+    "ts-loader": "^9.0.0",
+    "typescript": "^5.0.0",
+    "webpack": "^5.0.0",
+    "webpack-cli": "^6.0.0",
+    "webpack-dev-server": "^5.0.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0"
+  }
+}

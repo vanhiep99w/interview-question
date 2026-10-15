@@ -15,6 +15,7 @@ export type SourceManifest = {
 
 export type SourceFile = {
   path: string;
+  displayPath?: string;
   language: string;
   code: string;
   html: string;

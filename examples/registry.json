@@ -1,22 +1,148 @@
 [
   {
     "id": "webpack-react-demo",
-    "title": "Webpack · React + TypeScript",
+    "title": "Webpack \u00b7 React + TypeScript",
     "defaultSnapshot": "basic",
     "snapshots": [
       {
         "id": "basic",
-        "title": "React cơ bản",
+        "title": "React c\u01a1 b\u1ea3n",
         "root": "examples/webpack-react-demo/basic",
         "defaultFile": "webpack.config.cjs",
-        "files": ["package.json", "webpack.config.cjs", "tsconfig.json", "index.html", "src/main.tsx", "src/App.tsx", "src/styles.css", "src/env.d.ts"]
+        "files": [
+          "package.json",
+          "webpack.config.cjs",
+          "tsconfig.json",
+          "index.html",
+          "src/main.tsx",
+          "src/App.tsx",
+          "src/styles.css",
+          "src/env.d.ts"
+        ]
       },
       {
         "id": "async-bootstrap",
-        "title": "Thêm async bootstrap",
+        "title": "Th\u00eam async bootstrap",
         "root": "examples/webpack-react-demo/async-bootstrap",
         "defaultFile": "src/main.tsx",
-        "files": ["package.json", "webpack.config.cjs", "tsconfig.json", "index.html", "src/main.tsx", "src/bootstrap.tsx", "src/App.tsx", "src/styles.css", "src/env.d.ts"]
+        "files": [
+          "package.json",
+          "webpack.config.cjs",
+          "tsconfig.json",
+          "index.html",
+          "src/main.tsx",
+          "src/bootstrap.tsx",
+          "src/App.tsx",
+          "src/styles.css",
+          "src/env.d.ts"
+        ]
+      },
+      {
+        "id": "output-basic",
+        "title": "Build output \u00b7 React c\u01a1 b\u1ea3n",
+        "root": "examples/webpack-react-demo/output/basic",
+        "capture": {
+          "sourceSnapshot": "basic",
+          "report": "build-report.json"
+        },
+        "defaultFile": "build-report.json",
+        "files": [
+          "build-report.json",
+          {
+            "path": "dist/index.html",
+            "source": "artifacts/index.html",
+            "displayPath": "dist/index.html"
+          },
+          "source-maps/main.summary.json",
+          "runtime/module-cache.js"
+        ]
+      },
+      {
+        "id": "output-async-bootstrap",
+        "title": "Build output \u00b7 Async bootstrap",
+        "root": "examples/webpack-react-demo/output/async-bootstrap",
+        "capture": {
+          "sourceSnapshot": "async-bootstrap",
+          "report": "build-report.json"
+        },
+        "defaultFile": "build-report.json",
+        "files": [
+          "build-report.json",
+          {
+            "path": "dist/index.html",
+            "source": "artifacts/index.html",
+            "displayPath": "dist/index.html"
+          },
+          "source-maps/main.summary.json",
+          "runtime/module-cache.js",
+          "runtime/ensure-chunk.js",
+          "runtime/chunk-filename.js",
+          "runtime/load-script.js",
+          "runtime/public-path.js",
+          "runtime/jsonp-chunk-loading.js",
+          {
+            "path": "dist/main.js",
+            "source": "artifacts/main.c3ab4e65c7a90e9407a4.js",
+            "displayPath": "dist/main.c3ab4e65c7a90e9407a4.js"
+          },
+          {
+            "path": "dist/bootstrap.js",
+            "source": "artifacts/bootstrap.86c3b0178aa730fd269a.js",
+            "displayPath": "dist/bootstrap.86c3b0178aa730fd269a.js"
+          },
+          {
+            "path": "dist/main.js.map",
+            "source": "artifacts/main.c3ab4e65c7a90e9407a4.js.map",
+            "displayPath": "dist/main.c3ab4e65c7a90e9407a4.js.map"
+          },
+          {
+            "path": "dist/bootstrap.js.map",
+            "source": "artifacts/bootstrap.86c3b0178aa730fd269a.js.map",
+            "displayPath": "dist/bootstrap.86c3b0178aa730fd269a.js.map"
+          },
+          "source-maps/vendors.summary.json"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "module-federation-react-vue",
+    "title": "Module Federation \u00b7 React + Vue",
+    "defaultSnapshot": "react-vue",
+    "snapshots": [
+      {
+        "id": "react-vue",
+        "title": "React shell + Vue remote",
+        "root": "examples/module-federation-react-vue",
+        "defaultFile": "shell/webpack.config.cjs",
+        "files": [
+          "scripts/dev.mjs",
+          "scripts/preview.mjs",
+          "shell/index.html",
+          "shell/package.json",
+          "shell/src/bootstrap.tsx",
+          "shell/src/env.d.ts",
+          "shell/src/main.tsx",
+          "shell/src/remote.ts",
+          "shell/src/shell/App.tsx",
+          "shell/src/shell/VueHost.tsx",
+          "shell/src/styles.css",
+          "shell/tsconfig.json",
+          "shell/webpack.config.cjs",
+          "vue-sub/index.html",
+          "vue-sub/package.json",
+          "vue-sub/src/CatalogApp.vue",
+          "vue-sub/src/bootstrap.ts",
+          "vue-sub/src/env.d.ts",
+          "vue-sub/src/main.ts",
+          "vue-sub/src/mount.ts",
+          "vue-sub/src/pages/ProductDetails.vue",
+          "vue-sub/src/pages/Products.vue",
+          "vue-sub/src/protocol.ts",
+          "vue-sub/src/router.ts",
+          "vue-sub/tsconfig.json",
+          "vue-sub/webpack.config.cjs"
+        ]
       }
     ]
   }

@@ -1,0 +1,104 @@
+{
+  "kind": "Source map summary — derived report, not the complete .map file",
+  "filename": "446.d36437e58d26a81fb64c.js.map",
+  "version": 3,
+  "file": "446.ba5916b40c38769caade.js",
+  "sourceRoot": "",
+  "sources": [
+    "webpack://webpack-react-demo/./node_modules/css-loader/dist/runtime/api.js",
+    "webpack://webpack-react-demo/./node_modules/css-loader/dist/runtime/sourceMaps.js",
+    "webpack://webpack-react-demo/./node_modules/react-dom/cjs/react-dom-client.production.js",
+    "webpack://webpack-react-demo/./node_modules/react-dom/cjs/react-dom.production.js",
+    "webpack://webpack-react-demo/./node_modules/react-dom/client.js",
+    "webpack://webpack-react-demo/./node_modules/react-dom/index.js",
+    "webpack://webpack-react-demo/./node_modules/react/cjs/react-jsx-runtime.production.js",
+    "webpack://webpack-react-demo/./node_modules/react/cjs/react.production.js",
+    "webpack://webpack-react-demo/./node_modules/react/index.js",
+    "webpack://webpack-react-demo/./node_modules/react/jsx-runtime.js",
+    "webpack://webpack-react-demo/./node_modules/scheduler/cjs/scheduler.production.js",
+    "webpack://webpack-react-demo/./node_modules/scheduler/index.js",
+    "webpack://webpack-react-demo/./node_modules/style-loader/dist/runtime/injectStylesIntoStyleTag.js",
+    "webpack://webpack-react-demo/./node_modules/style-loader/dist/runtime/insertBySelector.js",
+    "webpack://webpack-react-demo/./node_modules/style-loader/dist/runtime/insertStyleElement.js",
+    "webpack://webpack-react-demo/./node_modules/style-loader/dist/runtime/setAttributesWithoutAttributes.js",
+    "webpack://webpack-react-demo/./node_modules/style-loader/dist/runtime/styleDomAPI.js",
+    "webpack://webpack-react-demo/./node_modules/style-loader/dist/runtime/styleTagTransform.js"
+  ],
+  "namesCount": 2451,
+  "mappingsCharacters": 293358,
+  "sourcesContent": [
+    {
+      "source": "webpack://webpack-react-demo/./node_modules/css-loader/dist/runtime/api.js",
+      "characters": 2303
+    },
+    {
+      "source": "webpack://webpack-react-demo/./node_modules/css-loader/dist/runtime/sourceMaps.js",
+      "characters": 505
+    },
+    {
+      "source": "webpack://webpack-react-demo/./node_modules/react-dom/cjs/react-dom-client.production.js",
+      "characters": 625168
+    },
+    {
+      "source": "webpack://webpack-react-demo/./node_modules/react-dom/cjs/react-dom.production.js",
+      "characters": 7326
+    },
+    {
+      "source": "webpack://webpack-react-demo/./node_modules/react-dom/client.js",
+      "characters": 1373
+    },
+    {
+      "source": "webpack://webpack-react-demo/./node_modules/react-dom/index.js",
+      "characters": 1359
+    },
+    {
+      "source": "webpack://webpack-react-demo/./node_modules/react/cjs/react-jsx-runtime.production.js",
+      "characters": 976
+    },
+    {
+      "source": "webpack://webpack-react-demo/./node_modules/react/cjs/react.production.js",
+      "characters": 18040
+    },
+    {
+      "source": "webpack://webpack-react-demo/./node_modules/react/index.js",
+      "characters": 186
+    },
+    {
+      "source": "webpack://webpack-react-demo/./node_modules/react/jsx-runtime.js",
+      "characters": 210
+    },
+    {
+      "source": "webpack://webpack-react-demo/./node_modules/scheduler/cjs/scheduler.production.js",
+      "characters": 10181
+    },
+    {
+      "source": "webpack://webpack-react-demo/./node_modules/scheduler/index.js",
+      "characters": 194
+    },
+    {
+      "source": "webpack://webpack-react-demo/./node_modules/style-loader/dist/runtime/injectStylesIntoStyleTag.js",
+      "characters": 2480
+    },
+    {
+      "source": "webpack://webpack-react-demo/./node_modules/style-loader/dist/runtime/insertBySelector.js",
+      "characters": 1003
+    },
+    {
+      "source": "webpack://webpack-react-demo/./node_modules/style-loader/dist/runtime/insertStyleElement.js",
+      "characters": 285
+    },
+    {
+      "source": "webpack://webpack-react-demo/./node_modules/style-loader/dist/runtime/setAttributesWithoutAttributes.js",
+      "characters": 298
+    },
+    {
+      "source": "webpack://webpack-react-demo/./node_modules/style-loader/dist/runtime/styleDomAPI.js",
+      "characters": 1534
+    },
+    {
+      "source": "webpack://webpack-react-demo/./node_modules/style-loader/dist/runtime/styleTagTransform.js",
+      "characters": 380
+    }
+  ],
+  "note": "The mappings and sourcesContent payloads are not copied into this summary. The original map remains in the local build output."
+}

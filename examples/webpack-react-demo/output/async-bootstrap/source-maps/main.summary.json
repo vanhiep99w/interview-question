@@ -1,0 +1,74 @@
+{
+  "kind": "Source map summary — derived report, not the complete .map file",
+  "filename": "main.c3ab4e65c7a90e9407a4.js.map",
+  "version": 3,
+  "file": "main.aeebf589242f69143b5c.js",
+  "sourceRoot": "",
+  "sources": [
+    "webpack://webpack-react-demo/webpack/bootstrap",
+    "webpack://webpack-react-demo/webpack/runtime/compat get default export",
+    "webpack://webpack-react-demo/webpack/runtime/define property getters",
+    "webpack://webpack-react-demo/webpack/runtime/ensure chunk",
+    "webpack://webpack-react-demo/webpack/runtime/get javascript chunk filename",
+    "webpack://webpack-react-demo/webpack/runtime/global",
+    "webpack://webpack-react-demo/webpack/runtime/hasOwnProperty shorthand",
+    "webpack://webpack-react-demo/webpack/runtime/load script",
+    "webpack://webpack-react-demo/webpack/runtime/publicPath",
+    "webpack://webpack-react-demo/webpack/runtime/jsonp chunk loading",
+    "webpack://webpack-react-demo/webpack/runtime/nonce",
+    "webpack://webpack-react-demo/./src/main.tsx"
+  ],
+  "namesCount": 117,
+  "mappingsCharacters": 3869,
+  "sourcesContent": [
+    {
+      "source": "webpack://webpack-react-demo/webpack/bootstrap",
+      "characters": 724
+    },
+    {
+      "source": "webpack://webpack-react-demo/webpack/runtime/compat get default export",
+      "characters": 269
+    },
+    {
+      "source": "webpack://webpack-react-demo/webpack/runtime/define property getters",
+      "characters": 691
+    },
+    {
+      "source": "webpack://webpack-react-demo/webpack/runtime/ensure chunk",
+      "characters": 263
+    },
+    {
+      "source": "webpack://webpack-react-demo/webpack/runtime/get javascript chunk filename",
+      "characters": 215
+    },
+    {
+      "source": "webpack://webpack-react-demo/webpack/runtime/global",
+      "characters": 221
+    },
+    {
+      "source": "webpack://webpack-react-demo/webpack/runtime/hasOwnProperty shorthand",
+      "characters": 89
+    },
+    {
+      "source": "webpack://webpack-react-demo/webpack/runtime/load script",
+      "characters": 1473
+    },
+    {
+      "source": "webpack://webpack-react-demo/webpack/runtime/publicPath",
+      "characters": 985
+    },
+    {
+      "source": "webpack://webpack-react-demo/webpack/runtime/jsonp chunk loading",
+      "characters": 3071
+    },
+    {
+      "source": "webpack://webpack-react-demo/webpack/runtime/nonce",
+      "characters": 35
+    },
+    {
+      "source": "webpack://webpack-react-demo/./src/main.tsx",
+      "characters": 91
+    }
+  ],
+  "note": "The mappings and sourcesContent payloads are not copied into this summary. The original map remains in the local build output."
+}

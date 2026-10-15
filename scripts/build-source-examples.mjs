@@ -9,9 +9,9 @@ const output = path.join(root, 'public/source-examples');
 const registry = JSON.parse(await readFile(path.join(root, 'examples/registry.json'), 'utf8'));
 const highlighter = await createHighlighter({
   themes: ['github-light-high-contrast', 'github-dark-high-contrast'],
-  langs: ['tsx', 'typescript', 'javascript', 'json', 'html', 'css'],
+  langs: ['tsx', 'typescript', 'javascript', 'json', 'html', 'css', 'vue'],
 });
-const languages = { '.tsx': 'tsx', '.ts': 'typescript', '.cjs': 'javascript', '.js': 'javascript', '.json': 'json', '.html': 'html', '.css': 'css' };
+const languages = { '.tsx': 'tsx', '.ts': 'typescript', '.cjs': 'javascript', '.mjs': 'javascript', '.js': 'javascript', '.json': 'json', '.map': 'json', '.txt': 'text', '.html': 'html', '.css': 'css', '.vue': 'vue' };
 const manifests = [];
 const snapshots = new Map();
 const artifacts = new Map();
@@ -53,8 +53,29 @@ try {
       const files = [];
       const base = path.resolve(root, snapshot.root);
       assert(base.startsWith(path.join(root, 'examples/')), 'Source must live inside examples/');
-      for (const file of snapshot.files) {
-        const absolute = path.resolve(base, file);
+      if (snapshot.capture) {
+        const source = project.snapshots.find((item) => item.id === snapshot.capture.sourceSnapshot);
+        assert(source && !source.capture, `Invalid capture source for ${snapshot.id}`);
+        const reportPath = path.resolve(base, snapshot.capture.report);
+        assert(reportPath.startsWith(`${base}${path.sep}`), `Invalid capture report path: ${snapshot.id}`);
+        const report = JSON.parse(await readFile(reportPath, 'utf8'));
+        assert(report.sourceSnapshot === source.id && report.sourceFiles.length === source.files.length, `Stale capture report: ${snapshot.id}`);
+        for (const entry of source.files) {
+          const descriptor = typeof entry === 'string' ? { path: entry, source: entry } : entry;
+          const sourceBase = path.resolve(root, source.root);
+          const sourcePath = path.resolve(sourceBase, descriptor.source ?? descriptor.path);
+          assert(sourcePath.startsWith(`${sourceBase}${path.sep}`), `Invalid capture source path: ${descriptor.path}`);
+          const hash = createHash('sha256').update(await readFile(sourcePath)).digest('hex');
+          assert(report.sourceFiles.some((file) => file.file === (descriptor.source ?? descriptor.path) && file.sha256 === hash), `Stale captured output ${snapshot.id}: ${descriptor.path} changed. Refresh the reviewed build capture.`);
+        }
+      }
+      for (const entry of snapshot.files) {
+        // A stable reference path may point to a captured artifact with a content hash.
+        const descriptor = typeof entry === 'string' ? { path: entry, source: entry } : entry;
+        const file = descriptor.path;
+        assert(typeof file === 'string' && file.length > 0, 'Missing source reference path');
+        assert(!file.startsWith('/') && !file.split('/').includes('..'), `Invalid reference path: ${file}`);
+        const absolute = path.resolve(base, descriptor.source ?? file);
         assert(absolute.startsWith(`${base}${path.sep}`), `Invalid source path: ${file}`);
         assert(!files.some((item) => item.path === file), `Duplicate file: ${file}`);
         const { code, regions } = extractRegions(await readFile(absolute, 'utf8'), `${project.id}/${snapshot.id}/${file}`);
@@ -67,7 +88,7 @@ try {
             line(node, line) { node.properties['data-line'] = line; },
           }],
         });
-        files.push({ path: file, language, code, html, regions });
+        files.push({ path: file, language, code, html, regions, ...(descriptor.displayPath ? { displayPath: descriptor.displayPath } : {}) });
       }
       assert(files.some((file) => file.path === snapshot.defaultFile), `Missing default file: ${snapshot.defaultFile}`);
       const data = { project: project.id, snapshot: snapshot.id, defaultFile: snapshot.defaultFile, files };

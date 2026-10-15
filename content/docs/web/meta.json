@@ -5,6 +5,6 @@
     "02-frontend-build-tooling",
     "02-shared-worker-websocket",
     "03-webpack-tu-source-den-trinh-duyet",
-    "04-webpack-react-shell-vue-remote"
+    "04-module-federation-react-vue-microfrontend"
   ]
 }

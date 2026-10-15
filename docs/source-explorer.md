@@ -41,7 +41,7 @@ Bài có `SourceRef` sẽ tự có nút **Source code** ở góc dưới bên ph
 
 1. Tạo source chạy được trong `examples/<project>/<snapshot>/`.
 2. Thêm project/snapshot vào `examples/registry.json`.
-3. Khai báo **tường minh** `files` được phép publish. Không thêm `.env`, secrets, `node_modules`, build output hoặc file cá nhân.
+3. Khai báo **tường minh** `files` được phép publish. Không thêm `.env`, secrets, `node_modules`, output chưa được duyệt hoặc file cá nhân. Chỉ publish một số artifact nhỏ đã kiểm tra khi bài cần phân tích output; xem phần build capture bên dưới.
 4. Chạy `npm run source:build`.
 5. Thêm `SourceRef` vào MDX và chạy `npm run build`.
 
@@ -64,9 +64,21 @@ Một entry registry:
 }
 ```
 
-Mỗi snapshot nên là một project độc lập chạy được. Ví dụ `basic` và `async-bootstrap` giữ source đầy đủ riêng biệt để reference không vô tình mở trạng thái khác với nội dung bài.
+Mỗi snapshot **source** nên là một project độc lập chạy được. Ví dụ `basic` và `async-bootstrap` giữ source đầy đủ riêng biệt để reference không vô tình mở trạng thái khác với nội dung bài. Snapshot **output** là capture để đọc/đối chiếu, không phải project hoặc bộ `dist` đầy đủ để deploy.
 
 `examples/` được loại khỏi type-check của website: dependencies và cấu hình TypeScript của từng ví dụ phải được kiểm tra trong chính project đó.
+
+### Ví dụ có nhiều app độc lập
+
+Một snapshot có thể chứa cả host và remote, mỗi app có `package.json` riêng. Project `module-federation-react-vue` dùng cấu trúc này và publish cả `.vue` lẫn các script `.mjs`:
+
+```mdx
+<SourceRef project="module-federation-react-vue" file="vue-sub/src/mount.ts" region="mount-api">
+  Xem API mà Vue remote expose
+</SourceRef>
+```
+
+Kiểm tra ví dụ này riêng bằng `npm run examples:federation:test` từ root repository. Đây là kiểm thử opt-in: cài/build hai app trong thư mục tạm và kiểm tra chúng trong browser; `npm run test:source` chỉ kiểm tra website, reference và viewer, không tự cài dependencies của các app mẫu.
 
 ## Named regions
 
@@ -90,6 +102,57 @@ Các marker được giữ trong source gốc để chạy bình thường, như
 - Manifest trỏ tới assets có content hash; cache trong browser được chia theo URL. Không đưa source vào client bundle của từng trang.
 - Build dừng nếu MDX reference sai project, snapshot, file, region hoặc khoảng dòng.
 - Muốn thêm ngôn ngữ, cập nhật `langs` và bảng `languages` trong `scripts/build-source-examples.mjs`.
+
+## Reference output sau build
+
+Tách output khỏi source thành snapshot riêng, ví dụ `output-basic` và `output-async-bootstrap`. Với bài Webpack, tạo lại capture bằng lệnh chạy **tường minh** từ root:
+
+```bash
+npm run examples:webpack:build
+npm run source:build
+```
+
+Lệnh đầu cài dependencies và build cả hai project trong thư mục tạm, lấy Webpack stats/source maps rồi cập nhật `examples/webpack-react-demo/output/` và các snapshot output trong registry. Không chạy nó ở mỗi lần build website. Các capture đã duyệt được commit; `public/source-examples/` và `dist/` local vẫn không commit.
+
+Dùng alias ổn định để bài không phải sửa reference mỗi lần hash thay đổi:
+
+```json
+{
+  "path": "dist/main.js",
+  "source": "artifacts/main.abc123.js",
+  "displayPath": "dist/main.abc123.js"
+}
+```
+
+Đây là dạng object tùy chọn trong `files`, thay cho một chuỗi:
+
+- `path`: định danh cho `SourceRef file`, cây file và deep link.
+- `source`: file vật lý tương đối với `root` của snapshot; không được thoát khỏi thư mục đó.
+- `displayPath`: tên hiển thị trên tab/tooltip, dùng tên emit thật có hash. Không ảnh hưởng đường dẫn import hoặc URL của app.
+
+`abc123` ở ví dụ trên chỉ minh họa; capture script ghi tên thật. Viewer hỗ trợ `.map` như JSON, `.txt` như plain text, `.mjs` như JavaScript và `.vue` như Vue SFC.
+
+```mdx
+<SourceRef project="webpack-react-demo" snapshot="output-async-bootstrap" file="dist/main.js">
+  Xem bundle main sau build
+</SourceRef>
+```
+
+Phân biệt ba loại nội dung:
+
+1. **Artifact nguyên bản:** HTML, bundle nhỏ và source maps nhỏ, copy byte-for-byte từ build. Không sửa chúng để gắn region hoặc làm như output viết tay là output thật.
+2. **Runtime view:** các phần `sourcesContent` dễ đọc từ source map, đặt dưới `runtime/` và ghi rõ không phải asset emit riêng. Source-map text có thể còn hash trung gian; view bảng tên chunk được đồng bộ với hash cuối từ stats và ghi từng thay thế trong report. Giữ bản JS emit nguyên trạng.
+3. **Báo cáo/tóm tắt:** `build-report.json` và `source-maps/*.summary.json` là dữ liệu dẫn xuất, không phải file `.map` hoàn chỉnh. Dùng chúng để chỉ tên, bytes, modules và packages của bundle lớn thay vì nhúng cả React/vendor code vào viewer.
+
+Thêm `capture` vào snapshot output:
+
+```json
+{
+  "capture": { "sourceSnapshot": "async-bootstrap", "report": "build-report.json" }
+}
+```
+
+Report phải ghi `sourceSnapshot` và `sourceFiles` gồm `file` + SHA-256 của toàn bộ source đã capture. Source build so checksum với source snapshot hiện tại và dừng nếu output đã cũ. Khi đổi source, refresh capture có chủ ý, kiểm tra lại hashes/refs rồi chạy website build. Đừng bỏ kiểm tra để giữ output cũ.
 
 ## Link, bàn phím và mobile
 

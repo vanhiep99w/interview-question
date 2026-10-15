@@ -1,0 +1,257 @@
+{
+  "kind": "Reviewed capture of a real production build — this report is derived from Webpack stats",
+  "sourceSnapshot": "async-bootstrap",
+  "command": "npm run build -- --json <temporary-stats-file>",
+  "environment": {
+    "node": "26.9.0",
+    "webpack": "5.111.1"
+  },
+  "versions": {
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "css-loader": "7.1.5",
+    "html-webpack-plugin": "5.6.8",
+    "react": "19.3.1",
+    "react-dom": "19.3.1",
+    "style-loader": "4.0.0",
+    "ts-loader": "9.6.2",
+    "typescript": "5.9.3",
+    "webpack": "5.111.1",
+    "webpack-cli": "6.0.1",
+    "webpack-dev-server": "5.2.6"
+  },
+  "sourceFiles": [
+    {
+      "file": "package.json",
+      "sha256": "6d0fee3c935867b3257a36d56a72182491453a83f56256e8abc9dfd2bb069ec7"
+    },
+    {
+      "file": "webpack.config.cjs",
+      "sha256": "663cc01fe9b60f8c1be2cc4495f3cc34596cf14377aeaa060b62db4517b3782d"
+    },
+    {
+      "file": "tsconfig.json",
+      "sha256": "934953218c550cbaa1472d2d41eccf427555bd63b2866eb4b7e4b35472627c4c"
+    },
+    {
+      "file": "index.html",
+      "sha256": "3fc2ee424386248a3b4211dfc546f357009f79421afd470678487f628c3a0f15"
+    },
+    {
+      "file": "src/main.tsx",
+      "sha256": "142a35ab7d2b2b7422bbc59ed02ffded89c808aabf14f85c87f93de8cb962970"
+    },
+    {
+      "file": "src/bootstrap.tsx",
+      "sha256": "3d7682cd013b37190ab375f5106411fa423b9841c74f5aa30bb93f3fbaa8f9e1"
+    },
+    {
+      "file": "src/App.tsx",
+      "sha256": "1154835d863c3b4728e2959123de0420f356f0f1e3b40a30e54a869fbff1094c"
+    },
+    {
+      "file": "src/styles.css",
+      "sha256": "4ed65de11840f90d484d3eff1dca2ca5ae620e6fcb22c75da82b5ba30cce5cf6"
+    },
+    {
+      "file": "src/env.d.ts",
+      "sha256": "da5bf71d48cf909584a01c80b445f730507068f5b34c920f352e2bfcf0315e4c"
+    }
+  ],
+  "entrypoints": {
+    "main": [
+      "main.c3ab4e65c7a90e9407a4.js"
+    ]
+  },
+  "chunks": [
+    {
+      "id": 446,
+      "names": [],
+      "initial": false,
+      "files": [
+        "446.d36437e58d26a81fb64c.js"
+      ],
+      "sourceModules": [],
+      "packages": [
+        "css-loader",
+        "react",
+        "react-dom",
+        "scheduler",
+        "style-loader"
+      ]
+    },
+    {
+      "id": 547,
+      "names": [
+        "bootstrap"
+      ],
+      "initial": false,
+      "files": [
+        "bootstrap.86c3b0178aa730fd269a.js"
+      ],
+      "sourceModules": [
+        "./src/bootstrap.tsx + 2 modules",
+        "./src/bootstrap.tsx",
+        "./src/App.tsx",
+        "./src/styles.css"
+      ],
+      "packages": [
+        "css-loader"
+      ]
+    },
+    {
+      "id": 792,
+      "names": [
+        "main"
+      ],
+      "initial": true,
+      "files": [
+        "main.c3ab4e65c7a90e9407a4.js"
+      ],
+      "sourceModules": [
+        "./src/main.tsx"
+      ],
+      "packages": []
+    }
+  ],
+  "assets": [
+    {
+      "file": "446.d36437e58d26a81fb64c.js",
+      "bytes": 222385,
+      "sha256": "d85a826d05c6b65a3665e25e6c9259a0ec6ef2251fa76766d73a368d89f819f9"
+    },
+    {
+      "file": "446.d36437e58d26a81fb64c.js.LICENSE.txt",
+      "bytes": 1210,
+      "sha256": "fcd44eaa24992e4f238a50dc8ab77d8b2052e6c8006c8aef3187f764cf55406d"
+    },
+    {
+      "file": "446.d36437e58d26a81fb64c.js.map",
+      "bytes": 1037420,
+      "sha256": "c690066bb5e94399f196ad704f68a63dde81a537acfbbb1370a9abc917dd519b"
+    },
+    {
+      "file": "bootstrap.86c3b0178aa730fd269a.js",
+      "bytes": 2116,
+      "sha256": "b8395b051eb602ae16270e1a11dadcafc0699a9d5db5062fb5806f718420f1e0"
+    },
+    {
+      "file": "bootstrap.86c3b0178aa730fd269a.js.map",
+      "bytes": 5283,
+      "sha256": "c2a49a206594f3f725105b98e05af324e18d78e86d2296b3f25fbc13930690fb"
+    },
+    {
+      "file": "index.html",
+      "bytes": 251,
+      "sha256": "8b253349c91f8bf1c38e2321cd835d905047ecdaf9f437a37efb0b10baa96d2f"
+    },
+    {
+      "file": "main.c3ab4e65c7a90e9407a4.js",
+      "bytes": 2981,
+      "sha256": "226e3cff0ca9135aad10072de539d5e300cf3e39d5ca74b9a569d9145fac2246"
+    },
+    {
+      "file": "main.c3ab4e65c7a90e9407a4.js.map",
+      "bytes": 14751,
+      "sha256": "c7da6a718a7fd0b8f8cc213301c7cc1c786ed88e08afcd5f5bdb2fe58dcc4fd3"
+    }
+  ],
+  "views": [
+    {
+      "reference": "dist/index.html",
+      "emittedFile": "index.html",
+      "view": "Complete original bytes, no formatting or renaming inside the content"
+    },
+    {
+      "reference": "source-maps/main.summary.json",
+      "emittedFile": "main.c3ab4e65c7a90e9407a4.js.map",
+      "view": "Derived metadata summary; mappings and original source texts are omitted"
+    },
+    {
+      "reference": "runtime/module-cache.js",
+      "emittedFile": "main.c3ab4e65c7a90e9407a4.js",
+      "sourceMap": "main.c3ab4e65c7a90e9407a4.js.map",
+      "source": "webpack://webpack-react-demo/webpack/bootstrap",
+      "view": "sourcesContent copied verbatim inside explanatory comments and region markers; not an emitted asset"
+    },
+    {
+      "reference": "runtime/ensure-chunk.js",
+      "emittedFile": "main.c3ab4e65c7a90e9407a4.js",
+      "sourceMap": "main.c3ab4e65c7a90e9407a4.js.map",
+      "source": "webpack://webpack-react-demo/webpack/runtime/ensure chunk",
+      "view": "sourcesContent copied verbatim inside explanatory comments and region markers; not an emitted asset"
+    },
+    {
+      "reference": "runtime/chunk-filename.js",
+      "emittedFile": "main.c3ab4e65c7a90e9407a4.js",
+      "sourceMap": "main.c3ab4e65c7a90e9407a4.js.map",
+      "source": "webpack://webpack-react-demo/webpack/runtime/get javascript chunk filename",
+      "view": "Readable sourcesContent with chunk hashes reconciled against final emitted assets; not an emitted asset",
+      "hashReplacements": [
+        {
+          "chunk": "446",
+          "sourceMapHash": "ba5916b40c38769caade",
+          "emittedHash": "d36437e58d26a81fb64c"
+        },
+        {
+          "chunk": "547",
+          "sourceMapHash": "621c3051d7d8c2239d7b",
+          "emittedHash": "86c3b0178aa730fd269a"
+        }
+      ]
+    },
+    {
+      "reference": "runtime/load-script.js",
+      "emittedFile": "main.c3ab4e65c7a90e9407a4.js",
+      "sourceMap": "main.c3ab4e65c7a90e9407a4.js.map",
+      "source": "webpack://webpack-react-demo/webpack/runtime/load script",
+      "view": "sourcesContent copied verbatim inside explanatory comments and region markers; not an emitted asset"
+    },
+    {
+      "reference": "runtime/public-path.js",
+      "emittedFile": "main.c3ab4e65c7a90e9407a4.js",
+      "sourceMap": "main.c3ab4e65c7a90e9407a4.js.map",
+      "source": "webpack://webpack-react-demo/webpack/runtime/publicPath",
+      "view": "sourcesContent copied verbatim inside explanatory comments and region markers; not an emitted asset"
+    },
+    {
+      "reference": "runtime/jsonp-chunk-loading.js",
+      "emittedFile": "main.c3ab4e65c7a90e9407a4.js",
+      "sourceMap": "main.c3ab4e65c7a90e9407a4.js.map",
+      "source": "webpack://webpack-react-demo/webpack/runtime/jsonp chunk loading",
+      "view": "sourcesContent copied verbatim inside explanatory comments and region markers; not an emitted asset"
+    },
+    {
+      "reference": "dist/main.js",
+      "emittedFile": "main.c3ab4e65c7a90e9407a4.js",
+      "view": "Complete original bytes, no formatting or renaming inside the content"
+    },
+    {
+      "reference": "dist/bootstrap.js",
+      "emittedFile": "bootstrap.86c3b0178aa730fd269a.js",
+      "view": "Complete original bytes, no formatting or renaming inside the content"
+    },
+    {
+      "reference": "dist/main.js.map",
+      "emittedFile": "main.c3ab4e65c7a90e9407a4.js.map",
+      "view": "Complete original bytes, no formatting or renaming inside the content"
+    },
+    {
+      "reference": "dist/bootstrap.js.map",
+      "emittedFile": "bootstrap.86c3b0178aa730fd269a.js.map",
+      "view": "Complete original bytes, no formatting or renaming inside the content"
+    },
+    {
+      "reference": "source-maps/vendors.summary.json",
+      "emittedFile": "446.d36437e58d26a81fb64c.js.map",
+      "view": "Metadata only; the large vendor bundle and map are listed in the report, not embedded in the reader"
+    }
+  ],
+  "notes": [
+    "dist/main.js and similar reference paths are stable aliases. displayPath and emittedFile retain the actual content-hashed filenames.",
+    "Only small emitted assets and readable generated runtime modules are published. Large React/vendor bundles and maps are listed, not copied into the viewer.",
+    "Raw emitted assets are copied byte-for-byte. Runtime views come from sourcesContent, before minification; the chunk-filename view reconciles intermediate hashes against final assets and records each replacement. Source-map summaries are explicitly derived reports.",
+    "This output capture is not a complete deployable dist directory. Run the source snapshot build to obtain every asset.",
+    "Package ranges are resolved during capture; names, chunk IDs, hashes and byte sizes can differ with other dependency versions. Source checksums and resolved versions describe this capture."
+  ]
+}

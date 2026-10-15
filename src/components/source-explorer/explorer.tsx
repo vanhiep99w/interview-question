@@ -44,7 +44,7 @@ function Folder({ files, selected, onSelect, prefix = '' }: {
             <Folder files={items} prefix={`${path}/`} selected={selected} onSelect={onSelect} />
           </details>
         ) : (
-          <button type="button" aria-current={selected === path ? 'page' : undefined} onClick={() => onSelect(path)}>
+          <button type="button" title={items[0].displayPath ?? path} aria-current={selected === path ? 'page' : undefined} onClick={() => onSelect(path)}>
             <span className="source-file-icon" aria-hidden="true">{items[0].language === 'tsx' ? '⊙' : '≡'}</span>
             {name}
           </button>
@@ -201,7 +201,7 @@ export default function SourceExplorer({ request, onNavigate, onClose }: Props) 
                   {loaded.snapshot.files.map((item) => <option key={item.path} value={item.path}>{item.path}</option>)}
                 </select>
               </label></div>
-              <div className="source-file-tab"><span>{file?.path ?? request.file}</span>{reference.range && <span className="source-range">L{reference.range[0]}–{reference.range[1]}</span>}</div>
+              <div className="source-file-tab"><span title={file?.path}>{file?.displayPath ?? file?.path ?? request.file}</span>{reference.range && <span className="source-range">L{reference.range[0]}–{reference.range[1]}</span>}</div>
               {reference.error && <p className="source-reference-error" role="status">{reference.error}</p>}
               {file ? <div ref={code} className="source-code" tabIndex={0} aria-label={`Source ${file.path}`}
                 // Only repository-owned files, escaped and highlighted at build time by Shiki.

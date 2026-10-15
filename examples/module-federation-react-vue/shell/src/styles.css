@@ -1,0 +1,6 @@
+body { margin: 0; font-family: system-ui, sans-serif; color: #172033; background: #f3f5f8; }
+.shell { max-width: 900px; margin: auto; padding: 24px; }
+.shell header { margin-bottom: 24px; }
+.shell nav { display: flex; gap: 20px; }
+.shell a { color: #1d4ed8; }
+.shell button { cursor: pointer; padding: 6px 12px; }

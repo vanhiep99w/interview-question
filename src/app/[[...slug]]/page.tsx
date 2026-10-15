@@ -1,4 +1,5 @@
 import { source } from '@/lib/source';
+import { docRedirects } from '@/lib/doc-redirects';
 import {
   DocsBody,
   DocsDescription,
@@ -20,6 +21,8 @@ export default async function Page({
   const { slug } = await params;
   const page = source.getPage(slug ?? []);
   if (!page) {
+    const destination = docRedirects[(slug ?? []).join('/')];
+    if (destination) redirect(destination);
     // Match public/_redirects in development and on other static hosts too.
     if (!slug?.length) redirect('/behavioral/01-production-server-down/');
     notFound();
@@ -39,6 +42,9 @@ export default async function Page({
 
 export async function generateStaticParams() {
   const params = source.generateParams().map(({ slug }) => ({ slug }));
+  for (const route of Object.keys(docRedirects)) {
+    if (!params.some(({ slug }) => slug.join('/') === route)) params.push({ slug: route.split('/') });
+  }
   // Optional catch-all routes also need an explicit root entry with output: export.
   if (!params.some(({ slug }) => slug.length === 0)) {
     params.unshift({ slug: [] });
