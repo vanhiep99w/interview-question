@@ -30,14 +30,21 @@ Ví dụ có hai app:
 | **React shell — host** | Trang chính, browser history, vùng DOM chứa remote | `5173` / `4173` |
 | **Vue catalog — remote** | UI Catalog, Vue Router nội bộ, API mount/unmount | `5174` / `4174` |
 
-```mermaid
-flowchart LR
-  S[Source React shell] --> SB[Build shell]
-  V[Source Vue catalog] --> VB[Build remote]
-  SB --> H[Trang shell trong browser]
-  VB --> R[remoteEntry.js và chunks Vue]
-  H -->|import vueSub/mount| R
-  R -->|mount vào DOM do shell cấp| H
+```d2 title="1. Microfrontend và Module Federation khác nhau thế nào?"
+direction: right
+S: "Source React shell"
+S.icon: ../../diagrams/assets/react.svg
+SB: "Build shell"
+V: "Source Vue catalog"
+VB: "Build remote"
+H: "Trang shell trong browser"
+R: "remoteEntry.js và chunks Vue"
+S -> SB
+V -> VB
+SB -> H
+VB -> R
+H -> R: "import vueSub/mount"
+R -> H: "mount vào DOM do shell cấp"
 ```
 
 **Host không biên dịch lại Vue.** Hai build phối hợp qua JavaScript module và một API nhỏ, không qua việc React hiểu file `.vue`.
@@ -128,12 +135,15 @@ remotes: {
 
 Config thật dùng biến `remoteUrl`, không viết cứng chuỗi development như snippet trên.
 
-```text
-vueSub: 'vueSub@http://127.0.0.1:5174/remoteEntry.js'
-   │        │                       │
-   │        │                       └─ URL container entry
-   │        └─ tên container do remote công bố
-   └─ alias mà source shell dùng khi import
+```d2 title="Ba phần của cấu hình remotes"
+direction: down
+remote: "vueSub: 'vueSub@http://127.0.0.1:5174/remoteEntry.js'"
+alias: "vueSub\nAlias shell dùng khi import"
+container: "vueSub\nTên container remote công bố"
+url: "http://127.0.0.1:5174/remoteEntry.js\nURL container entry"
+remote -> alias: "Key"
+remote -> container: "Trước dấu @"
+remote -> url: "Sau dấu @"
 ```
 
 Alias bên trái có thể đổi thành `catalog` nếu source import đổi theo. Tên container bên phải phải khớp với remote; URL chỉ ra nơi tải container đó.
@@ -156,10 +166,14 @@ const remote = await import('vueSub/mount');
 
 Đối chiếu với <SourceRef project="module-federation-react-vue" file="shell/src/remote.ts" region="load-remote">import thật trong remote.ts</SourceRef>:
 
-```text
-vueSub/mount
-  │      └─ './mount' trong exposes → src/mount.ts của Vue
-  └─ alias 'vueSub' trong remotes của shell
+```d2 title="Từ remote import tới source module"
+direction: right
+specifier: "vueSub/mount"
+alias: "vueSub\nAlias trong remotes của shell"
+expose: "./mount\nKey trong exposes của Vue"
+source: "src/mount.ts"
+specifier -> alias
+specifier -> expose -> source
 ```
 
 Browser không tải nguyên `mount.ts`. Nó tải container cùng những JavaScript chunks do project Vue đã build.
@@ -168,17 +182,17 @@ Browser không tải nguyên `mount.ts`. Nó tải container cùng những JavaS
 
 `remoteEntry.js` là cổng để runtime khởi tạo container và yêu cầu module công khai. Code của module và dependencies có thể nằm trong các chunk khác.
 
-```mermaid
-sequenceDiagram
-  participant Host as React VueHost
-  participant HRT as Host runtime
-  participant Remote as Vue container/server
-  Host->>HRT: import vueSub/mount
-  HRT->>Remote: GET remoteEntry.js
-  HRT->>Remote: Khởi tạo share scope, get ./mount
-  Remote->>Remote: Tải chunk module/dependencies còn thiếu
-  Remote-->>Host: protocolVersion, mountVueSub
-  Host->>Host: await mountVueSub(element, options)
+```d2 title="4.3. remoteEntry.js không phải toàn bộ Vue app"
+shape: sequence_diagram
+Host: "React VueHost"
+HRT: "Host runtime"
+Remote: "Vue container/server"
+Host -> HRT: "import vueSub/mount"
+HRT -> Remote: "GET remoteEntry.js"
+HRT -> Remote: "Khởi tạo share scope, get ./mount"
+Remote -> Remote: "Tải chunk module/dependencies còn thiếu"
+Remote -> Host: "protocolVersion, mountVueSub" {style.stroke-dash: 4}
+Host -> Host: "await mountVueSub(element, options)"
 ```
 
 Cache có thể làm một số bước không phát sinh request mới. Sơ đồ mô tả vai trò, không cố định số request của mọi bản build.
@@ -194,12 +208,24 @@ Shell vẫn có HTML template và một JavaScript entry như bài trước:
 
 Vì vậy có hai thời điểm khác nhau:
 
-```text
-Mở Home:
-  HTML → main → bootstrap → React
-
-Vào Catalog:
-  VueHost → loadVueSub → import remote → mount Vue
+```d2 title="Home và Catalog tải code ở thời điểm khác nhau"
+direction: right
+home: "Mở Home" {
+  html: "HTML"
+react: "React"
+html -> main
+main -> bootstrap
+bootstrap -> react
+}
+catalog: "Vào Catalog" {
+  host: "VueHost"
+load: "loadVueSub"
+remote: "import remote"
+mount: "mount Vue"
+host -> load
+load -> remote
+remote -> mount
+}
 ```
 
 Async bootstrap tải ngay khi entry chạy; remote chỉ được yêu cầu khi code trong `VueHost` chạy. Không đồng nhất hai ranh giới bất đồng bộ này.

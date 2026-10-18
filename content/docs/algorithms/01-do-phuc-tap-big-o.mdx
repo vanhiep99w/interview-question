@@ -200,15 +200,23 @@ Total allocation: O(n)
 
 Dùng cùng một quy trình cho loop, recursion và library call:
 
-```mermaid
-flowchart TD
-    A[Định nghĩa input: n, m, V, E, k] --> B[Chọn operation cần đếm]
-    B --> C[Mở chi phí của method/library call]
-    C --> D[Lập biểu thức time trước khi rút gọn]
-    D --> E[Xác định best, worst, expected hoặc amortized]
-    E --> F[Tính peak auxiliary space]
-    F --> G[Tách output space nếu cần]
-    G --> H[Nêu trade-off và kiểm chứng bằng benchmark]
+```d2 title="4. Quy trình phân tích time và space"
+direction: down
+A: "Định nghĩa input: n, m, V, E, k"
+B: "Chọn operation cần đếm"
+C: "Mở chi phí của method/library call"
+D: "Lập biểu thức time trước khi rút gọn"
+E: "Xác định best, worst, expected hoặc amortized"
+F: "Tính peak auxiliary space"
+G: "Tách output space nếu cần"
+H: "Nêu trade-off và kiểm chứng bằng benchmark"
+A -> B
+B -> C
+C -> D
+D -> E
+E -> F
+F -> G
+G -> H
 ```
 
 #### Bước 1 — Định nghĩa input

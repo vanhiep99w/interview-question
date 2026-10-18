@@ -831,14 +831,24 @@ Kafka
 
 Luồng có thể như sau:
 
-```txt
-User checkout
-  -> Order Service ghi PostgreSQL trong transaction
-  -> Outbox table lưu OrderCreated event
-  -> Relay publish Kafka
-  -> Search index cập nhật OpenSearch
-  -> Analytics pipeline lưu warehouse
-  -> Cache invalidation qua Redis
+```d2 title="Transactional outbox kết nối các read model"
+direction: right
+checkout: "User checkout"
+service: "Order Service"
+checkout -> service
+transaction: "PostgreSQL local transaction" {
+  orders: "Business data"
+  outbox: "Outbox — OrderCreated"
+}
+service -> transaction.orders
+service -> transaction.outbox
+relay: "Relay"
+kafka: "Kafka"
+transaction.outbox -> relay
+relay -> kafka
+kafka -> search: "OpenSearch index"
+kafka -> analytics: "Warehouse"
+kafka -> cache: "Redis cache invalidation"
 ```
 
 Điểm quan trọng: PostgreSQL vẫn là source of truth cho order. OpenSearch chỉ là read model. Nếu index lệch, có thể rebuild từ source/event log.

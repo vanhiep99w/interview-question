@@ -65,36 +65,32 @@ Khi interviewer hỏi câu này, đừng vội liệt kê các bước — hãy 
 
 ### Luồng xử lý tổng quan
 
-```mermaid
-sequenceDiagram
-    participant Alert as PagerDuty/Teams
-    participant IC as Incident Commander
-    participant Ops as Ops Engineer
-    participant Lead as Tech Lead
-    participant SP as Status Page
-
-    Alert->>IC: 2:00 AM — Production down alert
-    IC->>Ops: Assign: investigate + mitigate
-    IC->>Lead: Notify (không cần wake up nếu < 15 phút)
-    IC->>SP: Update: "Investigating"
-
-    Ops->>Ops: kubectl describe → xác định loại lỗi
-    Ops->>IC: Report: OOMKilled / HikariCP / Kafka lag / Redis eviction
-
-    alt Có deployment gần đây
-        Ops->>Ops: kubectl rollout undo
-    else Không có deploy
-        Ops->>Ops: Scale out / kill slow queries / restart
-    end
-
-    Ops->>IC: Mitigation applied
-    IC->>SP: Update: "Mitigating"
-    IC->>Lead: Update mỗi 10-15 phút
-
-    Ops->>Ops: Monitor 10 phút sau mitigation
-    Ops->>IC: Service stable
-    IC->>SP: Update: "Resolved"
-    IC->>Lead: Notify resolved + schedule post-mortem
+```d2 title="Luồng xử lý tổng quan"
+shape: sequence_diagram
+Alert: "PagerDuty/Teams"
+IC: "Incident Commander"
+Ops: "Ops Engineer"
+Lead: "Tech Lead"
+SP: "Status Page"
+Alert -> IC: "2:00 AM — Production down alert"
+IC -> Ops: "Assign: investigate + mitigate"
+IC -> Lead: "Notify (không cần wake up nếu < 15 phút)"
+IC -> SP: "Update: \"Investigating\""
+Ops -> Ops: "kubectl describe → xác định loại lỗi"
+Ops -> IC: "Report: OOMKilled / HikariCP / Kafka lag / Redis eviction"
+phase1: "Nếu: Có deployment gần đây" {
+  Ops -> Ops: "kubectl rollout undo"
+}
+phase2: "Ngược lại: Không có deploy" {
+  Ops -> Ops: "Scale out / kill slow queries / restart"
+}
+Ops -> IC: "Mitigation applied"
+IC -> SP: "Update: \"Mitigating\""
+IC -> Lead: "Update mỗi 10-15 phút"
+Ops -> Ops: "Monitor 10 phút sau mitigation"
+Ops -> IC: "Service stable"
+IC -> SP: "Update: \"Resolved\""
+IC -> Lead: "Notify resolved + schedule post-mortem"
 ```
 
 ---
@@ -155,15 +151,23 @@ IC **không sửa code** — 100% tập trung điều phối, update mỗi 10–
 
 ### Giai đoạn 3 — Triage (2–10 phút)
 
-```bash
-# Lý do pod chết
-kubectl describe pod <pod-name> -n production | grep -A5 "Last State"
-
-# Events gần nhất
-kubectl get events -n production --sort-by='.lastTimestamp' | tail -20
-
-# Log trước khi crash
-kubectl logs <pod-name> -n production --previous --tail=100
+```terminal-session
+title: Triage pod trên production
+context:
+  kind: local
+  label: Máy có kubectl, đã chọn đúng cluster production
+steps:
+  - id: last-state
+    title: Lý do pod chết
+    command: kubectl describe pod <pod-name> -n production | grep -A5 "Last State"
+    expected: Tìm termination reason trước khi chọn hướng điều tra.
+  - id: events
+    title: Events gần nhất
+    command: kubectl get events -n production --sort-by='.lastTimestamp' | tail -20
+  - id: previous-logs
+    title: Log trước khi crash
+    command: kubectl logs <pod-name> -n production --previous --tail=100
+    expected: Đọc log của container trước, không chỉ container vừa restart.
 ```
 
 `kubectl describe` sẽ chỉ thẳng vào một trong 4 scenario bên dưới.

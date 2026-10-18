@@ -63,16 +63,25 @@ Interviewer expect bạn **thiết kế chiến lược geo-distribution toàn d
 
 ### Bước 1: Đo — không đoán
 
-```mermaid
-flowchart LR
-    A[Báo cáo: US chậm 6s] --> B[Đo waterfall\ntừ US location]
-    B --> C{TTFB > 5s?}
-    C -->|Có| D[Vấn đề backend\nhoặc network]
-    C -->|Không| E[Vấn đề frontend\nassets, JS, render]
-    D --> F[Check CDN\nX-Cache header]
-    F --> G{Cache Hit?}
-    G -->|Miss| H[Fix CDN caching]
-    G -->|Hit nhưng vẫn chậm| I[Vấn đề khác:\nserial calls, DB, origin size]
+```d2 title="Bước 1: Đo — không đoán"
+direction: right
+A: "Báo cáo: US chậm 6s"
+B: "Đo waterfall\ntừ US location"
+C: "TTFB > 5s?" {shape: diamond}
+D: "Vấn đề backend\nhoặc network"
+E: "Vấn đề frontend\nassets, JS, render"
+F: "Check CDN\nX-Cache header"
+G: "Cache Hit?" {shape: diamond}
+H: "Fix CDN caching"
+I: "Vấn đề khác:\nserial calls, DB, origin size"
+A -> B
+B -> C
+C -> D: "Có"
+C -> E: "Không"
+D -> F
+F -> G
+G -> H: "Miss"
+G -> I: "Hit nhưng vẫn chậm"
 ```
 
 **Tools để đo từ US location:**
@@ -224,24 +233,18 @@ server {
 
 Đây là fix triệt để cho dynamic content không cache được.
 
-```
-                    ┌─────────────────────────────────────┐
-                    │           Route 53                  │
-                    │    Latency-Based Routing            │
-                    └──────────┬──────────────────────────┘
-                               │
-              ┌────────────────┴───────────────┐
-              │                                │
-   ┌──────────▼──────────┐          ┌──────────▼──────────┐
-   │   EKS ap-southeast-1│          │   EKS us-east-1     │
-   │   (Singapore)       │          │   (Virginia)        │
-   │   60ms cho SG users │          │   60ms cho US users │
-   └──────────┬──────────┘          └──────────┬──────────┘
-              │                                │
-   ┌──────────▼──────────┐          ┌──────────▼──────────┐
-   │  RDS ap-southeast-1 │◄─────────│  RDS us-east-1      │
-   │  (Primary)          │ Replication  (Read Replica)    │
-   └─────────────────────┘          └─────────────────────┘
+```d2 title="Multi-region origin và read replica"
+direction: down
+dns: "Route 53\nLatency-based routing"
+sg: "EKS ap-southeast-1\nSingapore — khoảng 60 ms cho SG users"
+us: "EKS us-east-1\nVirginia — khoảng 60 ms cho US users"
+primary: "RDS ap-southeast-1\nPrimary" {shape: cylinder}
+replica: "RDS us-east-1\nRead Replica" {shape: cylinder}
+dns -> sg
+dns -> us
+sg -> primary
+us -> replica
+primary -> replica: "Replication"
 ```
 
 ```hcl

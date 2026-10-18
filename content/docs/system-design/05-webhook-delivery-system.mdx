@@ -53,13 +53,19 @@ description: "Thiết kế Webhook Delivery System theo at-least-once với Tran
 
 Một event có thể fan-out thành nhiều deliveries, và một delivery có thể cần nhiều attempts:
 
-```mermaid
-flowchart LR
-    E[Event: order.paid] --> D1[Delivery tới endpoint A]
-    E --> D2[Delivery tới endpoint B]
-    D1 --> A11[Attempt 1: timeout]
-    D1 --> A12[Attempt 2: 204]
-    D2 --> A21[Attempt 1: 200]
+```d2 title="1. Chốt thuật ngữ trước khi vẽ kiến trúc"
+direction: right
+E: "Event: order.paid"
+D1: "Delivery tới endpoint A"
+D2: "Delivery tới endpoint B"
+A11: "Attempt 1: timeout"
+A12: "Attempt 2: 204"
+A21: "Attempt 1: 200"
+E -> D1
+E -> D2
+D1 -> A11
+D1 -> A12
+D2 -> A21
 ```
 
 Nếu đề bài nói 10 triệu **events trước fan-out**, capacity phải nhân thêm số subscription trung bình. Trong phần còn lại, ta giả định 10 triệu là **deliveries sau fan-out**.
@@ -127,24 +133,39 @@ Do đó không copy payload vào mỗi attempt row. Event giữ payload một l�
 
 ### 4. Kiến trúc tổng thể và trách nhiệm từng chặng
 
-```mermaid
-flowchart LR
-    API[Business API] --> DB[(Business DB + Outbox)]
-    DB --> R[Outbox Relay hoặc CDC]
-    R --> B[Durable Broker]
-    B --> F[Fan-out Consumer]
-    F --> DS[(Event và Delivery Store)]
-    F --> Q[Ready Queue]
-    Q --> FD[Fair Dispatcher]
-    FD --> W[Delivery Workers]
-    W --> EG[Egress Proxy]
-    EG --> EP[Customer Endpoints]
-    W --> AS[(Attempt Store)]
-    W --> RS[Retry Scheduler]
-    RS --> Q
-    W --> DEAD[(DEAD Deliveries)]
-    DEAD --> UI[Support UI và Replay API]
-    UI --> RS
+```d2 title="4. Kiến trúc tổng thể và trách nhiệm từng chặng"
+direction: right
+API: "Business API"
+DB: "Business DB + Outbox" {shape: cylinder}
+R: "Outbox Relay hoặc CDC"
+B: "Durable Broker"
+F: "Fan-out Consumer"
+DS: "Event và Delivery Store" {shape: cylinder}
+Q: "Ready Queue"
+FD: "Fair Dispatcher"
+W: "Delivery Workers"
+EG: "Egress Proxy"
+EP: "Customer Endpoints"
+AS: "Attempt Store" {shape: cylinder}
+RS: "Retry Scheduler"
+DEAD: "DEAD Deliveries" {shape: cylinder}
+UI: "Support UI và Replay API"
+API -> DB
+DB -> R
+R -> B
+B -> F
+F -> DS
+F -> Q
+Q -> FD
+FD -> W
+W -> EG
+EG -> EP
+W -> AS
+W -> RS
+RS -> Q
+W -> DEAD
+DEAD -> UI
+UI -> RS
 ```
 
 Mỗi box phải có một lý do:
@@ -216,17 +237,19 @@ WHERE status IN ('PENDING', 'RETRY_SCHEDULED');
 
 State machine:
 
-```mermaid
-stateDiagram-v2
-    [*] --> PENDING
-    PENDING --> IN_FLIGHT: worker claim lease
-    IN_FLIGHT --> DELIVERED: accepted 2xx
-    IN_FLIGHT --> RETRY_SCHEDULED: transient failure
-    IN_FLIGHT --> DEAD: permanent failure hoặc hết budget
-    RETRY_SCHEDULED --> IN_FLIGHT: đến next_attempt_at
-    IN_FLIGHT --> PENDING: lease hết hạn
-    DEAD --> RETRY_SCHEDULED: replay được phê duyệt
-    DELIVERED --> [*]
+```d2 title="5. Data model: event, delivery và attempt phải tách nhau"
+direction: right
+start: "Bắt đầu" {shape: circle}
+done: "Kết thúc" {shape: circle}
+start -> PENDING
+PENDING -> IN_FLIGHT: "worker claim lease"
+IN_FLIGHT -> DELIVERED: "accepted 2xx"
+IN_FLIGHT -> RETRY_SCHEDULED: "transient failure"
+IN_FLIGHT -> DEAD: "permanent failure hoặc hết budget"
+RETRY_SCHEDULED -> IN_FLIGHT: "đến next_attempt_at"
+IN_FLIGHT -> PENDING: "lease hết hạn"
+DEAD -> RETRY_SCHEDULED: "replay được phê duyệt"
+DELIVERED -> done
 ```
 
 `Attempt` nên append-only để phục vụ audit. `Delivery` là snapshot trạng thái hiện tại để query nhanh. Không ghi đè lịch sử attempt bằng một cột `last_error` duy nhất.
@@ -235,18 +258,29 @@ stateDiagram-v2
 
 Khi support đưa một `event_id`, đường chẩn đoán nên nhất quán:
 
-```mermaid
-flowchart TD
-    A[Tra event_id] --> B{Có event trong outbox?}
-    B -->|Không| C[Kiểm tra transaction tạo event]
-    B -->|Có| D{Đã tạo delivery?}
-    D -->|Không| E[Kiểm tra relay, broker và subscription fan-out]
-    D -->|Có| F{Delivery đang ở state nào?}
-    F -->|PENDING lâu| G[Kiểm tra queue age, quota và dispatcher]
-    F -->|IN_FLIGHT quá lease| H[Worker crash hoặc fencing lỗi]
-    F -->|RETRY_SCHEDULED| I[Đọc attempt gần nhất và next_attempt_at]
-    F -->|DEAD| J[Đọc error taxonomy và retry budget]
-    F -->|DELIVERED nhưng customer nói thiếu| K[Kiểm tra receiver dedupe và business processing]
+```d2 title="6. Triage một delivery lỗi trước khi đọc sâu từng kịch bản"
+direction: down
+A: "Tra event_id"
+B: "Có event trong outbox?" {shape: diamond}
+C: "Kiểm tra transaction tạo event"
+D: "Đã tạo delivery?" {shape: diamond}
+E: "Kiểm tra relay, broker và subscription fan-out"
+F: "Delivery đang ở state nào?" {shape: diamond}
+G: "Kiểm tra queue age, quota và dispatcher"
+H: "Worker crash hoặc fencing lỗi"
+I: "Đọc attempt gần nhất và next_attempt_at"
+J: "Đọc error taxonomy và retry budget"
+K: "Kiểm tra receiver dedupe và business processing"
+A -> B
+B -> C: "Không"
+B -> D: "Có"
+D -> E: "Không"
+D -> F: "Có"
+F -> G: "PENDING lâu"
+F -> H: "IN_FLIGHT quá lease"
+F -> I: "RETRY_SCHEDULED"
+F -> J: "DEAD"
+F -> K: "DELIVERED nhưng customer nói thiếu"
 ```
 
 Bảng lookup nhanh phải nằm trước các kịch bản để người vận hành biết nên nhảy đến đâu:
@@ -401,10 +435,12 @@ Tôn trọng `Retry-After` khi receiver trả `429`. Nếu backlog tiếp tục 
 
 Dispatcher dùng logical lanes thay vì tạo một queue vật lý cho mỗi customer:
 
-```text
-Global concurrency
-└── Per-tenant concurrency / token bucket
-    └── Per-endpoint concurrency / token bucket
+```d2 title="Quota từ global đến endpoint"
+direction: right
+n0: "Global concurrency"
+n1: "Per-tenant concurrency / token bucket"
+n2: "Per-endpoint concurrency / token bucket"
+n0 -> n1 -> n2
 ```
 
 Ví dụ minh họa, không phải default:
@@ -456,12 +492,12 @@ WHERE delivery_id = :delivery_id
 
 Circuit breaker theo endpoint có ba trạng thái:
 
-```mermaid
-stateDiagram-v2
-    CLOSED --> OPEN: failure rate vượt ngưỡng
-    OPEN --> HALF_OPEN: hết cooldown
-    HALF_OPEN --> CLOSED: probes thành công
-    HALF_OPEN --> OPEN: probe thất bại
+```d2 title="Fix đúng"
+direction: right
+CLOSED -> OPEN: "failure rate vượt ngưỡng"
+OPEN -> HALF_OPEN: "hết cooldown"
+HALF_OPEN -> CLOSED: "probes thành công"
+HALF_OPEN -> OPEN: "probe thất bại"
 ```
 
 Breaker bảo vệ fleet; retry quản lý lifecycle từng delivery. Hai cơ chế bổ sung cho nhau, không thay thế nhau.
@@ -697,10 +733,16 @@ Ba lựa chọn:
 
 Default hợp lý là không hứa global order. Với event type cần strict order, thêm `aggregate_id` và `aggregate_version`, rồi chỉ cho một delivery in-flight trong lane `(endpoint_id, aggregate_id)`.
 
-```mermaid
-flowchart LR
-    O1[Order A v1] --> O2[Order A v2] --> O3[Order A v3]
-    P1[Order B v1] --> P2[Order B v2]
+```d2 title="14. Ordering: chỉ bảo đảm ở boundary business thật sự cần"
+direction: right
+O1: "Order A v1"
+O2: "Order A v2"
+O3: "Order A v3"
+P1: "Order B v1"
+P2: "Order B v2"
+O1 -> O2
+O2 -> O3
+P1 -> P2
 ```
 
 Hai lane A và B chạy song song. Nếu A v1 retry, A v2 chờ; B không bị chặn. Đây là trade-off head-of-line blocking có chủ đích, không phải “Kafka đã lo ordering”.

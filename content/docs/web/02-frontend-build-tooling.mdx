@@ -263,14 +263,17 @@ JavaScript đó vẫn chạy. Type checker mới là thành phần phát hiện 
 
 Sau khi xác định điểm bắt đầu, bundler đọc các import để biết ứng dụng cần những module nào. Trong ví dụ Vite, nó đi từ HTML đến script `src/main.tsx`, rồi lần theo các import của script:
 
-```text
-index.html
-└── src/main.tsx
-    ├── react-dom/client
-    ├── styles.css
-    └── App.tsx
-        ├── math.ts
-        └── import('./admin') ← module được yêu cầu tải khi bấm nút
+```d2 title="Module graph và dynamic import"
+direction: right
+html: "index.html"
+main: "src/main.tsx"
+html -> main
+main -> react: "react-dom/client"
+main -> css: "styles.css"
+main -> app: "App.tsx"
+app -> math: "math.ts"
+admin: "import('./admin')"
+app -> admin: "Chỉ tải khi bấm nút" {style.stroke-dash: 4}
 ```
 
 Nếu `math.ts` còn import một file khác, bundler tiếp tục đi theo import đó. Tập hợp những file/module cùng quan hệ phụ thuộc này gọi là **dependency graph — sơ đồ phụ thuộc**.
@@ -874,10 +877,12 @@ Tài liệu: [Parcel development](https://parceljs.org/features/development/), [
 
 Quan hệ cần nhớ:
 
-```text
-Rsbuild: cấu hình, dev experience, integrations
-    └── Rspack: module graph và bundling
-          └── SWC: nhiều JavaScript/TypeScript transforms
+```d2 title="Rsbuild, Rspack và SWC"
+direction: right
+n0: "Rsbuild\nCấu hình, DX, integrations"
+n1: "Rspack\nModule graph và bundling"
+n2: "SWC\nJS/TS transforms"
+n0 -> n1 -> n2
 ```
 
 Rsbuild dùng Rspack để bundling ở development lẫn production. Điều này giúp gần nhau hơn về bundling behavior, nhưng không bảo đảm output development và production giống hệt: optimization, environment và dev features vẫn khác.

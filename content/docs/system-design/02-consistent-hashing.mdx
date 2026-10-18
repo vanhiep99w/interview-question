@@ -59,13 +59,13 @@ Interviewer expect bạn thiết kế cả control plane lẫn data plane: ring 
 
 Giả sử hệ thống có 50 triệu user và 4 database shard:
 
-```txt
-user-service
-    │
-    ├── shard-0
-    ├── shard-1
-    ├── shard-2
-    └── shard-3
+```d2 title="User service định tuyến tới shard"
+direction: down
+service: "user-service"
+service -> s0: "shard-0"
+service -> s1: "shard-1"
+service -> s2: "shard-2"
+service -> s3: "shard-3"
 ```
 
 Router chọn shard bằng công thức:
@@ -169,16 +169,17 @@ Trong hệ thống thật, hash space thường lớn hơn rất nhiều, chẳn
 
 Để dễ nhìn, nối điểm cuối `999` về `0` thành một vòng:
 
-```txt
-                         0
-                         │
-                  900    │    100
-                     \   │   /
-                      \  │  /
-                700 ---- + ---- 300
-                      /     \
-                     /       \
-                  600         400
+```d2 title="Hash space dạng vòng: qua 999 quay về 0"
+direction: right
+zero: "0"
+p100: "100"
+p300: "300"
+p400: "400"
+p600: "600"
+p700: "700"
+p900: "900"
+zero -> p100 -> p300 -> p400 -> p600 -> p700 -> p900
+p900 -> zero: "Wrap-around qua 999"
 ```
 
 Đây là **hash ring**. Vòng tròn chỉ là cách vẽ một miền số có wrap-around:
@@ -411,12 +412,26 @@ C -> C#0, C#1, C#2, ...
 
 Các vnode được rải trên ring:
 
-```txt
-0
-│
-A#2 -- B#0 -- C#1 -- A#0 -- C#2 -- B#1 -- A#1 -- B#2 -- C#0
-│                                                                    │
-└──────────────────────────── wrap-around ───────────────────────────┘
+```d2 title="Virtual nodes xen kẽ trên ring"
+direction: right
+a2: "A#2"
+b0: "B#0"
+c1: "C#1"
+a0: "A#0"
+c2: "C#2"
+b1: "B#1"
+a1: "A#1"
+b2: "B#2"
+c0: "C#0"
+a2 -> b0
+b0 -> c1
+c1 -> a0
+a0 -> c2
+c2 -> b1
+b1 -> a1
+a1 -> b2
+b2 -> c0
+c0 -> a2: "Wrap-around"
 ```
 
 Mỗi key vẫn đi tới token kế tiếp, nhưng token đó trỏ về physical node:
@@ -435,10 +450,15 @@ Một physical node nhận nhiều đoạn nhỏ ở nhiều vị trí thay vì 
 
 Khi thêm D với nhiều vnode, D có thể lấy các range nhỏ từ A, B và C:
 
-```txt
-A ── 7 GB ──▶ D
-B ── 6 GB ──▶ D
-C ── 7 GB ──▶ D
+```d2 title="Node mới nhận range từ nhiều owner cũ"
+direction: right
+a: "Node A"
+b: "Node B"
+c: "Node C"
+d: "Node D"
+a -> d: "7 GB"
+b -> d: "6 GB"
+c -> d: "7 GB"
 ```
 
 Thay vì một token làm D lấy toàn bộ 20 GB từ một neighbor duy nhất. Migration bandwidth được phân tán tốt hơn, miễn là có throttle để không đồng thời làm tất cả source node quá tải.
@@ -563,19 +583,19 @@ Ring version 42: A, B, C, D
 
 Một thiết kế cơ bản gồm:
 
-```txt
-                 ┌─────────────────────┐
-                 │ Topology control    │
-                 │ ring v41 -> v42     │
-                 └──────────┬──────────┘
-                            │ publish signed/versioned map
-          ┌─────────────────┼─────────────────┐
-          ▼                 ▼                 ▼
-      Router R1         Router R2         Migrator
-          │                 │                 │
-          └─────────────────┴─────────────────┘
-                            │
-                     Data nodes A/B/C/D
+```d2 title="Control plane publish versioned topology"
+direction: down
+control: "Topology control\nRing v41 → v42"
+r1: "Router R1"
+r2: "Router R2"
+migrator: "Migrator"
+data: "Data nodes A / B / C / D"
+control -> r1: "Publish signed / versioned map"
+control -> r2: "Publish signed / versioned map"
+control -> migrator: "Publish signed / versioned map"
+r1 -> data
+r2 -> data
+migrator -> data
 ```
 
 Các requirement quan trọng:
@@ -697,15 +717,17 @@ mới xóa range cũ và reclaim disk. Grace period cần cân bằng rollback s
 
 Flow tổng quát:
 
-```txt
-PLAN
-  -> JOINING
-  -> SNAPSHOT_COPY
-  -> CDC_CATCH_UP
-  -> VERIFY
-  -> CUTOVER_RING_VERSION
-  -> GRACE_PERIOD
-  -> CLEANUP
+```d2 title="Các giai đoạn migration có kiểm soát"
+direction: right
+n0: "PLAN"
+n1: "JOINING"
+n2: "SNAPSHOT_COPY"
+n3: "CDC_CATCH_UP"
+n4: "VERIFY"
+n5: "CUTOVER_RING_VERSION"
+n6: "GRACE_PERIOD"
+n7: "CLEANUP"
+n0 -> n1 -> n2 -> n3 -> n4 -> n5 -> n6 -> n7
 ```
 
 Mỗi transition nên idempotent và có rollback condition. Nếu node D lỗi trong `SNAPSHOT_COPY`, retry từ checkpoint. Nếu lỗi sau cutover, rollback về owner cũ chỉ an toàn khi old owner vẫn nhận hoặc replay được toàn bộ write mới.

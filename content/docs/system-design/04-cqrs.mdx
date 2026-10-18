@@ -176,10 +176,22 @@ Không cần hydrate đầy đủ `Order`, `OrderItem`, `Payment`, `Shipment` ag
 
 Logical separation đủ để gọi là CQRS:
 
-```txt
-CommandController -> CommandHandler -> WriteRepository ┐
-                                                      ├-> PostgreSQL
-QueryController   -> QueryHandler   -> ReadRepository  ┘
+```d2 title="CQRS trong cùng database"
+direction: right
+cc: "CommandController"
+ch: "CommandHandler"
+wr: "WriteRepository"
+db: "PostgreSQL"
+cc -> ch
+ch -> wr
+wr -> db
+qc: "QueryController"
+qh: "QueryHandler"
+rr: "ReadRepository"
+qc -> qh
+qh -> rr
+rr -> db
+db.shape: cylinder
 ```
 
 Hai side có model/code path khác nhau nhưng cùng data store. Đây thường là bước đầu an toàn nhất.
@@ -216,14 +228,21 @@ CQRS cùng database có thể hoàn toàn synchronous, không broker. Event-driv
 
 #### Mức 1 — Tách code path, cùng model/cùng database
 
-```mermaid
-flowchart LR
-    UI[Client] --> C[Command API]
-    UI --> Q[Query API]
-    C --> CH[Command Handler]
-    Q --> QH[Query Handler]
-    CH --> DB[(PostgreSQL)]
-    QH --> DB
+```d2 title="Mức 1 — Tách code path, cùng model/cùng database"
+direction: right
+UI: "Client"
+C: "Command API"
+Q: "Query API"
+CH: "Command Handler"
+QH: "Query Handler"
+DB: "PostgreSQL" {shape: cylinder}
+DB.icon: ../../diagrams/assets/postgresql.svg
+UI -> C
+UI -> Q
+C -> CH
+Q -> QH
+CH -> DB
+QH -> DB
 ```
 
 Bạn tách controller/handler nhưng vẫn có thể dùng chung schema. Lợi ích:
@@ -237,10 +256,22 @@ Bạn tách controller/handler nhưng vẫn có thể dùng chung schema. Lợi 
 
 #### Mức 2 — Tách write model/read model, vẫn cùng database
 
-```txt
-Command -> Domain aggregate -> normalized write tables
-Query   -> SQL/jOOQ/JdbcTemplate -> DTO/materialized view
-                         cùng PostgreSQL
+```d2 title="Hai model trong cùng PostgreSQL"
+direction: right
+command: "Command"
+aggregate: "Domain aggregate"
+storage.write: "Normalized write tables"
+command -> aggregate
+aggregate -> storage.write
+query: "Query"
+sql: "SQL / jOOQ / JdbcTemplate"
+storage.read: "DTO / materialized view"
+query -> sql
+sql -> storage.read
+storage: "Cùng PostgreSQL" {
+  write: "Normalized write tables"
+  read: "DTO / materialized view"
+}
 ```
 
 Write side có JPA aggregate và transaction. Read side không nhất thiết dùng JPA entity; có thể dùng SQL projection trực tiếp, database view hoặc materialized view.
@@ -266,17 +297,25 @@ Mức này tránh domain model bị biến thành read DTO và giữ strong cons
 
 #### Mức 3 — Tách data stores và cập nhật projection bất đồng bộ
 
-```mermaid
-flowchart LR
-    Client --> CA[Command API]
-    CA --> DB[(Write DB)]
-    DB --> O[(Outbox)]
-    O --> R[Outbox Relay / CDC]
-    R --> K[Kafka]
-    K --> P[Projector]
-    P --> RD[(Read Store)]
-    Client --> QA[Query API]
-    QA --> RD
+```d2 title="Mức 3 — Tách data stores và cập nhật projection bất đồng bộ"
+direction: right
+CA: "Command API"
+DB: "Write DB" {shape: cylinder}
+O: "Outbox" {shape: cylinder}
+R: "Outbox Relay / CDC"
+K: "Kafka"
+P: "Projector"
+RD: "Read Store" {shape: cylinder}
+QA: "Query API"
+Client -> CA
+CA -> DB
+DB -> O
+O -> R
+R -> K
+K -> P
+P -> RD
+Client -> QA
+QA -> RD
 ```
 
 Write store có thể là PostgreSQL; read store có thể là:
@@ -822,14 +861,21 @@ Keep v1 một thời gian để rollback
 
 Flow:
 
-```mermaid
-flowchart LR
-    S[Snapshot/Event Log] --> V2[Build Projection v2]
-    K[Live Kafka Events] --> V2
-    V1[Projection v1 Serving] --> Q[Query API]
-    V2 --> C{Validated & Caught up?}
-    C -->|Yes| SW[Atomic Switch]
-    SW --> Q
+```d2 title="Blue-green projection"
+direction: right
+S: "Snapshot/Event Log"
+V2: "Build Projection v2"
+K: "Live Kafka Events"
+V1: "Projection v1 Serving"
+Q: "Query API"
+C: "Validated & Caught up?" {shape: diamond}
+SW: "Atomic Switch"
+S -> V2
+K -> V2
+V1 -> Q
+V2 -> C
+C -> SW: "Yes"
+SW -> Q
 ```
 
 #### Tránh mất event giữa snapshot và live stream
@@ -1056,10 +1102,13 @@ Ví dụ admin order search, không migrate toàn hệ thống. Xác định sou
 
 Build read store song song nhưng chưa serve user. So kết quả với query cũ bằng shadow read/sampling.
 
-```txt
-Old query result ─┐
-                  ├-> diff metrics/log sampled
-New projection ───┘
+```d2 title="Shadow read để đối chiếu projection"
+direction: right
+old: "Old query result"
+new: "New projection"
+metrics: "Diff metrics / sampled logs"
+old -> metrics
+new -> metrics
 ```
 
 #### Bước 5 — Canary query traffic

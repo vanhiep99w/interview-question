@@ -87,16 +87,19 @@ Hiểu vấn đề này đòi hỏi phải phân biệt rõ 3 vùng nhớ — đ
 
 ### JVM Memory Map tổng thể
 
-```
-JVM Process Memory (RSS)
-├── Heap
-│   ├── Young Generation (Eden + S0 + S1)   ← Minor GC
-│   └── Old Generation (Tenured)            ← Major GC
-├── Metaspace (off-heap)                    ← Class metadata
-├── Thread Stacks (off-heap)                ← 1 stack / thread (~512KB default)
-├── Direct Buffers (off-heap)               ← ByteBuffer.allocateDirect()
-├── Native Libraries (JNI)
-└── JVM Internal (Code Cache, Compiler...)
+```d2 title="Các vùng bộ nhớ trong JVM process"
+direction: down
+rss: "JVM Process Memory / RSS" {
+  heap: "Heap" {
+    young: "Young Generation\nEden + S0 + S1 — Minor GC"
+    old: "Old Generation\nTenured — Major GC"
+  }
+  meta: "Metaspace / off-heap\nClass metadata"
+  stacks: "Thread Stacks / off-heap\n1 stack mỗi thread (~512 KB trong ví dụ)"
+  direct: "Direct Buffers / off-heap\nByteBuffer.allocateDirect()"
+  native: "Native Libraries / JNI"
+  internal: "JVM Internal\nCode cache, compiler..."
+}
 ```
 
 > **Quan trọng:** `Xmx` chỉ giới hạn Heap. Tổng RSS của process = Heap + tất cả off-heap. Container memory limit áp lên RSS → pod bị kill dù `Xmx` chưa đạt nếu off-heap bị leak.
@@ -119,13 +122,19 @@ JVM Process Memory (RSS)
 
 ### Heap — Vòng đời object và GC
 
-```mermaid
-flowchart LR
-    A[new Object] --> B[Eden Space]
-    B -->|Minor GC survive| C[Survivor S0/S1]
-    C -->|Age threshold\n-XX:MaxTenuringThreshold| D[Old Generation]
-    D -->|Major/Full GC| E[Collected]
-    B -->|Short-lived| F[Collected in Minor GC]
+```d2 title="Heap — Vòng đời object và GC"
+direction: right
+A: "new Object"
+B: "Eden Space"
+C: "Survivor S0/S1"
+D: "Old Generation"
+E: "Collected"
+F: "Collected in Minor GC"
+A -> B
+B -> C: "Minor GC survive"
+C -> D: "Age threshold\n-XX:MaxTenuringThreshold"
+D -> E: "Major/Full GC"
+B -> F: "Short-lived"
 ```
 
 **GC pause tỉ lệ với live objects**, không phải garbage:
@@ -172,9 +181,21 @@ buf = null; // object eligible for GC, nhưng off-heap chưa được giải ph�
 
 #### 1. High-throughput I/O — Netty / Kafka
 
-```
-Kernel Buffer → [copy] → JVM Heap Buffer → [copy] → App
-Kernel Buffer → [zero-copy] → Direct Buffer → App   // off-heap, ít copy hơn
+```d2 title="Heap buffer và direct buffer"
+direction: right
+heap: "Heap path" {
+  kernel: "Kernel Buffer"
+buffer: "JVM Heap Buffer"
+kernel -> buffer: "Copy"
+  app: "App"
+  buffer -> app: "Copy"
+}
+direct: "Direct buffer path" {
+  kernel: "Kernel Buffer"
+buffer: "Direct Buffer"
+kernel -> buffer: "Zero-copy path trong ví dụ"
+  buffer -> app: "App"
+}
 ```
 
 Kafka Network Layer dùng `ByteBuffer.allocateDirect()` cho network I/O. Netty mặc định `directBuffer` cho socket reads/writes → giảm copy giữa kernel space và JVM heap.

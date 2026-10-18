@@ -65,18 +65,19 @@ Trên Internet, TLS có thể bảo vệ cả HTTP header lẫn body. Một ngư
 
 Hệ thống production lại có thể đi qua nhiều chặng:
 
-```txt
-Mobile App
-   │ HTTPS: public TLS
-   ▼
-AWS ALB                     ← TLS có thể terminate tại đây
-   │ HTTP hoặc HTTPS
-   ▼
-Ingress / Spring Boot Pod   ← request tồn tại dưới dạng plaintext trong process
-   │
-   ├── log / trace / metric
-   ├── Kafka
-   └── RDS / Redis
+```d2 title="TLS termination và plaintext trong process"
+direction: down
+client: "Mobile App"
+alb: "AWS ALB\nTLS có thể terminate tại đây"
+pod: "Ingress / Spring Boot Pod\nPlaintext tồn tại trong process"
+logs: "Log / trace / metric"
+kafka: "Kafka"
+data: "RDS / Redis"
+client -> alb: "HTTPS — public TLS"
+alb -> pod: "HTTP hoặc HTTPS"
+pod -> logs
+pod -> kafka
+pod -> data
 ```
 
 Nếu ALB terminate TLS rồi forward HTTP tới pod, secure channel đầu tiên kết thúc ở ALB. Điều này không mặc định là sai: traffic có thể nằm trong private VPC với security group chặt, và managed termination giúp đơn giản hóa certificate rotation. Nhưng nó **không phải end-to-end encryption tới application**; một packet capture đúng vị trí, sidecar lỗi, access log thiếu redaction hoặc pod bị compromise vẫn có thể lộ plaintext.
@@ -282,11 +283,15 @@ Private CA không tự động an toàn hơn. Tổ chức phải tự chịu tr�
 
 Production server thường không được ký trực tiếp bằng root:
 
-```txt
-Trust Store
-└── Root CA                    ← trust anchor, thường giữ signing key offline
-    └── Intermediate CA        ← ký leaf certificate hằng ngày
-        └── api.example.com    ← leaf/end-entity certificate
+```d2 title="Certificate chain tới trust anchor"
+direction: down
+store: "Trust Store"
+root: "Root CA\nTrust anchor, signing key thường offline"
+intermediate: "Intermediate CA\nKý leaf certificate hằng ngày"
+leaf: "api.example.com\nLeaf / end-entity certificate"
+store -> root: "Tin cậy qua kênh độc lập"
+root -> intermediate: "Ký"
+intermediate -> leaf: "Ký"
 ```
 
 Root private key được giữ offline để giảm exposure. Intermediate có scope, path length và lifecycle nhỏ hơn; nếu intermediate bị compromise, CA có thể revoke/replace nó mà không nhất thiết thay toàn bộ root trust anchor.
@@ -371,39 +376,17 @@ Do đó không nên chỉ dựa vào revocation. Production cần private-key pr
 
 Trước TLS, HTTPS qua TCP cần thiết lập TCP connection. Sau đó TLS 1.3 full handshake đi theo flow khái quát:
 
-```txt
-CLIENT                                                     SERVER
-   │                                                          │
-   │ ClientHello                                              │
-   │ • supported_versions: TLS 1.3                            │
-   │ • cipher_suites: AES-GCM / ChaCha20-Poly1305             │
-   │ • supported_groups + signature_algorithms                │
-   │ • key_share: client ephemeral public share               │
-   │ • SNI: api.example.com                                   │
-   │ • ALPN: h2, http/1.1                                     │
-   ├─────────────────────────────────────────────────────────>│
-   │                                                          │
-   │                                      Server chọn params   │
-   │                           + tạo server ephemeral key pair  │
-   │                           + tính shared secret             │
-   │                                                          │
-   │ ServerHello                                              │
-   │ • TLS version/cipher được chọn                           │
-   │ • server key_share                                       │
-   │ {EncryptedExtensions}                                    │
-   │ {Certificate}                                            │
-   │ {CertificateVerify: ký handshake transcript}             │
-   │ {Finished: MAC trên transcript}                          │
-   │<─────────────────────────────────────────────────────────┤
-   │                                                          │
-   │ Client tính cùng shared secret                           │
-   │ + verify certificate chain/SAN/signature/Finished         │
-   │                                                          │
-   │ {Finished}                                               │
-   ├─────────────────────────────────────────────────────────>│
-   │                                                          │
-   │ [HTTP application data được AEAD bảo vệ hai chiều]       │
-   │<════════════════════════════════════════════════════════>│
+```d2 title="TLS 1.3 full handshake"
+shape: sequence_diagram
+client: "Client"
+server: "Server"
+client -> server: "ClientHello\nsupported_versions: TLS 1.3\ncipher_suites: AES-GCM / ChaCha20-Poly1305\nsupported_groups + signature_algorithms\nkey_share: client ephemeral public share\nSNI: api.example.com; ALPN: h2, http/1.1"
+server -> server: "Chọn params, tạo ephemeral key pair, tính shared secret"
+server -> client: "ServerHello: version, cipher, server key_share"
+server -> client: "{EncryptedExtensions}\n{Certificate}\n{CertificateVerify: ký handshake transcript}\n{Finished: MAC trên transcript}"
+client -> client: "Tính shared secret; verify chain, SAN, signature, Finished"
+client -> server: "{Finished}"
+client <-> server: "[HTTP application data — AEAD, keys riêng từng chiều]"
 ```
 
 Dấu `{}` biểu thị handshake message sau `ServerHello` đã được bảo vệ bằng handshake traffic keys; dấu `[]` biểu thị application traffic keys.
@@ -433,15 +416,17 @@ Nếu client chưa gửi group server chấp nhận, server có thể trả `Hel
 
 TLS 1.3 dùng HKDF và handshake transcript để derive key material theo nhiều stage:
 
-```txt
-(shared secret / PSK)
-        │
-        ├── client handshake traffic secret
-        ├── server handshake traffic secret
-        ├── client application traffic secret
-        ├── server application traffic secret
-        ├── exporter secret
-        └── resumption secret
+```d2 title="HKDF tạo secrets riêng theo mục đích"
+direction: right
+input: "Shared secret / PSK"
+hkdf: "HKDF key schedule"
+input -> hkdf
+hkdf -> ch: "Client handshake traffic secret"
+hkdf -> sh: "Server handshake traffic secret"
+hkdf -> ca: "Client application traffic secret"
+hkdf -> sa: "Server application traffic secret"
+hkdf -> exporter: "Exporter secret"
+hkdf -> resumption: "Resumption secret"
 ```
 
 Đây là sơ đồ tư duy, không phải pseudo-code để tự implement TLS. Transcript hash bind negotiated parameters và toàn bộ handshake vào keys, giúp phát hiện attacker sửa message hoặc làm hai phía nhìn thấy negotiation khác nhau.
@@ -460,12 +445,13 @@ Client vừa kiểm tra CA/hostname của certificate, vừa verify chữ ký đ
 
 TLS record layer chia byte stream từ application thành records. Với mỗi direction, sender dùng traffic key và per-record nonce để AEAD-encrypt plaintext và tạo authentication tag.
 
-```txt
-HTTP bytes
-   ↓ chia thành TLS records
-AEAD(key, nonce, plaintext, associated_data)
-   ↓
-ciphertext + authentication tag
+```d2 title="TLS record layer"
+direction: right
+n0: "HTTP bytes"
+n1: "Chia thành TLS records"
+n2: "AEAD(key, nonce, plaintext, associated_data)"
+n3: "Ciphertext + authentication tag"
+n0 -> n1 -> n2 -> n3
 ```
 
 Receiver tính/kiểm tra tag trước khi chấp nhận plaintext. Record bị sửa, sai key hoặc sai sequence/nonce sẽ fail; connection thường bị đóng thay vì trả về dữ liệu “gần đúng”.
@@ -527,10 +513,11 @@ Khi trả lời interview, hãy nói rõ version và key exchange đang mô tả
 
 Một IP/load balancer có thể phục vụ nhiều domain. Client cần nói hostname mong muốn đủ sớm để server chọn certificate; đó là vai trò của SNI:
 
-```txt
-ClientHello.SNI = api.example.com
-                       ↓
-Load balancer chọn certificate có SAN api.example.com
+```d2 title="SNI dùng để chọn certificate"
+direction: right
+n0: "ClientHello.SNI = api.example.com"
+n1: "Load balancer chọn certificate có SAN api.example.com"
+n0 -> n1
 ```
 
 Nếu debug bằng IP mà không gửi SNI, server có thể trả default certificate của domain khác. Vì vậy command production phải có `-servername`:
@@ -551,8 +538,12 @@ Ba kiến trúc phổ biến:
 
 #### 15.1. Terminate tại ALB
 
-```txt
-Client ──HTTPS──> ALB ──HTTP──> Pod
+```d2 title="Terminate TLS tại ALB"
+direction: right
+client: "Client"
+alb: "ALB"
+client -> alb: "HTTPS"
+alb -> pod: "Pod: HTTP"
 ```
 
 Ưu điểm:
@@ -598,17 +589,26 @@ ACM certificate là regional resource đối với ALB; certificate phải ở c
 
 #### 15.2. Re-encrypt từ ALB tới pod
 
-```txt
-Client ──HTTPS/public cert──> ALB ──HTTPS/internal cert──> Pod
+```d2 title="Re-encrypt giữa ALB và pod"
+direction: right
+client: "Client"
+alb: "ALB"
+client -> alb: "HTTPS / public cert"
+alb -> pod: "Pod: HTTPS / internal cert"
 ```
 
 Cách này bảo vệ thêm backend hop, nhưng phải quản lý certificate/private key ở pod hoặc ingress và hiểu validation behavior của load balancer. Chỉ “bật HTTPS target” mà không có workload identity/authorization phù hợp chưa tương đương mTLS.
 
 #### 15.3. mTLS/service mesh giữa workloads
 
-```txt
-Client ──HTTPS──> Gateway
-Service A ──mTLS──> Service B
+```d2 title="TLS ở edge, mTLS giữa services"
+direction: right
+client: "Client"
+gateway: "Gateway"
+client -> gateway: "HTTPS"
+a: "Service A"
+b: "Service B"
+a <-> b: "mTLS"
 ```
 
 Service mesh/private PKI có thể cấp short-lived workload certificate và enforce service identity. Đổi lại có thêm control plane, sidecar/ambient data plane, certificate lifecycle, policy và failure mode. Không nên triển khai chỉ để có biểu tượng “zero trust”; phải xác định attacker, authorization model và operational ownership.
@@ -667,17 +667,25 @@ Password bảo vệ file at rest, nhưng container có thể đọc password th�
 
 Flow TLS thường:
 
-```txt
-Client ── verify server certificate ──> Server
-Client identity được xác thực ở application layer sau đó
+```d2 title="TLS xác thực server trước"
+shape: sequence_diagram
+client: "Client"
+server: "Server"
+server -> client: "Server certificate + CertificateVerify"
+client -> client: "Verify server identity"
+client <-> server: "Authenticate client ở application layer sau đó"
 ```
 
 Flow mTLS:
 
-```txt
-Client <── verify server certificate ──> Server
-Client ── gửi client certificate + CertificateVerify ──> Server
-Server verify chain/SAN hoặc identity extension theo private PKI policy
+```d2 title="mTLS xác thực cả hai peer"
+shape: sequence_diagram
+client: "Client"
+server: "Server"
+server -> client: "Server certificate + CertificateVerify"
+client -> client: "Verify server identity"
+client -> server: "Client certificate + CertificateVerify"
+server -> server: "Verify chain, SAN / identity extension theo private PKI policy"
 ```
 
 mTLS phù hợp cho:
@@ -913,8 +921,15 @@ Output có thể rất lớn và chứa hostname/certificate metadata; không b�
 
 Ghi rõ:
 
-```txt
-client → CDN/WAF → ALB/NLB → ingress → service → downstream
+```d2 title="Xác định TLS policy cho từng hop"
+direction: right
+n0: "Client"
+n1: "CDN / WAF"
+n2: "ALB / NLB"
+n3: "Ingress"
+n4: "Service"
+n5: "Downstream"
+n0 -> n1 -> n2 -> n3 -> n4 -> n5
 ```
 
 Error xảy ra ở mobile→ALB hay service A→service B? Certificate browser hiển thị có thể là certificate của CDN, không phải certificate pod dùng cho internal mTLS.

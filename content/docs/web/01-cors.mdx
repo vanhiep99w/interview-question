@@ -87,15 +87,13 @@ Hai kết quả này không mâu thuẫn. `curl` là HTTP client, nó không th�
 
 Mental model đúng là:
 
-```txt
-JavaScript
-   │ fetch()
-   ▼
-Browser security boundary
-   │  quyết định có gửi preflight không
-   │  kiểm tra CORS response headers
-   ▼
-Network / CDN / Gateway / Backend
+```d2 title="Browser là nơi thực thi CORS"
+direction: down
+js: "JavaScript"
+browser: "Browser security boundary\nQuyết định preflight, kiểm tra CORS response headers"
+network: "Network / CDN / Gateway / Backend"
+js -> browser: "fetch()"
+browser -> network
 ```
 
 CORS error trong console chỉ nói rằng **browser không cho JavaScript dùng response**. Nó chưa nói backend chết, DNS sai, certificate sai, request bị `401`, gateway redirect hay response thiếu header. Vì vậy bước đầu tiên luôn là mở **DevTools → Network**, không chỉ đọc một dòng console.
@@ -178,23 +176,27 @@ const response = await fetch("https://api.example.com/public/products");
 const products = await response.json();
 ```
 
-Browser có thể gửi thẳng:
+Browser có thể gửi thẳng; backend trả response và CORS policy như sau. Đây là transcript minh họa, không gửi request thật:
 
-```http
-GET /public/products HTTP/1.1
-Host: api.example.com
-Origin: https://app.example.com
-```
-
-Backend trả:
-
-```http
-HTTP/1.1 200 OK
-Content-Type: application/json
-Access-Control-Allow-Origin: https://app.example.com
-Vary: Origin
-
-{"items":[]}
+```protocol-exchange
+title: CORS — GET không cần preflight
+variants:
+  - id: allowed
+    title: Origin được phép đọc response
+    request:
+      method: GET
+      url: https://api.example.com/public/products
+      headers:
+        - {id: host, name: Host, value: api.example.com}
+        - {id: origin, name: Origin, value: 'https://app.example.com'}
+    response:
+      status: 200
+      statusText: OK
+      headers:
+        - {id: type, name: Content-Type, value: application/json}
+        - {id: allow-origin, name: Access-Control-Allow-Origin, value: 'https://app.example.com'}
+        - {id: vary, name: Vary, value: Origin}
+      body: {kind: json, json: '{"items":[]}'}
 ```
 
 Browser so sánh `Origin` đã gửi với `Access-Control-Allow-Origin` nhận về. Nếu hợp lệ, JavaScript được đọc response. Nếu header thiếu hoặc sai, request có thể vẫn nhận `200` trên network nhưng `fetch()` reject với `TypeError: Failed to fetch`.
@@ -549,12 +551,14 @@ Nhưng trong hệ thống lớn, rải annotation qua controller làm policy kh�
 
 Request production thường đi qua nhiều tầng:
 
-```txt
-Browser
-  -> CloudFront/CDN
-  -> AWS ALB / API Gateway / Ingress
-  -> Spring Security
-  -> Spring MVC Controller
+```d2 title="Request đi qua nhiều tầng"
+direction: right
+n0: "Browser"
+n1: "CloudFront / CDN"
+n2: "AWS ALB / API Gateway / Ingress"
+n3: "Spring Security"
+n4: "Spring MVC Controller"
+n0 -> n1 -> n2 -> n3 -> n4
 ```
 
 Nếu cả CDN, ingress và application cùng thêm CORS headers, response có thể thành:

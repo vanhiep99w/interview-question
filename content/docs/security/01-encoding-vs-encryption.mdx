@@ -208,20 +208,24 @@ Associated data không bị encrypt nhưng được authentication tag bảo v�
 
 Encryption trả về bytes bất kỳ, trong khi JSON và environment variable thường cần text. Vì vậy một pipeline hợp lệ có thể kết hợp cả hai:
 
-```txt
-plaintext
-  → AES-GCM encrypt
-  → nonce + ciphertext + authentication tag
-  → Base64 encode để lưu trong JSON
+```d2 title="Encrypt trước, encode sau"
+direction: right
+n0: "Plaintext"
+n1: "AES-GCM encrypt"
+n2: "Nonce + ciphertext + authentication tag"
+n3: "Base64 encode để lưu trong JSON"
+n0 -> n1 -> n2 -> n3
 ```
 
 Khi đọc thì đảo thứ tự:
 
-```txt
-Base64 decode
-  → tách nonce/ciphertext/tag
-  → AES-GCM decrypt bằng đúng key
-  → plaintext
+```d2 title="Decode không thay thế decrypt"
+direction: right
+n0: "Base64 decode"
+n1: "Tách nonce / ciphertext / tag"
+n2: "AES-GCM decrypt với đúng key"
+n3: "Plaintext"
+n0 -> n1 -> n2 -> n3
 ```
 
 Base64 ở đây chỉ là lớp đóng gói. Security đến từ AES-GCM và key management, không đến từ chuỗi Base64 bên ngoài.

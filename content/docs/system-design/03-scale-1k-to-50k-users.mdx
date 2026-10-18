@@ -63,20 +63,25 @@ Interviewer expect bạn **thiết kế scaling roadmap cho team**: không chỉ
 
 ### Scaling Roadmap: 1K → 50K users
 
-```mermaid
-flowchart TD
-    A["1K users\n1 server làm tất cả"] --> B{"Bottleneck ở đâu?"}
-    B -->|CPU/Memory| C["Bước 1: Vertical Scaling\nNâng spec server"]
-    B -->|App overload| D["Bước 2: Horizontal App\nLB + Stateless servers"]
-    B -->|DB slow queries| E["Bước 3: DB Optimization\nIndex + Read Replica"]
-    C --> D
-    D --> E
-    E --> F["Bước 4: Caching Layer\nRedis cho hot data"]
-    F --> G["Bước 5: Async Processing\nKafka/Queue cho heavy tasks"]
-    G --> H["50K users\nStable & monitored"]
-
-    style A fill:#1a1a2e,stroke:#00d9ff,color:#fff
-    style H fill:#1a1a2e,stroke:#00ff88,color:#fff
+```d2 title="Scaling Roadmap: 1K → 50K users"
+direction: down
+A: "1K users\n1 server làm tất cả"
+B: "Bottleneck ở đâu?" {shape: diamond}
+C: "Bước 1: Vertical Scaling\nNâng spec server"
+D: "Bước 2: Horizontal App\nLB + Stateless servers"
+E: "Bước 3: DB Optimization\nIndex + Read Replica"
+F: "Bước 4: Caching Layer\nRedis cho hot data"
+G: "Bước 5: Async Processing\nKafka/Queue cho heavy tasks"
+H: "50K users\nStable & monitored"
+A -> B
+B -> C: "CPU/Memory"
+B -> D: "App overload"
+B -> E: "DB slow queries"
+C -> D
+D -> E
+E -> F
+F -> G
+G -> H
 ```
 
 ---
@@ -115,26 +120,20 @@ aws cloudwatch get-metric-statistics \
 
 Khi 1 server không đủ, thêm server phía sau load balancer. **Điều kiện tiên quyết: app phải stateless.**
 
-```
-                    ┌──────────────────────┐
-                    │    ALB (AWS)         │
-                    │  Round-Robin / Least │
-                    │    Connections       │
-                    └──────────┬───────────┘
-                               │
-              ┌────────────────┼────────────────┐
-              │                │                │
-    ┌─────────▼──────┐ ┌──────▼────────┐ ┌─────▼─────────┐
-    │  App Pod 1     │ │  App Pod 2    │ │  App Pod 3    │
-    │  (stateless)   │ │  (stateless)  │ │  (stateless)  │
-    └─────────┬──────┘ └──────┬────────┘ └─────┬─────────┘
-              │               │                │
-              └───────────────┼────────────────┘
-                              │
-                    ┌─────────▼────────────┐
-                    │   Redis (Session +   │
-                    │   Cache)             │
-                    └──────────────────────┘
+```d2 title="Stateless app pods sau load balancer"
+direction: down
+alb: "AWS ALB\nRound-robin / least connections"
+p1: "App Pod 1\nStateless"
+p2: "App Pod 2\nStateless"
+p3: "App Pod 3\nStateless"
+redis: "Redis\nSession + cache"
+redis.icon: ../../diagrams/assets/redis.svg
+alb -> p1
+alb -> p2
+alb -> p3
+p1 -> redis
+p2 -> redis
+p3 -> redis
 ```
 
 **Chuyển session sang Redis:**
@@ -189,16 +188,14 @@ spec:
 
 Ở 50K users, database thường là bottleneck đầu tiên. **80-90% traffic là read** → thêm read replica.
 
-```
-              App Servers
-              /         \
-      Write queries    Read queries
-            |              |
-    ┌───────▼──────┐  ┌───▼───────────┐
-    │ RDS Primary  │  │ RDS Read      │
-    │ (Write)      │──│ Replica       │
-    │ db.r6g.xl    │  │ db.r6g.xl     │
-    └──────────────┘  └───────────────┘
+```d2 title="Tách đường đọc và ghi"
+direction: down
+app: "App Servers"
+primary: "RDS Primary\ndb.r6g.xl" {shape: cylinder}
+replica: "RDS Read Replica\ndb.r6g.xl" {shape: cylinder}
+app -> primary: "Write queries"
+app -> replica: "Read queries"
+primary -> replica: "Replication"
 ```
 
 **Spring Boot — route read/write:**
@@ -267,25 +264,25 @@ SELECT * FROM orders WHERE user_id = 123 ORDER BY created_at DESC LIMIT 10;
 
 ### Bước 4: Caching Layer — giảm 10x database load
 
-```mermaid
-sequenceDiagram
-    participant Client
-    participant App as App Server
-    participant Redis as Redis Cache
-    participant DB as PostgreSQL
-
-    Client->>App: GET /products/popular
-    App->>Redis: GET products:popular
-    alt Cache HIT
-        Redis-->>App: cached data (< 1ms)
-        App-->>Client: 200 OK
-    else Cache MISS
-        Redis-->>App: null
-        App->>DB: SELECT ... (10-50ms)
-        DB-->>App: result
-        App->>Redis: SET products:popular TTL=60s
-        App-->>Client: 200 OK
-    end
+```d2 title="Bước 4: Caching Layer — giảm 10x database load"
+shape: sequence_diagram
+Client: "Client"
+App: "App Server"
+Redis: "Redis Cache"
+DB: "PostgreSQL"
+Client -> App: "GET /products/popular"
+App -> Redis: "GET products:popular"
+phase1: "Nếu: Cache HIT" {
+  Redis -> App: "cached data (< 1ms)" {style.stroke-dash: 4}
+  App -> Client: "200 OK" {style.stroke-dash: 4}
+}
+phase2: "Ngược lại: Cache MISS" {
+  Redis -> App: "null" {style.stroke-dash: 4}
+  App -> DB: "SELECT ... (10-50ms)"
+  DB -> App: "result" {style.stroke-dash: 4}
+  App -> Redis: "SET products:popular TTL=60s"
+  App -> Client: "200 OK" {style.stroke-dash: 4}
+}
 ```
 
 **Spring Boot caching với Redis:**
@@ -338,25 +335,17 @@ spring:
 
 ### Bước 5: Async Processing — không để user chờ task nặng
 
-```
-             User Request
-                  │
-    ┌─────────────▼──────────────┐
-    │  App Server                │
-    │  1. Validate & save order  │──── Response ngay (200ms)
-    │  2. Publish event to Kafka │
-    └─────────────┬──────────────┘
-                  │ (async)
-    ┌─────────────▼──────────────┐
-    │  Kafka Topic: order-events │
-    └─────────────┬──────────────┘
-                  │
-      ┌───────────┼────────────┐
-      │           │            │
-  ┌───▼───┐   ┌───▼───┐  ┌─────▼────┐
-  │ Email │   │ Inven │  │ Analytics│
-  │ Worker│   │ Worker│  │ Worker   │
-  └───────┘   └───────┘  └──────────┘
+```d2 title="Tách xử lý nặng khỏi request path"
+direction: down
+request: "User Request"
+app: "App Server\nValidate, save order, publish event"
+request -> app
+response: "Response ngay\nKhoảng 200 ms"
+app -> response
+app -> topic: "Kafka\\norder-events: Async"
+topic -> email: "Email Worker"
+topic -> inventory: "Inventory Worker"
+topic -> analytics: "Analytics Worker"
 ```
 
 ```java

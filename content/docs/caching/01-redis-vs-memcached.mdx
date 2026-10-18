@@ -81,18 +81,34 @@ Interviewer expect bạn suy nghĩ ở tầng **organizational decision**: chọ
 
 ### Tại sao Redis thắng phần lớn use case production
 
-```mermaid
-graph TD
-    A[Cần cache gì?] --> B{Chỉ string đơn giản?}
-    B -->|Có, throughput cực cao| C[Memcached ✓]
-    B -->|Không| D{Cần gì thêm?}
-    D -->|Session / Object| E[Redis Hash]
-    D -->|Leaderboard / Ranking| F[Redis Sorted Set]
-    D -->|Rate Limiting| G[Redis INCR + EXPIRE]
-    D -->|Queue / Stream| H[Redis List / Stream]
-    D -->|Pub/Sub fanout| I[Redis Pub/Sub]
-    D -->|Survive restart| J[Redis RDB/AOF]
-    E & F & G & H & I & J --> K[Redis ✓]
+```d2 title="Tại sao Redis thắng phần lớn use case production"
+direction: down
+A: "Cần cache gì?"
+B: "Chỉ string đơn giản?" {shape: diamond}
+C: "Memcached ✓"
+D: "Cần gì thêm?" {shape: diamond}
+E: "Redis Hash"
+F: "Redis Sorted Set"
+G: "Redis INCR + EXPIRE"
+H: "Redis List / Stream"
+I: "Redis Pub/Sub"
+J: "Redis RDB/AOF"
+K: "Redis ✓"
+A -> B
+B -> C: "Có, throughput cực cao"
+B -> D: "Không"
+D -> E: "Session / Object"
+D -> F: "Leaderboard / Ranking"
+D -> G: "Rate Limiting"
+D -> H: "Queue / Stream"
+D -> I: "Pub/Sub fanout"
+D -> J: "Survive restart"
+E -> K
+F -> K
+G -> K
+H -> K
+I -> K
+J -> K
 ```
 
 #### Use case 1 — Rate Limiting với Sorted Set
@@ -172,25 +188,28 @@ Memcached không có Pub/Sub — phải dùng message broker riêng (Kafka, SNS)
 
 ### Persistence — lý do quan trọng nhất trong production
 
-```
-Redis restart flow với AOF:
-┌─────────────────────────────────────────────────────────┐
-│  Redis server shutdown / crash                          │
-│           ↓                                             │
-│  AOF file trên disk (append-only, từng command)         │
-│           ↓                                             │
-│  Redis restart → replay AOF → data restored             │
-│  (RPO: 1 giây nếu fsync=everysec)                       │
-└─────────────────────────────────────────────────────────┘
-
-Memcached restart flow:
-┌─────────────────────────────────────────────────────────┐
-│  Memcached server restart                               │
-│           ↓                                             │
-│  [ALL DATA GONE — cold start]                           │
-│           ↓                                             │
-│  Cache miss 100% → thundering herd → DB overload        │
-└─────────────────────────────────────────────────────────┘
+```d2 title="Restart có và không có persistence"
+direction: right
+redis: "Redis + AOF" {
+  crash: "Shutdown / crash"
+disk: "AOF trên disk\nAppend từng command"
+replay: "Restart, replay AOF"
+restored: "Data restored\nRPO khoảng 1 giây với everysec"
+crash -> disk
+disk -> replay
+replay -> restored
+}
+memcached: "Memcached" {
+  restart: "Restart"
+cold: "Mất toàn bộ cache"
+miss: "Cache miss 100%"
+herd: "Thundering herd"
+db: "DB overload"
+restart -> cold
+cold -> miss
+miss -> herd
+herd -> db
+}
 ```
 
 ```yaml
@@ -259,17 +278,17 @@ aws elasticache create-cache-cluster \
 
 Pattern thực tế tại các công ty lớn: dùng **local cache (Caffeine) + Redis** thay vì chỉ dùng Redis.
 
-```
-Request flow:
-┌────────────┐    L1 hit?    ┌──────────────┐    L2 hit?    ┌─────────┐
-│  Service   │──────────────▶│   Caffeine   │──────────────▶│  Redis  │
-│  Instance  │◀──────────────│  (local JVM) │◀──────────────│         │
-└────────────┘   ~0.1ms      └──────────────┘    ~1ms       └────┬────┘
-                                                                  │ miss
-                                                             ┌────▼────┐
-                                                             │   RDS   │
-                                                             │  ~50ms  │
-                                                             └─────────┘
+```d2 title="Cache nhiều tầng: L1, L2 và database"
+direction: right
+service: "Service"
+l1: "Caffeine\n~0.1 ms"
+l2: "Redis\n~1 ms"
+rds: "RDS\n~50 ms" {shape: cylinder}
+service -> l1: "Lookup L1"
+l1 -> service: "Hit"
+l1 -> l2: "L1 miss"
+l2 -> service: "L2 hit"
+l2 -> rds: "L2 miss"
 ```
 
 ```java

@@ -45,12 +45,18 @@ Lock wait            = thời gian chờ lock của transaction/query
 
 Một transaction có thể có query nhanh nhưng vẫn là long-running transaction:
 
-```text
-BEGIN
-  → INSERT order (20 ms)
-  → gọi payment API (8 giây)
-  → gửi email (2 giây)
-  → COMMIT (10 ms)
+```span-waterfall
+title: Transaction giữ mở trong lúc gọi dịch vụ ngoài
+unit: ms
+provenance:
+  kind: illustrative
+  description: Thời gian tổng hợp từ ví dụ, không phải trace production. Không mô phỏng mọi chi phí BEGIN/lock.
+spans:
+  - {id: tx, name: BEGIN → COMMIT, service: database, start: 0, duration: 10030}
+  - {id: insert, parent: tx, name: INSERT order, service: database, start: 0, duration: 20}
+  - {id: payment, parent: tx, name: Payment API, service: payment, start: 20, duration: 8000}
+  - {id: email, parent: tx, name: Gửi email, service: email, start: 8020, duration: 2000}
+  - {id: commit, parent: tx, name: COMMIT, service: database, start: 10020, duration: 10}
 ```
 
 Trong ví dụ này database chỉ thực thi khoảng vài chục mili giây, nhưng transaction tồn tại hơn 10 giây. Nếu phần `INSERT` đã tạo lock, lock có thể được giữ trong gần như toàn bộ thời gian chờ external service.
@@ -291,11 +297,13 @@ Mục tiêu của batch không phải là chọn một con số “chuẩn”. B
 
 Gắn metric hoặc trace cho các mốc:
 
-```text
-transaction.begin
-  → first SQL
-  → last SQL
-  → transaction.commit/rollback
+```d2 title="Instrument toàn bộ transaction"
+direction: right
+n0: "transaction.begin"
+n1: "first SQL"
+n2: "last SQL"
+n3: "transaction.commit / rollback"
+n0 -> n1 -> n2 -> n3
 ```
 
 Một trace tốt phải cho thấy transaction đang mở trong lúc nào: chạy SQL, chờ lock, gọi HTTP, serialize file hay retry. Các metric hữu ích gồm:

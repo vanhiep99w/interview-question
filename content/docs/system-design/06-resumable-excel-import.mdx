@@ -65,30 +65,25 @@ Câu “1 triệu users online, upload Excel 1 triệu records” thiếu vài t
 
 Một lỗi hay gặp là gọi toàn bộ flow là “upload”. Thực tế có hai quá trình độc lập:
 
-```mermaid
-stateDiagram-v2
-    direction LR
-
-    state "Upload object" as Upload {
-        [*] --> CREATED
-        CREATED --> UPLOADING: multipart initiated
-        UPLOADING --> UPLOADED: storage complete
-        UPLOADING --> CANCELLED: user cancel / expiry
-        UPLOADING --> FAILED: unrecoverable error
-    }
-
-    state "Import data" as Import {
-        [*] --> QUEUED
-        QUEUED --> PARSING
-        PARSING --> VALIDATING
-        VALIDATING --> MERGING
-        MERGING --> COMPLETED
-        PARSING --> FAILED
-        VALIDATING --> FAILED
-        MERGING --> COMPLETED_WITH_ERRORS
-    }
-
-    UPLOADED --> QUEUED
+```d2 title="2. Hai state machine: upload object và import data"
+direction: right
+upload: "Upload object" {
+  start: "Bắt đầu" {shape: circle}
+  start -> CREATED
+  CREATED -> UPLOADING: "multipart initiated"
+  UPLOADING -> UPLOADED: "storage complete"
+  UPLOADING -> CANCELLED: "user cancel / expiry"
+  UPLOADING -> FAILED: "unrecoverable error"
+}
+import: "Import data" {
+  start: "Bắt đầu" {shape: circle}
+  start -> QUEUED
+  QUEUED -> PARSING -> VALIDATING -> MERGING -> COMPLETED
+  PARSING -> FAILED
+  VALIDATING -> FAILED
+  MERGING -> COMPLETED_WITH_ERRORS
+}
+upload.UPLOADED -> import.QUEUED
 ```
 
 - `UPLOADED` chỉ có nghĩa object file đã ghép xong trên S3/MinIO/GCS.
@@ -97,22 +92,31 @@ stateDiagram-v2
 
 ### 3. Kiến trúc end-to-end
 
-```mermaid
-flowchart LR
-    U[User] --> R[React app]
-    R --> API[Stateless Import API]
-    API --> DB[(PostgreSQL\nimport metadata)]
-    API --> OS[(S3 / Object Storage)]
-    R -->|presigned UploadPart URLs| OS
-    R -->|ETag / progress callback| API
-    API -->|complete upload| OS
-    API --> Q[Durable Queue]
-    Q --> W[Import Workers]
-    W --> OS
-    W --> ST[(Staging tables)]
-    W --> MAIN[(Business tables)]
-    W --> DB
-    R -->|poll or SSE| API
+```d2 title="3. Kiến trúc end-to-end"
+direction: right
+U: "User"
+R: "React app"
+API: "Stateless Import API"
+DB: "PostgreSQL\nimport metadata" {shape: cylinder}
+OS: "S3 / Object Storage" {shape: cylinder}
+Q: "Durable Queue"
+W: "Import Workers"
+ST: "Staging tables" {shape: cylinder}
+MAIN: "Business tables" {shape: cylinder}
+U -> R
+R -> API
+API -> DB
+API -> OS
+R -> OS: "presigned UploadPart URLs"
+R -> API: "ETag / progress callback"
+API -> OS: "complete upload"
+API -> Q
+Q -> W
+W -> OS
+W -> ST
+W -> MAIN
+W -> DB
+R -> API: "poll or SSE"
 ```
 
 | Thành phần | Trách nhiệm | Không nên làm |
@@ -128,19 +132,31 @@ flowchart LR
 
 Trước khi debug sâu, cần xác định user đang mắc ở chặng nào.
 
-```mermaid
-flowchart TD
-    A[Import chưa hoàn tất] --> B{Object đã UPLOADED?}
-    B -->|Chưa| C{Có multipart uploadId?}
-    C -->|Không| D[Tạo job / initiate upload lỗi]
-    C -->|Có| E{Thiếu part hay URL hết hạn?}
-    E -->|Thiếu part| F[Resume: lấy completed parts, upload phần thiếu]
-    E -->|Đủ part| G[CompleteMultipartUpload / manifest lỗi]
-    B -->|Rồi| H{Có queue message / job QUEUED?}
-    H -->|Không| I[Outbox/enqueue transition lỗi]
-    H -->|Có| J{Worker có progress?}
-    J -->|Không| K[Queue lag, quota hoặc worker failure]
-    J -->|Có| L[Parse, validation, merge hoặc DB contention]
+```d2 title="4. Triage nhanh: lỗi đang ở upload hay import?"
+direction: down
+A: "Import chưa hoàn tất"
+B: "Object đã UPLOADED?" {shape: diamond}
+C: "Có multipart uploadId?" {shape: diamond}
+D: "Tạo job / initiate upload lỗi"
+E: "Thiếu part hay URL hết hạn?" {shape: diamond}
+F: "Resume: lấy completed parts, upload phần thiếu"
+G: "CompleteMultipartUpload / manifest lỗi"
+H: "Có queue message / job QUEUED?" {shape: diamond}
+I: "Outbox/enqueue transition lỗi"
+J: "Worker có progress?" {shape: diamond}
+K: "Queue lag, quota hoặc worker failure"
+L: "Parse, validation, merge hoặc DB contention"
+A -> B
+B -> C: "Chưa"
+C -> D: "Không"
+C -> E: "Có"
+E -> F: "Thiếu part"
+E -> G: "Đủ part"
+B -> H: "Rồi"
+H -> I: "Không"
+H -> J: "Có"
+J -> K: "Không"
+J -> L: "Có"
 ```
 
 | Triệu chứng | Nguyên nhân thường gặp | Kiểm tra ngay | Hướng xử lý |
@@ -179,44 +195,41 @@ Dùng `9,500` thay vì sát `10,000` để còn margin; giới hạn chính xác
 
 #### Sequence: tạo upload rồi upload parts song song
 
-```mermaid
-sequenceDiagram
-    participant FE as React / Browser
-    participant API as Import API
-    participant DB as PostgreSQL
-    participant S3 as Object Storage
-
-    FE->>API: POST /imports + Idempotency-Key
-    API->>DB: Insert import status=CREATED
-    API->>S3: CreateMultipartUpload(storageKey)
-    S3-->>API: uploadId
-    API->>DB: Save uploadId, partSize, totalParts
-    API-->>FE: importId, partSize
-
-    loop Request a small URL batch
-        FE->>API: POST /imports/{id}/presign {partNumbers}
-        API-->>FE: one signed URL per part
-    end
-
-    par limited concurrency, e.g. 3 parts
-        FE->>FE: file.slice(range for part 1)
-        FE->>S3: PUT UploadPart(uploadId, partNumber=1)
-        S3-->>FE: ETag-1
-        FE->>API: POST /imports/{id}/parts {partNumber:1, etag:ETag-1}
-        API->>DB: Upsert completed part 1
-    and
-        FE->>FE: file.slice(range for part 2)
-        FE->>S3: PUT UploadPart(uploadId, partNumber=2)
-        S3-->>FE: ETag-2
-        FE->>API: POST /imports/{id}/parts {partNumber:2, etag:ETag-2}
-        API->>DB: Upsert completed part 2
-    end
-
-    FE->>API: POST /imports/{id}/complete
-    API->>DB: Lock import; verify every expected part
-    API->>S3: CompleteMultipartUpload(uploadId, ordered ETags)
-    S3-->>API: completed object
-    API->>DB: status=UPLOADED + outbox event
+```d2 title="Sequence: tạo upload rồi upload parts song song"
+shape: sequence_diagram
+FE: "React / Browser"
+API: "Import API"
+DB: "PostgreSQL"
+S3: "Object Storage"
+FE -> API: "POST /imports + Idempotency-Key"
+API -> DB: "Insert import status=CREATED"
+API -> S3: "CreateMultipartUpload(storageKey)"
+S3 -> API: "uploadId" {style.stroke-dash: 4}
+API -> DB: "Save uploadId, partSize, totalParts"
+API -> FE: "importId, partSize" {style.stroke-dash: 4}
+phase1: "Lặp: Request a small URL batch" {
+  FE -> API: "POST /imports/{id}/presign {partNumbers}"
+  API -> FE: "one signed URL per part" {style.stroke-dash: 4}
+}
+phase2: "Song song: limited concurrency, e.g. 3 parts" {
+  FE -> FE: "file.slice(range for part 1)"
+  FE -> S3: "PUT UploadPart(uploadId, partNumber=1)"
+  S3 -> FE: "ETag-1" {style.stroke-dash: 4}
+  FE -> API: "POST /imports/{id}/parts {partNumber:1, etag:ETag-1}"
+  API -> DB: "Upsert completed part 1"
+}
+phase3: "Nhánh song song: " {
+  FE -> FE: "file.slice(range for part 2)"
+  FE -> S3: "PUT UploadPart(uploadId, partNumber=2)"
+  S3 -> FE: "ETag-2" {style.stroke-dash: 4}
+  FE -> API: "POST /imports/{id}/parts {partNumber:2, etag:ETag-2}"
+  API -> DB: "Upsert completed part 2"
+}
+FE -> API: "POST /imports/{id}/complete"
+API -> DB: "Lock import; verify every expected part"
+API -> S3: "CompleteMultipartUpload(uploadId, ordered ETags)"
+S3 -> API: "completed object" {style.stroke-dash: 4}
+API -> DB: "status=UPLOADED + outbox event"
 ```
 
 Một presigned URL chỉ ký cho một operation cụ thể, gồm `uploadId` và `partNumber`, vì vậy **mỗi part có URL riêng**. Nhưng FE không phải xin một URL rồi upload xong mới xin URL tiếp theo. Thường xin 3–20 URLs theo batch, song song giới hạn 3–5 PUTs tùy network/memory, rồi xin tiếp. Nó giảm response URL khổng lồ với file nhiều part và xử lý tốt URL hết hạn.
@@ -392,25 +405,23 @@ React nhớ importId=imp_123
 → FE chỉ upload 4, 6, 7, 8, 9, 10
 ```
 
-```mermaid
-sequenceDiagram
-    participant FE as React after refresh
-    participant API as Import API
-    participant DB as PostgreSQL
-    participant S3 as Object Storage
-
-    FE->>API: GET /imports/{id}/resume
-    API->>DB: Read import + confirmed part manifest
-    API->>S3: ListParts(uploadId) for reconciliation
-    S3-->>API: parts known by storage
-    API->>DB: Reconcile missing callback records if safe
-    API-->>FE: partSize, totalParts, confirmedParts
-
-    FE->>FE: User re-selects same local file
-    FE->>FE: Verify name, size, fingerprint
-    FE->>API: POST /presign for missing part numbers
-    API-->>FE: signed URLs
-    FE->>S3: upload only missing parts
+```d2 title="7. Resume sau refresh hoặc mất mạng"
+shape: sequence_diagram
+FE: "React after refresh"
+API: "Import API"
+DB: "PostgreSQL"
+S3: "Object Storage"
+FE -> API: "GET /imports/{id}/resume"
+API -> DB: "Read import + confirmed part manifest"
+API -> S3: "ListParts(uploadId) for reconciliation"
+S3 -> API: "parts known by storage" {style.stroke-dash: 4}
+API -> DB: "Reconcile missing callback records if safe"
+API -> FE: "partSize, totalParts, confirmedParts" {style.stroke-dash: 4}
+FE -> FE: "User re-selects same local file"
+FE -> FE: "Verify name, size, fingerprint"
+FE -> API: "POST /presign for missing part numbers"
+API -> FE: "signed URLs" {style.stroke-dash: 4}
+FE -> S3: "upload only missing parts"
 ```
 
 `ListParts` hữu ích vì có failure window sau:
@@ -478,17 +489,25 @@ Sau đó backend gọi `CompleteMultipartUpload`. Không nên giữ database tra
 
 Nếu process chết ở giữa, reconciliation worker tìm jobs `COMPLETING` quá hạn, kiểm tra `HeadObject`/storage state rồi repair transition. Đây là cùng tư duy xử lý dual-write: storage complete và DB update không có shared distributed transaction.
 
-```mermaid
-flowchart TD
-    A[UPLOADING] --> B[Lock, validate manifest]
-    B --> C[COMPLETING]
-    C --> D[Call storage CompleteMultipartUpload]
-    D -->|success| E[DB transaction: UPLOADED + outbox]
-    E --> F[Relay publishes ImportUploaded]
-    D -->|unknown timeout/crash| G[Reconciler checks object exists]
-    G -->|exists| E
-    G -->|not exists and resumable| A
-    G -->|cannot recover| H[FAILED with reason]
+```d2 title="8. Complete upload: ngăn double complete và lost enqueue"
+direction: down
+A: "UPLOADING"
+B: "Lock, validate manifest"
+C: "COMPLETING"
+D: "Call storage CompleteMultipartUpload"
+E: "DB transaction: UPLOADED + outbox"
+F: "Relay publishes ImportUploaded"
+G: "Reconciler checks object exists"
+H: "FAILED with reason"
+A -> B
+B -> C
+C -> D
+D -> E: "success"
+E -> F
+D -> G: "unknown timeout/crash"
+G -> E: "exists"
+G -> A: "not exists and resumable"
+G -> H: "cannot recover"
 ```
 
 <Callout type="warn" title="Đừng publish queue message bằng fire-and-forget sau DB update">
@@ -530,18 +549,29 @@ Nếu cần preview, chỉ parse header hoặc vài chục rows đầu trong Web
 
 Sau khi upload hoàn chỉnh, worker nhận `importId`, tải object qua stream và xử lý độc lập với web request.
 
-```mermaid
-flowchart LR
-    A[Queue: ImportUploaded] --> B[Worker claims job]
-    B --> C[Stream download object]
-    C --> D[Parse rows incrementally]
-    D --> E[Bulk load staging]
-    E --> F[Validate + dedupe]
-    F --> G{Business contract}
-    G -->|All-or-nothing| H[Publish / merge only if all valid]
-    G -->|Partial success| I[Merge valid batches + error report]
-    H --> J[Update COMPLETED]
-    I --> K[Update COMPLETED_WITH_ERRORS]
+```d2 title="10. Worker import pipeline: stream → staging → validate → merge"
+direction: right
+A: "Queue: ImportUploaded"
+B: "Worker claims job"
+C: "Stream download object"
+D: "Parse rows incrementally"
+E: "Bulk load staging"
+F: "Validate + dedupe"
+G: "Business contract" {shape: diamond}
+H: "Publish / merge only if all valid"
+I: "Merge valid batches + error report"
+J: "Update COMPLETED"
+K: "Update COMPLETED_WITH_ERRORS"
+A -> B
+B -> C
+C -> D
+D -> E
+E -> F
+F -> G
+G -> H: "All-or-nothing"
+G -> I: "Partial success"
+H -> J
+I -> K
 ```
 
 #### Vì sao không parse toàn file trong app memory?
@@ -736,19 +766,27 @@ Không có một con số “1M users cần Kafka”. Cần capacity theo reques
 
 #### Tách resource pools
 
-```mermaid
-flowchart TB
-    Internet --> CDN[CDN / WAF / Rate limit]
-    CDN --> LB[Load Balancer]
-    LB --> API[Online API pods\nstateless]
-    LB --> WS[Realtime gateway\nif needed]
-    API --> RDB[(Primary DB)]
-    API --> Cache[(Redis cache/session)]
-
-    Browser -->|direct multipart bytes| Storage[(Object Storage)]
-    API --> Queue[Import queue]
-    Queue --> Worker[Dedicated worker pool]
-    Worker --> RDB
+```d2 title="Tách resource pools"
+direction: down
+CDN: "CDN / WAF / Rate limit"
+LB: "Load Balancer"
+API: "Online API pods\nstateless"
+WS: "Realtime gateway\nif needed"
+RDB: "Primary DB" {shape: cylinder}
+Cache: "Redis cache/session" {shape: cylinder}
+Storage: "Object Storage" {shape: cylinder}
+Queue: "Import queue"
+Worker: "Dedicated worker pool"
+Internet -> CDN
+CDN -> LB
+LB -> API
+LB -> WS
+API -> RDB
+API -> Cache
+Browser -> Storage: "direct multipart bytes"
+API -> Queue
+Queue -> Worker
+Worker -> RDB
 ```
 
 | Loại resource | Isolation nên có |

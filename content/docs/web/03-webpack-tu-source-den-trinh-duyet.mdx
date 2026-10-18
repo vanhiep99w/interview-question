@@ -137,12 +137,17 @@ entry: './src/main.tsx',
 
 Webpack đọc `main.tsx`, gặp import rồi tiếp tục tìm các module liên quan:
 
-```text
-main.tsx
-├── react-dom/client  → package trong node_modules
-├── ./App             → src/App.tsx
-│   └── react         → package trong node_modules
-└── ./styles.css      → src/styles.css
+```d2 title="Module graph từ entry"
+direction: right
+entry: "main.tsx"
+reactdom: "react-dom/client\n(node_modules)"
+app: "src/App.tsx"
+react: "react\n(node_modules)"
+css: "src/styles.css"
+entry -> reactdom
+entry -> app: "./App"
+app -> react
+entry -> css: "./styles.css"
 ```
 
 Đó là **dependency graph**: bản đồ module nào cần module nào.
@@ -161,16 +166,22 @@ main.tsx
 
 <SourceRef project="webpack-react-demo" file="webpack.config.cjs" region="loaders">Xem các rule TypeScript và CSS</SourceRef>
 
-```text
-App.tsx
-  → ts-loader gọi TypeScript
-  → JavaScript
-  → Webpack đóng gói cùng dependencies
-
-styles.css
-  → css-loader
-  → style-loader
-  → code chèn CSS khi bundle chạy trong browser
+```d2 title="Loader xử lý TSX và CSS"
+direction: right
+tsx: "App.tsx"
+loader: "ts-loader / TypeScript"
+js: "JavaScript"
+bundle: "Webpack bundle"
+tsx -> loader
+loader -> js
+js -> bundle
+css: "styles.css"
+cssloader: "css-loader"
+styleloader: "style-loader"
+inject: "Chèn CSS khi bundle chạy trong browser"
+css -> cssloader
+cssloader -> styleloader
+styleloader -> inject
 ```
 
 Trong `test: /\.tsx?$/`, `x?` nghĩa là có hoặc không có chữ `x`, nên rule khớp cả `.ts` và `.tsx`.
@@ -237,12 +248,25 @@ Ví dụ không đặt `noEmit: true` trong file vì ts-loader cần TypeScript 
 
 ## 6. Dev và build khác nhau ở đâu?
 
-```text
-TRONG NODE.JS
-npm → Webpack đọc config → build → phục vụ hoặc ghi output
-
-TRONG BROWSER
-HTML → tải bundle → main chạy → React render App
+```d2 title="Build process khác browser runtime"
+direction: right
+build: "Trong Node.js" {
+config: "Webpack đọc config"
+compile: "Build"
+output: "Phục vụ hoặc ghi output"
+npm -> config
+config -> compile
+compile -> output
+}
+runtime: "Trong browser" {
+  html: "HTML"
+bundle: "Tải bundle"
+entry: "main chạy"
+app: "React render App"
+html -> bundle
+bundle -> entry
+entry -> app
+}
 ```
 
 **Webpack CLI không chạy trong browser.** Bundle có thể chứa code hỗ trợ do Webpack sinh ra, gọi là **Webpack runtime**; đó không phải toàn bộ công cụ build. Xem <SourceRef project="webpack-react-demo" snapshot="output-basic" file="runtime/module-cache.js" region="runtime">runtime quản lý module và cache</SourceRef>: đoạn này do Webpack sinh, không phải code bạn phải tự viết trong `main.tsx`.
@@ -261,11 +285,17 @@ cat dist/index.html
 
 Bạn sẽ thấy HTML tham chiếu bundle, không tham chiếu `App.tsx`:
 
-```text
-main.tsx ────────────┐
-App.tsx ─────────────┤
-React / React DOM ───┼──→ main.<hash>.js
-CSS + style code ───┘
+```d2 title="Nhiều module được đóng gói thành bundle"
+direction: right
+entry: "main.tsx"
+app: "App.tsx"
+react: "React / React DOM"
+css: "CSS + style code"
+bundle: "main.<hash>.js"
+entry -> bundle
+app -> bundle
+react -> bundle
+css -> bundle
 ```
 
 Đây là hình dung cho cấu hình hiện tại, không phải mọi project Webpack.
@@ -332,11 +362,31 @@ Hai thay đổi duy nhất so với bản cơ bản:
 1. Code khởi động React được chuyển sang <SourceRef project="webpack-react-demo" snapshot="async-bootstrap" file="src/bootstrap.tsx" />.
 2. `main.tsx` chỉ còn dynamic import để tải bootstrap.
 
-```tsx
-void import(
-  /* webpackChunkName: "bootstrap" */
-  './bootstrap'
-).catch(console.error);
+```code-diff
+title: main.tsx trước và sau async bootstrap
+language: tsx
+view: split
+before:
+  label: basic/src/main.tsx
+  code: |
+    import { createRoot } from 'react-dom/client';
+    import { App } from './App';
+    import './styles.css';
+
+    const element = document.getElementById('root');
+
+    if (!element) {
+      throw new Error('Không tìm thấy phần tử #root trong HTML');
+    }
+
+    createRoot(element).render(<App />);
+after:
+  label: async-bootstrap/src/main.tsx
+  code: |
+    void import(
+      /* webpackChunkName: "bootstrap" */
+      './bootstrap'
+    ).catch(console.error);
 ```
 
 **`bootstrap` không phải file Webpack tự sinh.** Nó là source do chúng ta viết, tên do chúng ta chọn. Config vẫn dùng `entry: './src/main.tsx'`.

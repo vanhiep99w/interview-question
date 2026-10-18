@@ -109,12 +109,17 @@ Server phải giữ thêm file descriptor, session state, heartbeat và outbound
 
 Mục tiêu của SharedWorker là đổi topology thành:
 
-```mermaid
-flowchart LR
-    T1[Tab 1: orders] <-->|MessagePort| SW[SharedWorker\nconnection manager]
-    T2[Tab 2: notifications] <-->|MessagePort| SW
-    T3[Tab 3: orders + chat] <-->|MessagePort| SW
-    SW <-->|1 WebSocket| WS[Realtime Gateway]
+```d2 title="1. Vấn đề thực tế: 10 tab tạo 10 physical connections"
+direction: right
+T1: "Tab 1: orders"
+SW: "SharedWorker\nconnection manager"
+T2: "Tab 2: notifications"
+T3: "Tab 3: orders + chat"
+WS: "Realtime Gateway"
+T1 <-> SW: "MessagePort"
+T2 <-> SW: "MessagePort"
+T3 <-> SW: "MessagePort"
+SW <-> WS: "1 WebSocket"
 ```
 
 Worker không chỉ “giữ socket hộ”. Nó trở thành một broker nhỏ trong browser với bốn trách nhiệm:
@@ -245,23 +250,22 @@ Dùng `sync_subscriptions` chứa toàn bộ tập topic thường dễ làm ide
 
 Luồng chính:
 
-```mermaid
-sequenceDiagram
-    participant A as Tab A
-    participant B as Tab B
-    participant W as SharedWorker
-    participant S as Realtime Server
-
-    A->>W: REGISTER + SUBSCRIBE orders
-    W->>S: mở WebSocket
-    W->>S: sync_subscriptions [orders]
-    B->>W: REGISTER + SUBSCRIBE notifications
-    W->>S: sync_subscriptions [orders, notifications]
-    S-->>W: event topic=orders seq=42
-    W-->>A: EVENT orders seq=42
-    Note over W,B: Tab B không subscribe orders nên không nhận
-    B->>W: DISCONNECT
-    W->>S: sync_subscriptions [orders]
+```d2 title="Message giữa worker và realtime server"
+shape: sequence_diagram
+A: "Tab A"
+B: "Tab B"
+W: "SharedWorker"
+S: "Realtime Server"
+A -> W: "REGISTER + SUBSCRIBE orders"
+W -> S: "mở WebSocket"
+W -> S: "sync_subscriptions [orders]"
+B -> W: "REGISTER + SUBSCRIBE notifications"
+W -> S: "sync_subscriptions [orders, notifications]"
+S -> W: "event topic=orders seq=42" {style.stroke-dash: 4}
+W -> A: "EVENT orders seq=42" {style.stroke-dash: 4}
+W."Tab B không subscribe orders nên không nhận"
+B -> W: "DISCONNECT"
+W -> S: "sync_subscriptions [orders]"
 ```
 
 ---
@@ -386,17 +390,16 @@ Browser `WebSocket` constructor không cho JavaScript tùy ý đặt header `Aut
 
 Flow khuyến nghị cho ứng dụng web dùng session cookie:
 
-```mermaid
-sequenceDiagram
-    participant W as SharedWorker
-    participant H as HTTPS API
-    participant R as Realtime Gateway
-
-    W->>H: POST /api/realtime/ticket + HttpOnly cookie
-    H-->>W: one-time ticket, TTL 30s
-    W->>R: WSS handshake ?ticket=...
-    R->>R: consume ticket + validate Origin
-    R-->>W: 101 Switching Protocols
+```d2 title="8. Authentication: đừng nhét access token dài hạn vào URL"
+shape: sequence_diagram
+W: "SharedWorker"
+H: "HTTPS API"
+R: "Realtime Gateway"
+W -> H: "POST /api/realtime/ticket + HttpOnly cookie"
+H -> W: "one-time ticket, TTL 30s" {style.stroke-dash: 4}
+W -> R: "WSS handshake ?ticket=..."
+R -> R: "consume ticket + validate Origin"
+R -> W: "101 Switching Protocols" {style.stroke-dash: 4}
 ```
 
 Ticket xuất hiện trong URL nhưng chỉ dùng một lần, hết hạn rất nhanh và phải được redact khỏi log. Không đưa refresh token hoặc access token sống hàng giờ vào query string.
@@ -420,17 +423,27 @@ Khi user logout hoặc switch account, mọi tab và worker phải thống nhấ
 
 Flow reconnect nên là:
 
-```mermaid
-flowchart TD
-    C[Socket close bất thường] --> A{Còn tab active?}
-    A -->|Không| S[Không reconnect]
-    A -->|Có| B[Backoff lũy thừa + jitter]
-    B --> T[Lấy ticket mới]
-    T --> O[Mở WebSocket]
-    O --> R[Sync subscriptions + sequence cuối]
-    R --> G{Server resume được?}
-    G -->|Có| E[Phát các event còn thiếu]
-    G -->|Không| F[RESYNC_REQUIRED → fetch snapshot]
+```d2 title="9. Reconnect đúng: backoff, jitter và state recovery"
+direction: down
+C: "Socket close bất thường"
+A: "Còn tab active?" {shape: diamond}
+S: "Không reconnect"
+B: "Backoff lũy thừa + jitter"
+T: "Lấy ticket mới"
+O: "Mở WebSocket"
+R: "Sync subscriptions + sequence cuối"
+G: "Server resume được?" {shape: diamond}
+E: "Phát các event còn thiếu"
+F: "RESYNC_REQUIRED → fetch snapshot"
+C -> A
+A -> S: "Không"
+A -> B: "Có"
+B -> T
+T -> O
+O -> R
+R -> G
+G -> E: "Có"
+G -> F: "Không"
 ```
 
 Không reconnect ngay lập tức trong vòng lặp. Công thức đơn giản:

@@ -2,7 +2,7 @@
 
 Website tổng hợp câu hỏi phỏng vấn kỹ thuật. Mỗi câu hỏi là một file `.md` riêng, gồm câu hỏi và câu trả lời chi tiết bằng tiếng Việt.
 
-**Stack:** Next.js 15 + Fumadocs + Cloudflare Pages
+**Stack:** Next.js 16 + Fumadocs + docs-kit + Cloudflare Pages · Node.js 22+
 
 ## Chạy local
 
@@ -61,6 +61,14 @@ description: "Mô tả ngắn"
 1. Tạo folder `content/docs/{category}/`
 2. Tạo `meta.json` với `title` và `pages`
 3. Thêm tên folder vào `content/docs/meta.json`
+
+## Diagram và component tài liệu
+
+Dùng D2 thay Mermaid/ASCII cho sơ đồ kiến trúc, flow, state machine và sequence.
+Giữ cây thư mục, log và payload ở dạng text. Terminal Session, Protocol Exchange,
+Code Diff, Span Waterfall và Code Walkthrough đã được tích hợp khi cần.
+
+Xem [hướng dẫn docs-kit](docs/docs-kit.md) để viết fence, dùng icon local và kiểm thử.
 
 ## Source code tham chiếu trong bài
 

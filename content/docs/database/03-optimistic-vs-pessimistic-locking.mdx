@@ -91,31 +91,33 @@ Hai strategy khác nhau chủ yếu ở thời điểm xử lý conflict.
 
 #### Optimistic Lock — làm trước, kiểm tra sau
 
-```txt
-READ row version=7
-    ↓
-Tính toán mà không giữ explicit row lock
-    ↓
-UPDATE ... WHERE id=? AND version=7
-    ↓
-0 row updated? Có người đã sửa trước → rollback/conflict
-1 row updated? Thành công → version=8
+```d2 title="Optimistic locking kiểm tra version khi ghi"
+direction: down
+read: "READ row version=7"
+compute: "Tính toán không giữ explicit row lock"
+update: "UPDATE WHERE id=? AND version=7"
+result: "Số row updated?" {shape: diamond}
+read -> compute
+compute -> update
+update -> result
+conflict: "Rollback / conflict"
+success: "Thành công, version=8"
+result -> conflict: "0"
+result -> success: "1"
 ```
 
 Nó “optimistic” vì giả định đa số transaction sẽ không đụng nhau. Nếu giả định đúng, không ai phải chờ lock dài; nếu sai, work đã làm của transaction thua cuộc bị bỏ và có thể phải chạy lại.
 
 #### Pessimistic Lock — khóa trước, làm sau
 
-```txt
-BEGIN
-    ↓
-SELECT ... FOR UPDATE
-    ↓
-Giữ row lock trong transaction
-    ↓
-Check + update
-    ↓
-COMMIT/ROLLBACK → release lock
+```d2 title="Pessimistic locking giữ lock đến hết transaction"
+direction: right
+n0: "BEGIN"
+n1: "SELECT ... FOR UPDATE"
+n2: "Giữ row lock trong transaction"
+n3: "Check + update"
+n4: "COMMIT / ROLLBACK → release lock"
+n0 -> n1 -> n2 -> n3 -> n4
 ```
 
 Nó “pessimistic” vì giả định conflict đủ khả năng xảy ra để serialize access ngay từ đầu. Transaction sau không làm work trên state sắp hết hạn, nhưng phải chờ và có thể làm tăng tail latency.
@@ -238,18 +240,22 @@ Affected rows bằng 0 là tín hiệu state đã stale. Hibernate/JPA ném opti
 
 Giả sử cả hai transaction đọc version `7`:
 
-```txt
-Time     Transaction T1                    Transaction T2
-----     --------------                    --------------
-t0       SELECT → available=10, v=7
- t1                                         SELECT → available=10, v=7
- t2      reserve(7) → available=3
- t3                                         reserve(6) → available=4
- t4      UPDATE ... WHERE v=7 → 1 row
- t5      COMMIT → DB version=8
- t6                                         UPDATE ... WHERE v=7 → 0 row
- t7                                         OptimisticLockException
- t8                                         ROLLBACK
+```d2 title="Optimistic conflict khi hai transaction cùng version"
+shape: sequence_diagram
+t1: "Transaction T1"
+db: "Database"
+t2: "Transaction T2"
+t1 -> db: "SELECT → available=10, version=7"
+db -> t1: "available=10, version=7"
+t2 -> db: "SELECT → available=10, version=7"
+db -> t2: "available=10, version=7"
+t1 -> t1: "reserve(7) → available=3"
+t2 -> t2: "reserve(6) → available=4"
+t1 -> db: "UPDATE WHERE version=7 → 1 row"
+t1 -> db: "COMMIT → DB version=8"
+t2 -> db: "UPDATE WHERE version=7 → 0 row"
+db -> t2: "OptimisticLockException"
+t2 -> db: "ROLLBACK"
 ```
 
 Optimistic lock **không đảm bảo mọi request đều thành công**. Nó đảm bảo stale request không âm thầm ghi đè dữ liệu mới. Business/API vẫn phải quyết định:
@@ -563,18 +569,19 @@ COMMIT;
 
 Timeline:
 
-```txt
-Time     Transaction T1                    Transaction T2
-----     --------------                    --------------
-t0       BEGIN
- t1      SELECT ... FOR UPDATE → lock row
- t2                                         BEGIN
- t3                                         SELECT ... FOR UPDATE → WAIT
- t4      validate + UPDATE
- t5      COMMIT → release lock
- t6                                         lock acquired, đọc state mới
- t7                                         validate + UPDATE/REJECT
- t8                                         COMMIT
+```d2 title="Pessimistic locking buộc transaction thứ hai chờ"
+shape: sequence_diagram
+t1: "Transaction T1"
+db: "Database"
+t2: "Transaction T2"
+t1 -> db: "BEGIN; SELECT FOR UPDATE → lock row"
+t2 -> db: "BEGIN; SELECT FOR UPDATE"
+t2."WAIT — T1 đang giữ row lock"
+t1 -> db: "Validate + UPDATE"
+t1 -> db: "COMMIT → release lock"
+db -> t2: "Lock acquired, đọc state mới"
+t2 -> db: "Validate + UPDATE / REJECT"
+t2 -> db: "COMMIT"
 ```
 
 Điểm mạnh là T2 không làm business calculation trên state cũ. Điểm yếu là thời gian T2 chờ phụ thuộc transaction T1; nếu T1 gọi payment API 3 giây trong transaction, mọi request cùng product có thể xếp hàng phía sau.
@@ -823,9 +830,16 @@ Transaction 2 ngắn:
 
 Ví dụ transfer:
 
-```txt
-T1: lock account 10 → muốn lock account 20
-T2: lock account 20 → muốn lock account 10
+```d2 title="Hai thứ tự lock ngược nhau có thể gây deadlock"
+shape: sequence_diagram
+t1: "Transaction T1"
+a10: "Account 10"
+a20: "Account 20"
+t2: "Transaction T2"
+t1 -> a10: "Acquire lock"
+t2 -> a20: "Acquire lock"
+t1 -> a20: "Wait — T2 đang giữ lock"
+t2 -> a10: "Wait — T1 đang giữ lock"
 ```
 
 Hai transaction chờ nhau. PostgreSQL detect deadlock và abort một transaction, nhưng application không nên dựa vào transaction nào sẽ bị chọn.

@@ -63,18 +63,28 @@ Interviewer expect bạn quyết định được **architectural trade-off ở 
 
 ### Tổng quan pipeline
 
-```mermaid
-flowchart TD
-    A[File CSV\n1M rows] --> B[Load vào\nStaging Table\nvia COPY]
-    B --> C{Validate\ndata}
-    C -->|Invalid rows| D[Error log /\nDead-letter table]
-    C -->|Valid| E[Batch Merge Loop\n10K rows / batch]
-    E --> F{Batch done?}
-    F -->|Còn batch| G[COMMIT\n+ optional sleep]
-    G --> E
-    F -->|Hết| H[Cleanup\nStaging Table]
-    H --> I[Rebuild Indexes\nnếu đã drop]
-    I --> J[Done]
+```d2 title="Tổng quan pipeline"
+direction: down
+A: "File CSV\n1M rows"
+B: "Load vào\nStaging Table\nvia COPY"
+C: "Validate\ndata" {shape: diamond}
+D: "Error log /\nDead-letter table"
+E: "Batch Merge Loop\n10K rows / batch"
+F: "Batch done?" {shape: diamond}
+G: "COMMIT\n+ optional sleep"
+H: "Cleanup\nStaging Table"
+I: "Rebuild Indexes\nnếu đã drop"
+J: "Done"
+A -> B
+B -> C
+C -> D: "Invalid rows"
+C -> E: "Valid"
+E -> F
+F -> G: "Còn batch"
+G -> E
+F -> H: "Hết"
+H -> I
+I -> J
 ```
 
 ---

@@ -99,18 +99,19 @@ Cluster không nói rõ data được chia hay copy thế nào. Nó chỉ nói: 
 
 Hình dung đơn giản:
 
-```txt
-                 ┌──────────────┐
-Client/API ─────▶│ Load Balancer│
-                 └──────┬───────┘
-                        │
-        ┌───────────────┼───────────────┐
-        ▼               ▼               ▼
-   ┌─────────┐     ┌─────────┐     ┌─────────┐
-   │ Node A  │     │ Node B  │     │ Node C  │
-   └─────────┘     └─────────┘     └─────────┘
-
-                 Một cluster 3 node
+```d2 title="Cluster gồm nhiều node"
+direction: down
+client: "Client / API"
+lb: "Load Balancer"
+client -> lb
+cluster: "Cluster 3 node" {
+  a: "Node A"
+  b: "Node B"
+  c: "Node C"
+}
+lb -> cluster.a
+lb -> cluster.b
+lb -> cluster.c
 ```
 
 Tùy hệ thống, các node có thể ngang hàng hoặc có vai trò khác nhau.
@@ -168,17 +169,15 @@ Mục tiêu chính:
 
 Ví dụ một database có primary và 2 replicas:
 
-```txt
-                 write
-App ────────────────▶ Primary
-                        │
-                        │ replicate
-                        ▼
-                 ┌─────────────┐
-                 │             │
-                 ▼             ▼
-              Replica 1     Replica 2
-                read          read
+```d2 title="Primary nhận ghi, replicas phục vụ đọc"
+direction: down
+app: "App"
+primary: "Primary"
+app -> primary: "Write"
+primary -> r1: "Replica 1: Replicate"
+primary -> r2: "Replica 2: Replicate"
+r1 -> read1: "Read"
+r2 -> read2: "Read"
 ```
 
 Nếu primary chứa order `ord_123`, replica cũng sẽ có order `ord_123` sau khi replication chạy xong. Đây là điểm khác sharding: replication copy cùng data, không chia data.
@@ -187,10 +186,15 @@ Nếu primary chứa order `ord_123`, replica cũng sẽ có order `ord_123` sau
 
 Primary chỉ báo write thành công sau khi replica xác nhận đã nhận/ghi data.
 
-```txt
-Client -> Primary -> Replica
-                wait ACK
-Client <- success sau khi replica ACK
+```d2 title="Synchronous replication chờ replica ACK"
+shape: sequence_diagram
+client: "Client"
+primary: "Primary"
+replica: "Replica"
+client -> primary: "Write"
+primary -> replica: "Replicate"
+replica -> primary: "ACK"
+primary -> client: "Success sau replica ACK"
 ```
 
 Ưu điểm:
@@ -208,10 +212,14 @@ Nhược điểm:
 
 Primary báo success ngay sau khi ghi local, rồi gửi data sang replica sau.
 
-```txt
-Client -> Primary
-Client <- success
-Primary -> Replica sau đó
+```d2 title="Asynchronous replication trả success trước"
+shape: sequence_diagram
+client: "Client"
+primary: "Primary"
+replica: "Replica"
+client -> primary: "Write"
+primary -> client: "Success"
+primary -> replica: "Replicate sau đó"
 ```
 
 Ưu điểm:
@@ -239,16 +247,15 @@ Trong production, nhiều hệ thống dùng async replication cho read replica 
 
 Ý tưởng cơ bản:
 
-```txt
-              writes
-Application ─────────▶ Primary
-                         │
-                         │ replication stream
-                         ▼
-             ┌─────────────────────┐
-             ▼                     ▼
-          Replica A             Replica B
-          reads                 reads
+```d2 title="Single-leader replication"
+direction: down
+app: "Application"
+primary: "Primary"
+app -> primary: "Writes"
+primary -> a: "Replica A: Replication stream"
+primary -> b: "Replica B: Replication stream"
+a -> ra: "Reads"
+b -> rb: "Reads"
 ```
 
 Primary thường chịu trách nhiệm:
@@ -335,17 +342,14 @@ shard = hash(user_id) % 4
 
 Hình dung:
 
-```txt
-                 ┌──────────────┐
-App ────────────▶│ Shard Router │
-                 └──────┬───────┘
-                        │
-        ┌───────────────┼───────────────┐
-        ▼               ▼               ▼
-   ┌─────────┐     ┌─────────┐     ┌─────────┐
-   │ Shard 1 │     │ Shard 2 │     │ Shard 3 │
-   │ users A │     │ users B │     │ users C │
-   └─────────┘     └─────────┘     └─────────┘
+```d2 title="Router chọn shard chứa phần dữ liệu cần đọc"
+direction: down
+app: "App"
+router: "Shard Router"
+app -> router
+router -> s1: "Shard 1\\nUsers A"
+router -> s2: "Shard 2\\nUsers B"
+router -> s3: "Shard 3\\nUsers C"
 ```
 
 Khác replication, mỗi shard chứa **phần data khác nhau**.
@@ -524,16 +528,24 @@ Khi N đổi từ 4 lên 5, phần lớn key đổi shard vì phép `% N` đổi
 
 Consistent hashing đặt node và key lên một vòng hash:
 
-```txt
-        [Node A]
-      /          \
- key1            key2
-    /              \
-[Node D]          [Node B]
-    \              /
- key4            key3
-      \          /
-        [Node C]
+```d2 title="Vòng consistent hashing — thứ tự token, không phải network hop"
+direction: right
+a: "Node A"
+b: "Node B"
+c: "Node C"
+d: "Node D"
+k2: "key2"
+a -> k2
+k2 -> b
+k3: "key3"
+b -> k3
+k3 -> c
+k4: "key4"
+c -> k4
+k4 -> d
+k1: "key1"
+d -> k1
+k1 -> a
 ```
 
 Key thuộc về node kế tiếp trên vòng. Khi thêm Node E, chỉ các key trong một đoạn gần Node E phải chuyển, không phải toàn bộ keyspace.
@@ -565,15 +577,23 @@ Shard 1 có 3 bản:
 
 Hình dung sharding + replication cùng lúc:
 
-```txt
-                Cluster
-
-        ┌──────────┐    ┌──────────┐    ┌──────────┐
-        │  Node A  │    │  Node B  │    │  Node C  │
-        │ S1 leader│    │ S1 repl  │    │ S1 repl  │
-        │ S2 repl  │    │ S2 leader│    │ S2 repl  │
-        │ S3 repl  │    │ S3 repl  │    │ S3 leader│
-        └──────────┘    └──────────┘    └──────────┘
+```d2 title="Mỗi shard có leader và replicas trên các node khác nhau"
+grid-columns: 3
+a: "Node A" {
+  s1: "S1 leader"
+  s2: "S2 replica"
+  s3: "S3 replica"
+}
+b: "Node B" {
+  s1: "S1 replica"
+  s2: "S2 leader"
+  s3: "S3 replica"
+}
+c: "Node C" {
+  s1: "S1 replica"
+  s2: "S2 replica"
+  s3: "S3 leader"
+}
 ```
 
 Ở đây có 3 shard, mỗi shard có 3 replica. Mỗi node có thể là leader của một shard và replica của shard khác.
@@ -651,17 +671,28 @@ Các database như Cassandra cho phép tune consistency level kiểu `ONE`, `QUO
 
 Ví dụ primary database chết:
 
-```txt
-Before:
-App writes -> Primary A
-              Replica B
-              Replica C
-
-Primary A chết
-
-After failover:
-App writes -> Primary B
-              Replica C
+```d2 mode=tabs title="Failover: promote replica và đổi writer endpoint"
+direction: right
+app: "App"
+cluster: "Cluster" {
+  a: "Primary A"
+  b: "Replica B"
+  c: "Replica C"
+}
+app -> cluster.a: "Writes"
+cluster.a -> cluster.b: "Replicate"
+cluster.a -> cluster.c: "Replicate"
+scenarios: {
+  "Sau failover": {
+    cluster.a: "Primary A — down" {style.stroke-dash: 4}
+    cluster.b: "Primary B"
+    (app -> cluster.a)[0]: null
+    (cluster.a -> cluster.b)[0]: null
+    (cluster.a -> cluster.c)[0]: null
+    app -> cluster.b: "Writes"
+    cluster.b -> cluster.c: "Replicate"
+  }
+}
 ```
 
 Failover gồm vài bước:
@@ -683,11 +714,14 @@ Split-brain xảy ra khi hệ thống có hơn một node cùng nghĩ mình là 
 
 Ví dụ network bị chia:
 
-```txt
-          Network partition
-
-App A -> Primary A     X     Replica B <- App B
-        thinks leader        promoted leader
+```d2 title="Split-brain: hai phía cùng nhận write"
+direction: right
+appa: "App A"
+a: "Primary A\nThinks leader"
+appa -> a
+a -> b: "Replica B\\nPromoted leader: Network partition — không liên lạc" {style.stroke-dash: 4}
+appb: "App B"
+appb -> b
 ```
 
 Nếu cả A và B đều nhận write, dữ liệu có thể diverge:
@@ -1140,18 +1174,14 @@ Với system tiền/order/inventory, active-active write không thể chọn d�
 
 Một setup phổ biến:
 
-```txt
-                ┌───────────────┐
-Writes ────────▶│ PostgreSQL    │
-                │ Primary       │
-                └───────┬───────┘
-                        │ WAL streaming
-        ┌───────────────┼───────────────┐
-        ▼               ▼               ▼
- ┌─────────────┐  ┌─────────────┐  ┌─────────────┐
- │ Replica 1   │  │ Replica 2   │  │ Replica 3   │
- │ reporting   │  │ API reads   │  │ standby     │
- └─────────────┘  └─────────────┘  └─────────────┘
+```d2 title="PostgreSQL streaming replication"
+direction: down
+writes: "Writes"
+primary: "PostgreSQL Primary"
+writes -> primary
+primary -> r1: "Replica 1\\nReporting: WAL streaming"
+primary -> r2: "Replica 2\\nAPI reads: WAL streaming"
+primary -> r3: "Replica 3\\nStandby: WAL streaming"
 ```
 
 Use cases:
@@ -1527,35 +1557,33 @@ Không có monitoring/runbook thì cluster chỉ là nhiều máy hơn để deb
 
 ### 34. Tóm tắt bằng một sơ đồ
 
-```txt
-                         Distributed Database Cluster
-
-                 ┌──────────────────────────────────────┐
-                 │              Cluster                 │
-                 │                                      │
-                 │  ┌────────────┐  ┌────────────┐      │
-                 │  │   Node A   │  │   Node B   │      │
-                 │  │            │  │            │      │
-                 │  │ Shard 1 P  │  │ Shard 1 R  │      │
-                 │  │ Shard 2 R  │  │ Shard 2 P  │      │
-                 │  └────────────┘  └────────────┘      │
-                 │                                      │
-                 │  ┌────────────┐  ┌────────────┐      │
-                 │  │   Node C   │  │   Node D   │      │
-                 │  │            │  │            │      │
-                 │  │ Shard 1 R  │  │ Shard 3 P  │      │
-                 │  │ Shard 3 R  │  │ Shard 2 R  │      │
-                 │  └────────────┘  └────────────┘      │
-                 └──────────────────────────────────────┘
-
-Legend:
-P = Primary/Leader for that shard
-R = Replica/Follower for that shard
-
-Sharding: Shard 1/2/3 chứa các phần data khác nhau
-Replication: mỗi shard có nhiều bản P/R trên nhiều node
-Failover: nếu P chết, một R được promote thành P
-Rebalancing: move shard giữa node khi thêm/bớt/cân bằng capacity
+```d2 title="Shard là dữ liệu, node là máy chạy shard"
+grid-columns: 1
+cluster: "Distributed Database Cluster" {
+  grid-columns: 2
+  a: "Node A" {
+    s1: "Shard 1 — Primary / Leader"
+    s2: "Shard 2 — Replica / Follower"
+  }
+  b: "Node B" {
+    s1: "Shard 1 — Replica / Follower"
+    s2: "Shard 2 — Primary / Leader"
+  }
+  c: "Node C" {
+    s1: "Shard 1 — Replica / Follower"
+    s3: "Shard 3 — Replica / Follower"
+  }
+  d: "Node D" {
+    s3: "Shard 3 — Primary / Leader"
+    s2: "Shard 2 — Replica / Follower"
+  }
+}
+legend: |md
+  **Sharding:** shard 1/2/3 chứa các phần data khác nhau.
+  **Replication:** mỗi shard có nhiều bản trên nhiều node.
+  **Failover:** primary chết, promote replica.
+  **Rebalancing:** move shard khi thêm/bớt/cân bằng capacity.
+|
 ```
 
 Nếu nhớ được sơ đồ này, bạn sẽ ít nhầm các thuật ngữ hơn.

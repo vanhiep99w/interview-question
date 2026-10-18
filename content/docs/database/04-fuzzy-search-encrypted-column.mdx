@@ -57,21 +57,19 @@ Dùng khi chỉ cần tìm **đúng một số điện thoại** (login bằng p
 
 **Flow INSERT:**
 
-```
-phone = "0912345678"
-
-Bước 1: Normalize (bỏ +84, dấu cách, ký tự lạ)
-        → "0912345678"
-
-Bước 2: Encrypt để lưu plaintext khi cần
-        AES("0912345678") → [rác mã hoá]
-
-Bước 3: Hash toàn bộ để tạo blind index
-        HMAC(key="secret", data="0912345678") → "f3a8c1d2..."
-
-Bước 4: Lưu cả hai vào DB
-        phone_enc   = [rác mã hoá]   ← đọc plaintext khi cần
-        phone_blind = "f3a8c1d2..."  ← dùng để search
+```d2 title="Blind index cho exact search"
+direction: right
+phone: "0912345678"
+normalize: "Normalize phone"
+phone -> normalize
+enc: "AES encrypt"
+dbenc: "phone_enc\nCiphertext"
+normalize -> enc
+enc -> dbenc
+hmac: "HMAC toàn bộ phone"
+dbblind: "phone_blind\nf3a8c1d2..."
+normalize -> hmac
+hmac -> dbblind
 ```
 
 ```sql
@@ -147,48 +145,35 @@ DB bị **"mù"** — nó thực hiện được việc tìm kiếm nhưng khôn
 
 **Flow INSERT:**
 
-```
-phone = "0912345678"
-
-Bước 1: Encrypt phone → lưu vào cột phone_enc
-
-Bước 2: Tách trigrams
-        → ["091", "912", "123", "234", "345", "456", "567", "678"]
-
-Bước 3: Hash từng trigram
-        HMAC("091") → "a1b2c3..."
-        HMAC("912") → "a7f3c8..."
-        HMAC("123") → "2e9b1f..."
-        ...
-
-Bước 4: Lưu vào bảng index phụ
-        phone_trigram_index:
-        | user_id=42 | "a1b2c3..." |
-        | user_id=42 | "a7f3c8..." |
-        | user_id=42 | "2e9b1f..." |
-        | ...                      |
+```d2 title="Trigram blind index khi insert"
+direction: right
+phone: "0912345678"
+enc: "Encrypt"
+stored: "phone_enc"
+phone -> enc
+enc -> stored
+phone -> grams: "Tách trigrams\\n091, 912, 123, 234, 345, 456, 567, 678"
+grams -> hash: "HMAC từng trigram"
+hash -> index: "phone_trigram_index\\nuser_id=42, trigram_hash"
 ```
 
 **Flow SEARCH** với query `"9123"`:
 
-```
-Bước 1: Tách query thành trigrams
-        "9123" → ["912", "123"]
-
-Bước 2: Hash với CÙNG key
-        HMAC("912") → "a7f3c8..."   ← giống hệt lúc insert!
-        HMAC("123") → "2e9b1f..."   ← giống hệt lúc insert!
-
-Bước 3: Tìm trong bảng index
-        SELECT user_id FROM phone_trigram_index
-        WHERE trigram_hash IN ("a7f3c8...", "2e9b1f...")
-        GROUP BY user_id
-        HAVING COUNT >= 2      ← phải match CẢ 2 trigram
-        → trả về user_id = 42
-
-Bước 4: Decrypt phone của user 42
-        → "0912345678"
-        → verify: contains("9123") = TRUE ✓
+```d2 title="Candidate search cần decrypt và verify"
+direction: right
+query: "9123"
+grams: "Trigrams\n912, 123"
+hash: "HMAC với cùng key"
+query -> grams
+grams -> hash
+lookup: "Query index\nHAVING COUNT >= 2"
+candidate: "Candidate user_id=42"
+hash -> lookup
+lookup -> candidate
+decrypt: "Decrypt phone\n0912345678"
+verify: "Verify contains 9123"
+candidate -> decrypt
+decrypt -> verify
 ```
 
 **Tại sao cần bước verify ở cuối?** Vì có thể có **false positive** — phone `0991230000` cũng chứa trigram `"912"` và `"123"` nhưng không theo thứ tự đúng. Decrypt + verify loại bỏ chúng.
@@ -338,22 +323,21 @@ Fetch nhiều hơn cần (50 thay vì 10) để bù cho false positives bị lo�
 
 ### Luồng tổng thể
 
-```mermaid
-sequenceDiagram
-    participant U as User
-    participant API as Spring Boot API
-    participant DB as PostgreSQL
-
-    U->>API: GET /search?phone=9123
-    API->>API: normalize("9123") = "9123"
-    API->>API: trigrams = ["  9", " 91", "912", "123", "23 ", "3  "]
-    API->>API: hashes = [HMAC(t1), HMAC(t2), ...]
-    API->>DB: SELECT user_id FROM phone_trigram_index<br/>WHERE trigram_hash IN (h1,h2,...)<br/>GROUP BY user_id HAVING COUNT >= 3
-    DB-->>API: [userId=42, userId=107]
-    API->>DB: SELECT phone_enc FROM users WHERE id IN (42, 107)
-    DB-->>API: [encrypted_phone_42, encrypted_phone_107]
-    API->>API: decrypt → verify contains "9123"
-    API-->>U: [user42, user107]
+```d2 title="Luồng tổng thể"
+shape: sequence_diagram
+U: "User"
+API: "Spring Boot API"
+DB: "PostgreSQL"
+U -> API: "GET /search?phone=9123"
+API -> API: "normalize(\"9123\") = \"9123\""
+API -> API: "trigrams = [\"  9\", \" 91\", \"912\", \"123\", \"23 \", \"3  \"]"
+API -> API: "hashes = [HMAC(t1), HMAC(t2), ...]"
+API -> DB: "SELECT user_id FROM phone_trigram_index\nWHERE trigram_hash IN (h1,h2,...)\nGROUP BY user_id HAVING COUNT >= 3"
+DB -> API: "[userId=42, userId=107]" {style.stroke-dash: 4}
+API -> DB: "SELECT phone_enc FROM users WHERE id IN (42, 107)"
+DB -> API: "[encrypted_phone_42, encrypted_phone_107]" {style.stroke-dash: 4}
+API -> API: "decrypt → verify contains \"9123\""
+API -> U: "[user42, user107]" {style.stroke-dash: 4}
 ```
 
 ---
