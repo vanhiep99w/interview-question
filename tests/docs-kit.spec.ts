@@ -30,19 +30,19 @@ test('D2 controls zoom, expand, switch theme and preserve source drawer links', 
   const diagram = page.locator('.d2-interactive').first();
   await expect(diagram.locator('.d2-diagram-light > svg')).toBeVisible();
   await expect(diagram.locator('image').first()).toHaveAttribute('href', /^data:image\/svg\+xml/);
-  await diagram.getByRole('button', { name: /^Explore diagram:/ }).click();
   await expect(diagram.locator('.d2-viewer')).toBeVisible();
-  const zoom = diagram.getByRole('button', { name: 'Reset zoom' });
-  const before = await zoom.textContent();
+  await expect(diagram.locator('.d2-viewer')).toBeVisible();
+  const zoom = diagram.locator('.d2-zoom-content');
+  const before = await zoom.getAttribute('style');
   await diagram.getByRole('button', { name: 'Zoom in', exact: true }).click();
-  await expect(zoom).not.toHaveText(before!);
+  await expect(zoom).not.toHaveAttribute('style', before!);
   await page.evaluate(() => {
     document.documentElement.classList.remove('light');
     document.documentElement.classList.add('dark');
   });
   await expect(diagram.locator('.d2-diagram-dark > svg')).toBeVisible();
   await expect(diagram.locator('.d2-diagram-light')).toBeHidden();
-  await diagram.getByRole('button', { name: /Expand/ }).click();
+  await diagram.getByRole('button', { name: 'Fullscreen', exact: true }).click();
   await expect(page.getByRole('dialog')).toBeVisible();
   await page.keyboard.press('Escape');
   await expect(page.getByRole('dialog')).toHaveCount(0);
@@ -54,7 +54,7 @@ test('D2 controls zoom, expand, switch theme and preserve source drawer links', 
 test('failover diagram exposes before/after scenarios', async ({ page }) => {
   await page.goto('/system-design/01-distributed-system-terms/');
   const diagram = page.locator('.d2-interactive').filter({ has: page.locator('figcaption', { hasText: 'Failover: promote replica' }) });
-  await diagram.getByRole('button', { name: /^Explore diagram:/ }).click();
+  await expect(diagram.locator('.d2-viewer')).toBeVisible();
   await diagram.getByRole('tab', { name: 'Sau failover' }).click();
   await expect(diagram.getByRole('tab', { name: 'Sau failover' })).toHaveAttribute('aria-selected', 'true');
   await expect(diagram.getByRole('tabpanel')).toContainText('Primary B');
