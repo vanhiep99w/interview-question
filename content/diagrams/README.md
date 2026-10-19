@@ -5,6 +5,7 @@ Reviewed SVG copies from the [D2 icon catalog](https://icons.d2lang.com/):
 | File | Original URL |
 | --- | --- |
 | `assets/react.svg` | https://icons.d2lang.com/dev/react.svg |
+| `assets/webpack.svg` | https://icons.d2lang.com/dev/webpack.svg |
 | `assets/redis.svg` | https://icons.d2lang.com/dev/redis.svg |
 | `assets/postgresql.svg` | https://icons.d2lang.com/dev/postgresql.svg |
 

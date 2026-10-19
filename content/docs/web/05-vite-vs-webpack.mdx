@@ -1,0 +1,322 @@
+---
+title: "Vite và webpack: khác biệt từ dev server đến production build"
+description: "So sánh kiến trúc Vite và webpack, native ESM, dependency pre-bundling, HMR, production bundle, plugin và tiêu chí chọn hoặc chuyển đổi công cụ."
+---
+
+<Callout type="info" title="Phạm vi bài viết">
+
+Đây là bài giải thích và so sánh, không phải một câu hỏi phỏng vấn. Bài lấy **Vite 8** và **webpack 5** làm mốc; phân biệt với Vite 7 trở về trước khi nói về công cụ bên dưới. Bạn chỉ cần biết JavaScript `import`/`export` và cách browser tải HTML, CSS, JavaScript.
+
+</Callout>
+
+## Mục lục
+
+- [Bắt đầu từ thời gian chờ khi sửa code](#bắt-đầu-từ-thời-gian-chờ-khi-sửa-code)
+- [Vite và webpack nằm ở những tầng khác nhau](#vite-và-webpack-nằm-ở-những-tầng-khác-nhau)
+- [Khác biệt trong development](#khác-biệt-trong-development)
+  - [webpack chuẩn bị bundle trước khi phục vụ ứng dụng](#webpack-chuẩn-bị-bundle-trước-khi-phục-vụ-ứng-dụng)
+  - [Vite phục vụ source theo native ESM](#vite-phục-vụ-source-theo-native-esm)
+  - [Dependency pre-bundling và cache](#dependency-pre-bundling-và-cache)
+- [HMR và việc giữ lại state](#hmr-và-việc-giữ-lại-state)
+- [Production build và tốc độ của ứng dụng](#production-build-và-tốc-độ-của-ứng-dụng)
+  - [Cả hai đều có bundling và code splitting](#cả-hai-đều-có-bundling-và-code-splitting)
+  - [Phân biệt Vite 8 với các phiên bản trước](#phân-biệt-vite-8-với-các-phiên-bản-trước)
+- [Cấu hình và hệ sinh thái mở rộng](#cấu-hình-và-hệ-sinh-thái-mở-rộng)
+  - [Entry HTML và JavaScript entry](#entry-html-và-javascript-entry)
+  - [Loader và plugin không thay thế trực tiếp cho nhau](#loader-và-plugin-không-thay-thế-trực-tiếp-cho-nhau)
+  - [TypeScript và biến môi trường](#typescript-và-biến-môi-trường)
+- [Bảng so sánh thực dụng](#bảng-so-sánh-thực-dụng)
+- [Chọn công cụ theo dự án](#chọn-công-cụ-theo-dự-án)
+- [Chuyển từ webpack sang Vite có kiểm chứng](#chuyển-từ-webpack-sang-vite-có-kiểm-chứng)
+- [Đo hiệu năng trước khi kết luận](#đo-hiệu-năng-trước-khi-kết-luận)
+- [Tài liệu tham khảo và bài liên quan](#tài-liệu-tham-khảo-và-bài-liên-quan)
+
+## Bắt đầu từ thời gian chờ khi sửa code
+
+Giả sử bạn mở một dashboard, đổi nội dung của một button rồi chờ giao diện cập nhật. Có ít nhất ba thời gian khác nhau cần quan tâm: dev server sẵn sàng, trang đầu tiên hiển thị và thay đổi xuất hiện sau khi lưu file. Một công cụ khởi động nhanh chưa chắc làm cả ba việc nhanh như nhau.
+
+Khác biệt đáng chú ý giữa Vite và webpack nằm ở **cách chuẩn bị và phục vụ code trong development**. webpack thường tạo bundle trước khi browser chạy ứng dụng. Vite ở chế độ dev native ESM phục vụ source theo nhu cầu, thay vì gom toàn bộ application source thành bundle ngay từ đầu.
+
+Điều đó không có nghĩa Vite không dùng bundler, hay webpack luôn build lại toàn bộ project mỗi lần bạn lưu file. Hai kết luận này bỏ qua dependency optimization, cache và incremental compilation — cơ chế chỉ xử lý lại phần bị ảnh hưởng bởi thay đổi.
+
+## Vite và webpack nằm ở những tầng khác nhau
+
+**Bundler** là công cụ lần theo các `import` để gom module thành các file đầu ra. Ví dụ, từ `main.js` import `cart.js` và một thư viện, bundler xác định phần code cần đưa vào output rồi tổ chức chúng thành một hoặc nhiều file.
+
+webpack có lõi là một bundler. Khi dùng cho web development, bạn thường kết hợp nó với `webpack-dev-server`, cùng loader và plugin để xử lý source, HTML, CSS hoặc framework.
+
+Vite là một **build tool** có sẵn dev server và lệnh production build. Nó phối hợp bundler, công cụ chuyển đổi code và plugin framework thành một trải nghiệm thống nhất. Với Vite 8, bundler bên dưới là Rolldown; Oxc xử lý các công việc như chuyển đổi TypeScript/JSX.
+
+Vì vậy, so sánh thực tế là **Vite với một bộ công cụ xoay quanh webpack**, không phải hai chương trình có phạm vi giống hệt nhau. Nếu framework đã quản lý bộ công cụ đó, phần cấu hình bạn nhìn thấy còn ít hơn nữa.
+
+## Khác biệt trong development
+
+### webpack chuẩn bị bundle trước khi phục vụ ứng dụng
+
+Xét ứng dụng có `src/main.js` import `src/cart.js`. webpack bắt đầu từ entry, lần theo các dependency rồi tạo **module graph** — tập hợp module và quan hệ import giữa chúng. Từ graph này, nó tạo các chunk và asset để browser tải; chunk là nhóm module được tổ chức cho việc phát sinh code đầu ra.
+
+Sơ đồ dưới đây mô tả một lần compile đầu tiên trong mô hình dev thông thường. Các mũi tên là quan hệ xử lý, không phải số đo thời gian.
+
+```d2 interactive=false title="webpack dev: compile graph thành asset cho browser"
+direction: down
+source: "Entry và các module được import"
+compiler: "webpack compiler" {
+  icon: ../../diagrams/assets/webpack.svg
+}
+assets: "JavaScript chunks và asset trong dev middleware"
+browser: "Browser tải output đã compile"
+source -> compiler: "Resolve và transform module"
+compiler -> assets: "Tạo output phục vụ development"
+assets -> browser: "HTTP qua dev server"
+```
+
+Ở cấu hình `webpack-dev-server` thông thường, output được phục vụ từ bộ nhớ. Bạn không nhất thiết thấy các bundle dev được ghi vào `dist` trên ổ đĩa.
+
+Sau lần compile đầu, webpack có thể tái sử dụng kết quả đã xử lý. Khi `cart.js` thay đổi, nó đánh dấu module cùng phần graph liên quan cần cập nhật. Chi phí còn phụ thuộc loader, plugin và phạm vi ảnh hưởng; không nên mô tả đây là “build lại mọi file từ đầu”.
+
+webpack 5 còn có filesystem cache để giữ kết quả qua những lần khởi động process. Cache được cấu hình và invalidation đúng có thể giảm đáng kể công việc lặp lại. Đánh giá webpack mà luôn xóa cache, rồi so với Vite đang có cache nóng, sẽ không cho kết luận công bằng.
+
+### Vite phục vụ source theo native ESM
+
+**Native ESM** là khả năng browser tự tải JavaScript module bằng `import`/`export`. Ví dụ, HTML có `<script type="module" src="/src/main.js">` khiến browser tải entry rồi tiếp tục tải các module mà entry import.
+
+Vite dùng khả năng này để phục vụ application source theo nhu cầu. Nếu source là TypeScript hoặc JSX, dev server vẫn phải chuyển nó thành JavaScript browser hiểu được. “Không bundle application source trước” không đồng nghĩa “gửi nguyên mọi file lên browser”.
+
+Sơ đồ sau tập trung vào một request module, sau khi browser đã nhận HTML. Các khái niệm ở đây không đại diện cho một framework cụ thể nên không gắn logo framework.
+
+```d2 interactive=false title="Vite native ESM dev: transform module khi browser yêu cầu"
+direction: down
+browser: "Browser đọc HTML có script type=module"
+server: "Vite dev server"
+source: "Module được request và plugin transform"
+module: "JavaScript ESM trả về browser"
+browser -> server: "GET /src/main.js"
+server -> source: "Resolve, transform và sửa import nếu cần"
+source -> module: "Kết quả có thể được cache"
+module -> browser: "Browser tiếp tục tải các import cần thiết"
+```
+
+Ví dụ một trang chỉ tải màn hình Reports qua `import('./reports.js')` khi bạn bấm nút. Với dev native ESM, Vite không cần chuẩn bị toàn bộ source của màn hình đó để hiển thị trang ban đầu. Khi import thực sự chạy, browser mới yêu cầu module và các dependency cần thiết.
+
+Đổi lại, application có rất nhiều module có thể tạo nhiều HTTP request trong development. Dev server sẵn sàng sớm không bảo đảm lần mở route đầu tiên cũng nhanh. Với project lớn, cần đo cả thời gian tải trang thay vì chỉ nhìn log “ready”.
+
+### Dependency pre-bundling và cache
+
+Application source thay đổi thường xuyên, nhưng package như `react` thường ổn định giữa các lần lưu file. Vite xử lý hai nhóm này khác nhau.
+
+**Dependency pre-bundling** là bước chuẩn bị trước các dependency để phục vụ development. Nó có hai mục tiêu chính:
+
+- Chuyển dependency CommonJS/UMD sang dạng ESM mà browser có thể tải.
+- Gom package có nhiều module nội bộ để tránh quá nhiều request chỉ cho một dependency.
+
+Ngoài ra, browser không tự biết `import ... from 'some-package'` tương ứng URL nào. Vite resolve tên package rồi viết lại import thành URL mà dev server phục vụ được.
+
+Kết quả dependency optimization được cache, mặc định trong `node_modules/.vite`. Lockfile và cấu hình liên quan là những tín hiệu để Vite quyết định cache còn hợp lệ hay không. Khi gặp dependency chưa được phát hiện lúc đầu, Vite có thể phải tối ưu lại và reload trang.
+
+**Vite vẫn có bundling trong development, nhưng dependency pre-bundling không phải bundling toàn bộ application source.** Đây cũng là bước riêng cho dev, không phải output production dùng để deploy.
+
+## HMR và việc giữ lại state
+
+Bạn đang nhập dở form rồi đổi màu button. **Hot Module Replacement**, viết tắt HMR, cho phép cập nhật module trong ứng dụng đang chạy mà không bắt buộc reload toàn trang. Nếu framework chấp nhận được thay đổi đó, nội dung form có thể được giữ lại.
+
+Cả Vite và webpack đều hỗ trợ HMR. Khác biệt nằm ở cách chuẩn bị và áp dụng bản cập nhật:
+
+| Khía cạnh | Vite ở dev native ESM | webpack với HMR |
+| --- | --- | --- |
+| Phát hiện thay đổi | Vô hiệu hóa kết quả transform liên quan trong module graph | Vô hiệu hóa phần compilation liên quan và compile cập nhật |
+| Phân phối | Thông báo tới HMR client để tải module cập nhật | Thông báo tới client; runtime lấy và áp dụng hot update |
+| Ranh giới chấp nhận | Module hoặc integration framework chấp nhận update | Module hoặc integration framework chấp nhận update |
+| Khi không áp dụng được | Có thể truyền ảnh hưởng lên importer hoặc full reload | Có thể truyền ảnh hưởng lên importer hoặc full reload, tùy cấu hình |
+
+**HMR boundary** là vị trí trong quan hệ import có thể tiếp nhận thay đổi mà không cần tải lại toàn trang. Đổi một component thường dễ khoanh vùng hơn đổi module cấu hình được rất nhiều nơi import. Vì vậy, không phải mọi lần lưu file đều có cùng chi phí.
+
+Với React, Fast Refresh là integration ở tầng framework để cập nhật component và cố gắng giữ state khi an toàn. Vite thường cung cấp integration này qua plugin React; webpack cũng có thể tích hợp React Refresh. HMR không tự hiểu state của mọi framework và không cam kết giữ state trong mọi thay đổi.
+
+<Callout type="warn" title="HMR không phải lifecycle của production">
+
+Code tạo event listener, timer hoặc WebSocket ở cấp module cần cơ chế cleanup phù hợp khi hot update. Nếu chỉ test bằng HMR, bạn có thể bỏ sót lỗi xuất hiện khi tải trang mới hoàn toàn. Luôn kiểm tra cả full reload và production build.
+
+</Callout>
+
+## Production build và tốc độ của ứng dụng
+
+### Cả hai đều có bundling và code splitting
+
+Khi deploy, mục tiêu không còn là phản hồi nhanh sau mỗi lần lưu file. Bạn cần output phù hợp để tải qua mạng, cache và chạy trên các browser được hỗ trợ. Vite build production vẫn bundle application; không giữ nguyên mặc định mô hình “mỗi source file là một request dev”.
+
+Cả hai có thể tạo nhiều chunk, loại bỏ code không dùng khi phân tích được, rút gọn code và xử lý asset. Việc loại bỏ code không dùng gọi là **tree shaking**; khả năng loại bỏ còn phụ thuộc kiểu module và side effect — những hành vi xảy ra khi module được chạy, chẳng hạn đăng ký listener.
+
+Cùng một đoạn code sau có thể biểu diễn ranh giới tải bất đồng bộ trong cả hai hệ thống:
+
+```js title="Tải màn hình khi cần"
+const button = document.querySelector('#open-reports');
+
+button.addEventListener('click', async () => {
+  const { mountReports } = await import('./reports.js');
+  mountReports(document.querySelector('#reports'));
+});
+```
+
+Production bundler có thể đưa `reports.js` vào chunk tải sau. Cách chia chunk chính xác còn chịu ảnh hưởng của cấu hình và dependency dùng chung; `import()` không có nghĩa luôn tạo đúng một file riêng cho mỗi module.
+
+Một app build bằng Vite không mặc nhiên chạy nhanh hơn cùng app build bằng webpack. Tốc độ người dùng nhận được còn phụ thuộc lượng JavaScript tải ban đầu, chi phí parse/execute, cách chia chunk, cache, API và cách render UI. **Build nhanh hơn là lợi ích cho developer hoặc CI; runtime nhanh hơn cần được đo riêng.**
+
+### Phân biệt Vite 8 với các phiên bản trước
+
+Nhiều bài so sánh cũ viết “Vite dùng esbuild cho dev và Rollup cho production”. Mô tả đó cần gắn với phiên bản, không nên dùng như kiến trúc bất biến của Vite.
+
+| Mốc | Dependency pre-bundling | Production bundler | Chuyển đổi TypeScript/JSX thông thường |
+| --- | --- | --- | --- |
+| Vite 7 theo pipeline mặc định | esbuild | Rollup | esbuild; plugin framework có thể bổ sung xử lý |
+| Vite 8 | Rolldown | Rolldown | Oxc; plugin framework có thể bổ sung xử lý |
+
+Vite 8 thống nhất bundler bên dưới, nhưng không vì vậy mà mọi hành vi dev và production giống hệt nhau. Module được phục vụ theo nhu cầu, HMR và production optimization vẫn có mục tiêu khác nhau.
+
+Vite cũng đang phát triển **full bundle mode**, tức bundling trong development để giảm số request ở project lớn. Đây là hướng phát triển có trạng thái/API phụ thuộc phiên bản. Sơ đồ native ESM trong bài không nhằm mô tả mọi chế độ Vite có thể cung cấp; hãy kiểm tra mode thực tế trước khi áp dụng kết luận hiệu năng.
+
+## Cấu hình và hệ sinh thái mở rộng
+
+### Entry HTML và JavaScript entry
+
+Với một app client thông thường, Vite coi `index.html` là một phần của source và dùng module script làm điểm vào:
+
+```html title="index.html trong một Vite app tối giản"
+<!doctype html>
+<html lang="vi">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Dashboard</title>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>
+```
+
+Với webpack, cấu hình truyền thống thường khai báo entry JavaScript và dùng plugin để sinh HTML. Đoạn dưới là một cấu hình minh họa cho cách đó, giả sử project đã cài `html-webpack-plugin` và có HTML template chứa `#app` nhưng chưa chèn script source:
+
+```js title="webpack.config.cjs cho JavaScript thuần"
+const path = require('node:path');
+const HtmlWebpackPlugin = require('html-webpack-plugin');
+
+module.exports = {
+  mode: 'development',
+  entry: './src/main.js',
+  output: {
+    path: path.resolve(__dirname, 'dist'),
+    filename: '[name].[contenthash].js',
+    clean: true,
+  },
+  plugins: [new HtmlWebpackPlugin({ template: './index.html' })],
+};
+```
+
+Plugin chèn script trỏ đến output đã compile. Không copy nguyên thẻ script `/src/main.js` của ví dụ Vite vào template này rồi cho rằng webpack sẽ tự xử lý theo cùng cơ chế.
+
+Đây là cách tổ chức phổ biến, không phải khẳng định webpack chỉ có JavaScript entry hay mọi dự án Vite đều lấy HTML làm entry. Library build, backend integration và framework có thể dùng cấu hình khác.
+
+### Loader và plugin không thay thế trực tiếp cho nhau
+
+Trong webpack, **loader** chuyển đổi nội dung module, còn **plugin** can thiệp vào các giai đoạn rộng hơn của compiler. Chẳng hạn `babel-loader` xử lý JavaScript qua Babel; `HtmlWebpackPlugin` tạo HTML tham chiếu output.
+
+Vite dùng plugin dựa trên các hook tương thích với hệ sinh thái Rollup/Rolldown, đồng thời có hook riêng cho dev server và HMR. Plugin React hoặc Vue tích hợp cách compile component và hot update của framework tương ứng.
+
+Một webpack loader không thể chỉ đổi tên thành Vite plugin. Nếu dự án có loader tự viết để biến file riêng thành module JavaScript, bạn cần tìm plugin tương đương hoặc triển khai lại logic transform. Nếu plugin can thiệp sâu vào compiler/runtime webpack, chi phí chuyển đổi có thể lớn hơn nhiều so với thay file config.
+
+Điều này đặc biệt quan trọng với Module Federation — cơ chế cho phép một build tải module từ build khác lúc chạy. webpack 5 có integration riêng; hệ sinh thái Vite cũng có giải pháp Federation. Không nên kết luận “Vite không làm được”, nhưng cũng không nên giả định plugin và runtime của hai bên thay thế trực tiếp cho nhau. Cần kiểm chứng host/remote, shared dependencies, dev mode và production deployment theo plugin cụ thể.
+
+### TypeScript và biến môi trường
+
+Vite chuyển TypeScript thành JavaScript nhưng không tự type-check toàn project. Ví dụ `const price: number = 'demo';` có thể bị loại annotation để thành JavaScript dù TypeScript checker sẽ báo lỗi. Vì thế build pipeline vẫn nên có bước `tsc --noEmit` hoặc checker tương ứng của framework.
+
+webpack cũng không tự type-check chỉ vì bạn thêm file `.ts` vào entry. Hành vi phụ thuộc tool được tích hợp: `ts-loader` có thể type-check, còn Babel/SWC hoặc chế độ transpile-only thường cần một bước kiểm tra riêng. Hãy xác nhận script CI có checker, thay vì suy ra từ việc bundle thành công.
+
+Biến môi trường là một khác biệt dễ làm hỏng migration:
+
+| Nội dung | Vite | webpack |
+| --- | --- | --- |
+| Cách dùng thường gặp trong client | `import.meta.env.VITE_API_BASE_URL` | Thường thay biểu thức qua `DefinePlugin`/`EnvironmentPlugin` hoặc framework |
+| Quy ước prefix | Mặc định expose biến có prefix `VITE_`, cùng các giá trị built-in | Không có quy ước `VITE_` tương đương áp dụng cho mọi app webpack |
+| Thời điểm đưa vào output client | Thay thế khi build | Phụ thuộc cấu hình; `DefinePlugin` thay thế khi compile |
+
+<Callout type="warn" title="Biến được đưa vào client không phải secret">
+
+Không đưa database password, private API key hoặc token thật vào biến public. Dù tên là `VITE_*` hay biểu thức được thay bằng webpack plugin, giá trị đã nằm trong client bundle thì người dùng có thể đọc. Đổi biến trên server sau khi deploy cũng không tự sửa bundle đã build.
+
+</Callout>
+
+## Bảng so sánh thực dụng
+
+| Tiêu chí | Vite | Bộ công cụ webpack |
+| --- | --- | --- |
+| Phạm vi | Build tool có dev server và production build | Bundler kết hợp dev server, loader, plugin hoặc framework |
+| Application source trong dev | Native ESM theo nhu cầu ở chế độ được mô tả trong bài | Thường compile thành bundle/chunk để phục vụ |
+| Dependency trong dev | Có pre-bundling riêng và cache | Được xử lý trong compilation graph, có các lớp cache |
+| Hot update | HMR qua native ESM và integration framework | HMR qua compiler update và runtime webpack |
+| Production | Vite 8 dùng Rolldown để bundle/optimize | webpack bundle/optimize theo cấu hình và mode |
+| Tùy biến | Plugin hook và API của Vite/Rolldown | Loader, plugin và compiler/runtime API của webpack |
+| TypeScript | Transpile, cần checker riêng | Phụ thuộc loader/plugin, không phải bundler tự kiểm tra |
+| Điểm cần thử ở app lớn | Lần tải route đầu, số request dev, plugin transform | Initial compilation, cache, loader/plugin, phạm vi rebuild |
+| Chi phí tiếp nhận | Thường ít cấu hình cho app phổ biến | Có thể cao với config tự quản; framework có thể che phần lớn |
+
+Bảng này không xếp hạng mọi dự án. Nó chỉ ra phần cần đo hoặc kiểm tra khi bạn chọn công cụ.
+
+## Chọn công cụ theo dự án
+
+Với một SPA React/Vue mới, không bị framework hoặc integration đặc thù ràng buộc, mình thường bắt đầu bằng Vite. Dev server và các mặc định phổ biến giúp giảm phần cấu hình cần tự duy trì. Sau đó mới thêm plugin khi có nhu cầu cụ thể.
+
+Với ứng dụng webpack đang ổn định, có nhiều loader/plugin riêng hoặc Federation runtime đã kiểm chứng, mình không chuyển chỉ vì một benchmark trên Internet. Trước hết xác định vấn đề đang ở initial compilation, hot update hay CI build. Tối ưu cache hoặc một loader đắt có thể giải quyết đúng chỗ với ít rủi ro hơn migration.
+
+Nếu dùng framework quản lý build pipeline, ưu tiên công cụ mà framework hỗ trợ chính thức. Chẳng hạn, chọn Vite cho SPA không có nghĩa bạn có thể thay trực tiếp build pipeline của một ứng dụng Next.js bằng cách cài package Vite.
+
+Với yêu cầu browser cũ, đánh giá riêng syntax target và **polyfill** — phần bổ sung API runtime mà browser chưa có. Chuyển syntax không tự tạo ra `Promise`, `Map` hay mọi Web API còn thiếu. Không công cụ nào tự biến mọi dependency thành tương thích với mọi browser.
+
+## Chuyển từ webpack sang Vite có kiểm chứng
+
+Một migration nhỏ nên bắt đầu ở một entry hoặc một ứng dụng có ranh giới rõ, không đổi toàn bộ monorepo cùng lúc. Giữ lại tiêu chí chấp nhận để so sánh trước và sau:
+
+1. **Kiểm kê integration hiện tại.** Liệt kê entry, loader/plugin tự viết, alias, biến môi trường, proxy, worker, CSS, asset và target browser. Phân biệt tính năng app đang dùng với cấu hình đã không còn tác dụng.
+2. **Ánh xạ từng hành vi sang Vite.** Kiểm tra `import.meta.env`, plugin framework, đường dẫn asset và dependency CommonJS. Không thay hàng loạt `require()` bằng `import` mà chưa hiểu chỗ nào chạy ở Node, chỗ nào chạy trong browser.
+3. **Xác nhận development.** Mở route trực tiếp, sửa component và module dùng chung, kiểm tra HMR, full reload, WebSocket/proxy và type-check. Đừng chỉ dừng ở việc thấy trang chủ.
+4. **Build và phục vụ output production.** Kiểm tra dynamic import, CSS tải muộn, worker, lỗi console và URL asset. `vite preview` phù hợp để xem thử output local, không phải server production được khuyến nghị để deploy.
+5. **Thử đúng đường dẫn triển khai.** App nằm dưới `/portal/` cần cấu hình base/public path phù hợp. Truy cập trực tiếp route sâu còn cần quy tắc fallback của hosting; dev server chạy được không chứng minh hosting đã đúng.
+6. **Đối chiếu test và số đo.** Chạy test chức năng cùng các phép đo dev/build/runtime đã thống nhất. Nếu còn khác biệt chưa giải thích được, chưa loại bỏ pipeline cũ.
+
+Một lỗi như chunk lazy-load trả 404 chỉ xuất hiện sau deploy có thể xóa sạch lợi ích từ dev server khởi động nhanh. Tiêu chí migration phải bao gồm output và hosting, không chỉ trải nghiệm local.
+
+## Đo hiệu năng trước khi kết luận
+
+Tách phép đo theo hành vi người dùng và developer thực sự chờ:
+
+| Phép đo | Điều kiện cần ghi lại |
+| --- | --- |
+| Cold start | Cache nào bị xóa; dependencies đã cài chưa; cùng entry và cấu hình |
+| Warm start | Cache được giữ; restart process hay chỉ refresh browser |
+| Lần mở route đầu | Cùng route, browser cache và network; không chỉ log server ready |
+| Hot update | Cùng file và thay đổi; phân biệt HMR với full reload |
+| Production build | Cùng target, source map, minify, checker và plugin bắt buộc |
+| Runtime | Cùng hành trình UI, thiết bị/network, asset transfer và chi phí JavaScript |
+
+Giữ cùng máy và Node version được cả hai hỗ trợ, dùng dependency đã khóa phiên bản, chạy nhiều lượt rồi báo điều kiện cùng độ biến thiên. Nếu chuyển công cụ đồng thời bỏ type-check hoặc source map, bạn đang đo hai pipeline làm lượng việc khác nhau.
+
+Bài này không đưa ra benchmark đã đo cho repository. Để quyết định, chọn route quan trọng nhất của ứng dụng, đo các mục trên và kiểm tra output production của chính route đó.
+
+## Tài liệu tham khảo và bài liên quan
+
+Các mô tả kiến trúc và hành vi dựa trên tài liệu chính thức; khi áp dụng, đối chiếu major version trong lockfile của dự án:
+
+- [Vite: Why Vite](https://vite.dev/guide/why) — native ESM và hướng phát triển kiến trúc.
+- [Vite: Dependency Pre-Bundling](https://vite.dev/guide/dep-pre-bundling) — mục tiêu, discovery và cache.
+- [Vite 8.0 announcement](https://vite.dev/blog/announcing-vite8) — Rolldown và Oxc thay pipeline cũ.
+- [Vite: Features](https://vite.dev/guide/features) — HMR, TypeScript và JSX.
+- [Vite: Env Variables and Modes](https://vite.dev/guide/env-and-mode) — biến được expose và thay thế khi build.
+- [webpack: Concepts](https://webpack.js.org/concepts/) — entry, output, loader và plugin.
+- [webpack: Hot Module Replacement](https://webpack.js.org/concepts/hot-module-replacement/) — cơ chế update và runtime.
+- [webpack: Cache](https://webpack.js.org/configuration/cache/) — memory/filesystem cache và invalidation.
+
+<Cards>
+  <Card title="Frontend build tooling" href="/web/02-frontend-build-tooling" description="Đặt compiler, bundler và build tool vào toàn bộ pipeline." />
+  <Card title="webpack từ source đến browser" href="/web/03-webpack-tu-source-den-trinh-duyet" description="Đối chiếu entry, loader, chunk và output trên source thực tế." />
+  <Card title="Module Federation với React và Vue" href="/web/04-module-federation-react-vue-microfrontend" description="Đi sâu vào ranh giới host/remote và deployment độc lập." />
+</Cards>
