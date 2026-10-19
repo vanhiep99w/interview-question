@@ -203,7 +203,46 @@ Mảng `use: ['style-loader', 'css-loader']` có luồng chuyển đổi thông 
 | `chunkFilename` | Đặt tên JS chunks tải bổ sung; phần 8 sẽ thử |
 | `clean` | Dọn output cũ trong thư mục build |
 
-`main` là tên entry mặc định khi `entry` là một chuỗi. Hash giúp URL phân biệt nội dung giữa các bản build. **Không có quy tắc một source file → một output file.**
+`main` là tên entry mặc định khi `entry` là một chuỗi. **Không có quy tắc một source file → một output file.**
+
+#### Vì sao cần `[contenthash]` trong tên file?
+
+Giả sử bạn luôn build ra `main.js`. Lần đầu vào website, browser tải file này và lưu cache — bản lưu để dùng lại mà không phải tải từ server mỗi lần. Bạn sửa code rồi deploy `main.js` mới, nhưng URL vẫn như cũ. Nếu bản cache còn hạn, browser có thể tiếp tục chạy code cũ dù server đã có bản sửa.
+
+Vì vậy, config của ví dụ đặt tên như sau:
+
+```js
+filename: '[name].[contenthash].js',
+chunkFilename: '[name].[contenthash].js',
+```
+
+`[name]` là tên chunk. `[contenthash]` là chuỗi hash được Webpack tính từ nội dung file đầu ra, không phải chuỗi bạn tự điền. Tên đúng của placeholder là **`[contenthash]`**, không phải `[hashcontent]`.
+
+Ví dụ minh họa hai lần deploy có nội dung JavaScript khác nhau:
+
+| Lần deploy | File đầu ra | Script trong HTML được tạo |
+| --- | --- | --- |
+| A | `main.a1b2.js` | `<script defer src="/main.a1b2.js"></script>` |
+| B | `main.c3d4.js` | `<script defer src="/main.c3d4.js"></script>` |
+
+Khi nhận HTML của bản B, browser thấy URL `/main.c3d4.js` khác URL đã cache nên tải file mới. Bản lưu của `/main.a1b2.js` không được dùng thay cho URL mới. Nếu nội dung file đầu ra không đổi, hash có thể giữ nguyên để browser tận dụng cache.
+
+**Mục đích là đổi nội dung thì đổi URL, để có thể cache lâu mà không dùng nhầm code cũ.** Không phải cứ chạy build là mọi file đều cần đổi tên; điều cần xét là nội dung output, không chỉ source bạn vừa sửa.
+
+#### Vì sao đặt hash ở cả `filename` và `chunkFilename`?
+
+Hai tùy chọn đặt tên cho hai nhóm file khác nhau, nhưng cả hai đều có thể được browser cache:
+
+- `filename` áp dụng cho initial chunks — JavaScript tải ban đầu, như `main.a1b2.js` trong bản cơ bản.
+- `chunkFilename` áp dụng cho non-initial chunks — JavaScript tải bổ sung khi `import()` chạy, như `bootstrap.e5f6.js` ở phần 8.
+
+Nếu chỉ thêm hash vào `filename`, chunk bổ sung vẫn có thể giữ nguyên URL sau khi đổi nội dung. Vì vậy ví dụ dùng `[contenthash]` cho cả hai nhóm.
+
+Bạn không phải tự sửa các chỗ tham chiếu khi tên file thay đổi. **HtmlWebpackPlugin** chèn tên bundle ban đầu vào HTML; **Webpack runtime** biết tên chunk bổ sung để tải khi `import()` chạy. Phần 8.2 sẽ mở code runtime để đối chiếu.
+
+Hash không bắt buộc để ứng dụng chạy và cũng không tự cấu hình HTTP cache. Khi deploy production, thường cấu hình server/CDN cho JS có hash cache lâu, còn HTML cần được kiểm tra cập nhật để browser nhận các URL mới. Nếu HTML vẫn cũ, nó vẫn trỏ tới bundle cũ dù bạn đã build bản mới.
+
+#### Đường dẫn trên máy build khác URL trong browser
 
 Ba cấu hình đường dẫn cần tách biệt:
 
