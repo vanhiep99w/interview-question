@@ -135,7 +135,8 @@ Dùng alias ổn định để bài không phải sửa reference mỗi lần ha
 
 - `path`: định danh cho `SourceRef file`, cây file và deep link.
 - `source`: file vật lý tương đối với `root` của snapshot; không được thoát khỏi thư mục đó.
-- `displayPath`: tên hiển thị trên tab/tooltip, dùng tên emit thật có hash. Không ảnh hưởng đường dẫn import hoặc URL của app.
+- `displayPath`: tên hiển thị trên tab/tooltip, dùng tên emit thật có hash; có thể thêm nhãn “đã format” cho bản đọc. Không ảnh hưởng đường dẫn import hoặc URL của app.
+- `format`: tùy chọn `"html"` cho file HTML cần xuống dòng/thụt lề trong explorer. Generator parse HTML5 rồi format bằng Prettier ở build time; không thay file artifact gốc. Code hiển thị, `Copy file` và số dòng đều dùng bản đã format. Không áp dụng tự động cho source hoặc bundle khác.
 
 `abc123` ở ví dụ trên chỉ minh họa; capture script ghi tên thật. Viewer hỗ trợ `.map` như JSON, `.txt` như plain text, `.mjs` như JavaScript và `.vue` như Vue SFC.
 
@@ -147,7 +148,7 @@ Dùng alias ổn định để bài không phải sửa reference mỗi lần ha
 
 Phân biệt ba loại nội dung:
 
-1. **Artifact nguyên bản:** HTML, bundle nhỏ và source maps nhỏ, copy byte-for-byte từ build. Không sửa chúng để gắn region hoặc làm như output viết tay là output thật.
+1. **Artifact nguyên bản:** HTML, bundle nhỏ và source maps nhỏ, copy byte-for-byte từ build. Không sửa chúng để gắn region hoặc làm như output viết tay là output thật. Riêng HTML output dùng descriptor `format: "html"` và nhãn `dist/index.html (đã format)` để bản đọc dễ nhìn; checksum trong report vẫn tính trên artifact nguyên bản, không phải nội dung đã format.
 2. **Runtime view:** các phần `sourcesContent` dễ đọc từ source map, đặt dưới `runtime/` và ghi rõ không phải asset emit riêng. Source-map text có thể còn hash trung gian; view bảng tên chunk được đồng bộ với hash cuối từ stats và ghi từng thay thế trong report. Giữ bản JS emit nguyên trạng.
 3. **Báo cáo/tóm tắt:** `build-report.json` và `source-maps/*.summary.json` là dữ liệu dẫn xuất, không phải file `.map` hoàn chỉnh. Dùng chúng để chỉ tên, bytes, modules và packages của bundle lớn thay vì nhúng cả React/vendor code vào viewer.
 

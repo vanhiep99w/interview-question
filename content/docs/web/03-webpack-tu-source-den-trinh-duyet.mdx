@@ -317,7 +317,7 @@ File `.js.map` hỗ trợ debug; `.LICENSE.txt`, nếu có, chứa thông báo l
 
 HTML production có thể được nén thành một dòng và bỏ dấu ngoặc kép không cần thiết quanh giá trị thuộc tính; đó vẫn là HTML hợp lệ.
 
-**Phân biệt file emit với tài liệu giải thích output:** `dist/index.html` là file thật. `build-report.json` và `*.summary.json` là báo cáo phục vụ bài học. `runtime/*.js` là các phần code dễ đọc trích từ source map của bundle; Webpack không emit riêng từng file runtime đó vào `dist`.
+**Phân biệt file emit với tài liệu giải thích output:** `dist/index.html` lấy từ file emit thật, nhưng bản trong explorer đã được xuống dòng/thụt lề để dễ đọc; `Copy file` cũng lấy bản đã format. Artifact gốc và checksum trong report vẫn giữ nguyên. `build-report.json` và `*.summary.json` là báo cáo phục vụ bài học. `runtime/*.js` là các phần code dễ đọc trích từ source map của bundle; Webpack không emit riêng từng file runtime đó vào `dist`.
 
 Bundle React của bản cơ bản khá lớn và đã minify, nên viewer chỉ liệt kê nó trong `assets`, không nhúng cả bundle và source map hơn 1 MB vào bài. Phần 8 có bundle khởi động nhỏ để mở trực tiếp.
 

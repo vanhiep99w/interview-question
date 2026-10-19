@@ -27,6 +27,17 @@ test('source build validates references, resolves regions and produces determini
     const [start, end] = config.regions.entry;
     expect(config.code.split('\n').slice(start - 1, end).join('\n')).toContain("entry: './src/main.tsx'");
     expect(config.html).toContain(`data-line="${start}"`);
+    for (const id of ['output-basic', 'output-async-bootstrap']) {
+      const output = manifest[0].snapshots.find((item: { id: string }) => item.id === id);
+      const captured = JSON.parse(await readFile(path.join(root, 'public', output.asset), 'utf8'));
+      const html = captured.files.find((file: { path: string }) => file.path === 'dist/index.html');
+      const raw = await readFile(path.join(root, 'examples/webpack-react-demo/output', id.replace('output-', ''), 'artifacts/index.html'), 'utf8');
+      expect(raw).not.toContain('\n'); // The reviewed artifact remains minified.
+      expect(html.code).toMatch(/\n {2}<head>\n {4}<meta/);
+      expect(html.code).toContain('    <div id="root"></div>\n');
+      expect(html.displayPath).toBe('dist/index.html (đã format)');
+      expect([...html.html.matchAll(/data-line="\d+"/g)]).toHaveLength(html.code.trimEnd().split('\n').length);
+    }
     expect(run().status).toBe(0);
     expect(await readFile(manifestPath, 'utf8')).toBe(original);
     for (const attrs of [

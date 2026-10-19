@@ -92,7 +92,7 @@ try {
       const raw = await readFile(path.join(dist, name));
       const storage = `artifacts/${name}`;
       await save(storage, raw);
-      files.push({ path: alias, source: storage, displayPath: `dist/${name}` });
+      files.push({ path: alias, source: storage, displayPath: `dist/${name}${name.endsWith('.html') ? ' (đã format)' : ''}`, ...(name.endsWith('.html') ? { format: 'html' } : {}) });
       views.push({ reference: alias, emittedFile: name, view: 'Complete original bytes, no formatting or renaming inside the content' });
     }
     await captureAsset('index.html', 'dist/index.html');

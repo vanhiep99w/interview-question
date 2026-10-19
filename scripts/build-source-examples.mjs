@@ -3,6 +3,8 @@ import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { createHighlighter } from 'shiki';
+import { format } from 'prettier';
+import { parse, serialize } from 'parse5';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const output = path.join(root, 'public/source-examples');
@@ -78,9 +80,18 @@ try {
         const absolute = path.resolve(base, descriptor.source ?? file);
         assert(absolute.startsWith(`${base}${path.sep}`), `Invalid source path: ${file}`);
         assert(!files.some((item) => item.path === file), `Duplicate file: ${file}`);
-        const { code, regions } = extractRegions(await readFile(absolute, 'utf8'), `${project.id}/${snapshot.id}/${file}`);
         const language = languages[path.extname(file)];
         assert(language, `Unsupported source language: ${file}`);
+        assert(descriptor.format === undefined || (descriptor.format === 'html' && language === 'html'), `Unsupported source format: ${file}`);
+        const raw = await readFile(absolute, 'utf8');
+        // Format only explicitly opted-in reader copies; never rewrite captures.
+        // Both Shiki and Copy file use the same code and resulting line numbers.
+        // HTML5 parsing also quotes valid minified attributes such as src=/main.js,
+        // which Prettier's template-oriented parser cannot consume directly.
+        const readable = descriptor.format === 'html'
+          ? await format(serialize(parse(raw)), { parser: 'html', tabWidth: 2, printWidth: 80 })
+          : raw;
+        const { code, regions } = extractRegions(readable, `${project.id}/${snapshot.id}/${file}`);
         const html = highlighter.codeToHtml(code.trimEnd(), {
           lang: language,
           themes: { light: 'github-light-high-contrast', dark: 'github-dark-high-contrast' },
