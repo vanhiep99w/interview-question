@@ -240,7 +240,70 @@ Nếu chỉ thêm hash vào `filename`, chunk bổ sung vẫn có thể giữ ng
 
 Bạn không phải tự sửa các chỗ tham chiếu khi tên file thay đổi. **HtmlWebpackPlugin** chèn tên bundle ban đầu vào HTML; **Webpack runtime** biết tên chunk bổ sung để tải khi `import()` chạy. Phần 8.2 sẽ mở code runtime để đối chiếu.
 
-Hash không bắt buộc để ứng dụng chạy và cũng không tự cấu hình HTTP cache. Khi deploy production, thường cấu hình server/CDN cho JS có hash cache lâu, còn HTML cần được kiểm tra cập nhật để browser nhận các URL mới. Nếu HTML vẫn cũ, nó vẫn trỏ tới bundle cũ dù bạn đã build bản mới.
+Hash không bắt buộc để ứng dụng chạy và cũng không tự cấu hình HTTP cache. Nó giúp phân biệt phiên bản JS, nhưng browser vẫn cần nhận HTML mới để biết URL JS mới.
+
+#### Nếu `index.html` cũng bị cache thì sao?
+
+Giả sử HTML cũ trỏ tới `main.a1b2.js`, còn HTML mới trỏ tới `main.c3d4.js`. Nếu browser tiếp tục dùng HTML cũ, nó vẫn yêu cầu `main.a1b2.js`. **Có hash trong tên JS không tự làm mới HTML.**
+
+Một cách đơn giản là cấu hình server trả header này cho HTML:
+
+```http
+Cache-Control: no-cache
+```
+
+`no-cache` không có nghĩa là cấm lưu cache. Browser vẫn được lưu HTML, nhưng phải kiểm tra lại với server trước khi dùng bản đã lưu. Khi có validator như `ETag` hoặc `Last-Modified`, browser có thể gửi request có điều kiện:
+
+- HTML chưa đổi: server trả `304 Not Modified`, browser dùng lại nội dung đã lưu.
+- HTML đã đổi: server trả `200 OK` kèm HTML mới, trong đó có URL bundle mới.
+
+Đây là kiểm tra khi browser cần dùng lại HTML, không phải cơ chế tự cập nhật trang đang mở. Nếu có CDN ở giữa, còn phải xét chính sách cache của CDN như phần dưới.
+
+#### Có thể cache trên CloudFront rồi clear cache khi deploy không?
+
+**Có.** CloudFront hỗ trợ invalidation — loại bỏ bản cache ở các edge locations trước khi hết hạn. Tuy nhiên, có hai nơi lưu cache khác nhau:
+
+| Nơi lưu cache | CloudFront invalidation có xóa được không? |
+| --- | --- |
+| CloudFront edge | Có; request tiếp theo tới bản cache đã bị invalidation sẽ lấy lại từ origin — nơi chứa file gốc, ví dụ S3 |
+| Browser của người dùng | Không; bản đã lưu vẫn chịu chính sách cache mà browser nhận trước đó |
+
+Nếu HTML trong browser vẫn còn hạn cache, browser có thể dùng luôn bản đó mà không gửi request tới CloudFront. Clear CloudFront lúc này không làm browser biết có HTML mới, kể cả khi bạn invalidation `/*`.
+
+Để **browser kiểm tra lại HTML nhưng CloudFront vẫn được cache HTML**, ví dụ cấu hình response header từ origin như sau:
+
+```http
+Cache-Control: public, max-age=0, s-maxage=3600, must-revalidate
+```
+
+Đây là ví dụ cho HTML công khai, không chứa dữ liệu riêng của từng người dùng:
+
+- `max-age=0`: HTML trong browser hết hạn ngay; trước khi dùng lại, browser phải kiểm tra cập nhật. Browser có thể nhận phản hồi từ CloudFront, không nhất thiết từ S3.
+- `s-maxage=3600`: shared cache như CloudFront được cache HTML trong một giờ. Browser không dùng giá trị này làm thời hạn cache của nó.
+- `must-revalidate`: không được dùng lại bản đã hết hạn nếu chưa kiểm tra thành công.
+
+Trong cache policy gắn với behavior phục vụ HTML, đặt **Minimum TTL = 0** và **Maximum TTL ít nhất 3600** để ví dụ một giờ này có hiệu lực. Maximum TTL thấp hơn sẽ rút ngắn thời gian cache; Minimum TTL lớn hơn 0 còn có thể khiến CloudFront cache bất chấp `no-cache`, `no-store` hoặc `private`. Nếu mọi TTL đều bằng 0 thì CloudFront không cache, dù response có `s-maxage`.
+
+Header trên là **phương án thay thế** cho `Cache-Control: no-cache` ở ví dụ trước khi muốn CloudFront cache HTML. Không thêm `no-cache` vào rồi kỳ vọng CDN vẫn cache một giờ mà không kiểm tra lại.
+
+Với JS/CSS có hash, có thể cho cả browser và CDN cache lâu, ví dụ:
+
+```http
+Cache-Control: public, max-age=31536000, immutable
+```
+
+Header này cho phép dùng lại asset trong một năm mà không kiểm tra lại khi còn hạn. Vì vậy, không ghi nội dung mới đè lên cùng URL có hash; khi nội dung đổi, build phải tạo tên mới.
+
+Một quy trình deploy kết hợp hai cách là:
+
+1. Upload JS/CSS mới có hash lên origin trước.
+2. Upload HTML mới trỏ tới các asset đó.
+3. Invalidate các URL HTML thực tế được phục vụ qua CloudFront và chờ invalidation hoàn tất. Xem cả `/`, `/index.html` và các route/rewrite nếu có, không chỉ tên object trên S3.
+4. Giữ asset cũ trong một khoảng thời gian phù hợp để tab đang mở vẫn tải được chunk của phiên bản cũ. `output.clean: true` chỉ dọn thư mục build local; không có nghĩa là phải xóa ngay mọi asset cũ trên origin.
+
+Nếu trước đây đã cho browser cache HTML lâu, đổi header trên server hoặc invalidation CloudFront không thể thu hồi ngay bản còn hạn trong browser. Người dùng đó cần chờ cache hết hạn hoặc tải lại theo cách bỏ qua cache.
+
+**Invalidation làm mới cache CloudFront; contenthash tránh dùng nhầm cache JS/CSS trong browser.** Hai cách bổ sung cho nhau. Các header và TTL này cần cấu hình trên hạ tầng phục vụ file; config Webpack trong bài không tự thiết lập chúng.
 
 #### Đường dẫn trên máy build khác URL trong browser
 
@@ -519,4 +582,6 @@ Bước tiếp theo: [Module Federation: microfrontend React và Vue](/web/04-mo
 - [Webpack Loaders](https://webpack.js.org/concepts/loaders/) — cách chuyển đổi module.
 - [HtmlWebpackPlugin](https://webpack.js.org/plugins/html-webpack-plugin/) — tạo HTML tham chiếu bundle.
 - [Webpack Code Splitting](https://webpack.js.org/guides/code-splitting/) — dynamic import và chunk.
+- [CloudFront invalidation và versioned file names](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/Invalidation.html) — invalidation không xóa được bản lưu tại browser.
+- [CloudFront cache expiration](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/Expiration.html) — `max-age`, `s-maxage` và giới hạn TTL.
 - [Frontend build tooling](/web/02-frontend-build-tooling) — compiler, bundler và type checker.
