@@ -33,6 +33,19 @@ test('Vite comparison is an explainer with a complete, working manual TOC', asyn
   expect(await search.text()).toContain('/web/05-vite-vs-webpack');
 });
 
+test('comparison opens the runnable lab at its lazy import and copies the actual Vite config', async ({ page, context }) => {
+  await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+  await page.goto(route);
+  await page.getByRole('link', { name: 'hàm openAdmin trong React component', exact: true }).click();
+  await expect(page.locator('.source-file-tab')).toContainText('src/App.tsx');
+  await expect(page.locator('.is-highlighted').filter({ hasText: "await import('./admin')" })).toBeVisible();
+  await page.getByRole('link', { name: 'vite.config.ts', exact: true }).first().click();
+  await expect(page.locator('.source-code')).toContainText('manifest: true');
+  await page.getByRole('button', { name: 'Copy file', exact: true }).click();
+  const config = await readFile('examples/frontend-build-lab/vite.config.ts', 'utf8');
+  await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe(config);
+});
+
 test('both dev flows export light/dark SVG with a local embedded webpack icon', async ({ page }) => {
   const errors: string[] = [];
   page.on('pageerror', (error) => errors.push(error.message));
