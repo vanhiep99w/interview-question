@@ -46,6 +46,41 @@ test('comparison opens the runnable lab at its lazy import and copies the actual
   await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe(config);
 });
 
+test('the plain ES modules example runs directly in the browser without a build tool', async ({ page }) => {
+  const source = await readFile('content/docs/web/05-vite-vs-webpack.mdx', 'utf8');
+  const section = source.split('### ES modules là gì?')[1].split('### Từ HTML đến React component')[0];
+  const scripts = [...section.matchAll(/```js\n([\s\S]*?)\n```/g)].map((match) => match[1]);
+  const html = section.match(/```html\n([\s\S]*?)\n```/)?.[1];
+  expect(scripts).toHaveLength(2);
+  expect(html).toBeDefined();
+  const files: Record<string, string> = {
+    '/esm-example/': html!,
+    '/esm-example/math.js': scripts[0],
+    '/esm-example/main.js': scripts[1],
+  };
+  const logs: string[] = [];
+  const errors: string[] = [];
+  const loaded: string[] = [];
+  page.on('console', (message) => {
+    if (message.type() === 'log') logs.push(message.text());
+  });
+  page.on('pageerror', (error) => errors.push(error.message));
+  await page.route('**/esm-example/**', async (route) => {
+    const pathname = new URL(route.request().url()).pathname;
+    loaded.push(pathname);
+    const body = files[pathname];
+    await route.fulfill({
+      status: body === undefined ? 404 : 200,
+      contentType: pathname.endsWith('.js') ? 'text/javascript' : 'text/html',
+      body: body ?? 'Not found',
+    });
+  });
+  await page.goto('/esm-example/');
+  await expect.poll(() => logs).toContain('5');
+  expect(loaded).toEqual(expect.arrayContaining(Object.keys(files)));
+  expect(errors).toEqual([]);
+});
+
 test('both dev flows export light/dark SVG with a local embedded webpack icon', async ({ page }) => {
   const errors: string[] = [];
   page.on('pageerror', (error) => errors.push(error.message));

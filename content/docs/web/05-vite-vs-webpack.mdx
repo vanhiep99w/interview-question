@@ -11,7 +11,7 @@ Bài này đi từ một lần mở trang đến một lần sửa code, rồi m
 
 Bài dùng **Vite 8** và **webpack 5** làm mốc. Vite 8 dùng Rolldown cho bundling và dependency optimization, cùng Oxc cho các tác vụ transform JavaScript/TypeScript. Mô tả “esbuild khi dev, Rollup khi build” thuộc toolchain Vite đời trước, không nên dùng để giải thích mọi phiên bản.
 
-Bạn chỉ cần quen `import`, React component và script trong `package.json`. Nếu chưa rõ compiler khác bundler thế nào, đọc [bản đồ frontend build tooling](/web/02-frontend-build-tooling) trước.
+Bạn chỉ cần quen React component và script trong `package.json`. Bài sẽ giải thích ES modules, `import` và pre-bundle bằng ví dụ trước khi dùng chúng để so sánh. Nếu chưa rõ compiler khác bundler thế nào, đọc [bản đồ frontend build tooling](/web/02-frontend-build-tooling) trước.
 
 </Callout>
 
@@ -19,6 +19,7 @@ Bạn chỉ cần quen `import`, React component và script trong `package.json`
 
 - [So sánh hai toolchain, không chỉ hai bundler](#so-sánh-hai-toolchain-không-chỉ-hai-bundler)
 - [Một ứng dụng để theo dõi xuyên suốt](#một-ứng-dụng-để-theo-dõi-xuyên-suốt)
+  - [ES modules là gì?](#es-modules-là-gì)
   - [Từ HTML đến React component](#từ-html-đến-react-component)
   - [Lúc mở trang và lúc bấm nút](#lúc-mở-trang-và-lúc-bấm-nút)
   - [Static import và dynamic import khác nhau ở đâu?](#static-import-và-dynamic-import-khác-nhau-ở-đâu)
@@ -70,7 +71,47 @@ Mình dùng một màn hình React có hai việc rất nhỏ:
 - Vừa mở trang, bạn thấy dòng **Kết quả: 5**.
 - Khi bấm nút **Tải admin module**, bạn mới thấy thêm dòng **Admin module đã được tải**.
 
-Ta sẽ xem code tạo ra hai hành vi này. Trong ví dụ, một **module** là một file code có thể chia sẻ hàm hoặc component cho file khác bằng `export` và `import`.
+Ta sẽ xem code tạo ra hai hành vi này. Nhưng trước khi đọc React, mình tách riêng một ví dụ JavaScript để làm rõ cách các file chia sẻ code với nhau.
+
+### ES modules là gì?
+
+Giả sử bạn viết hàm cộng trong một file và muốn dùng nó ở file khác. JavaScript có sẵn cách làm việc đó: **export** phần code muốn chia sẻ, rồi **import** phần code đó ở nơi cần dùng. Cơ chế này gọi là **ES modules**, viết tắt là **ESM**. Đây là tính năng của JavaScript, không phải tính năng riêng của React hay Vite.
+
+Ví dụ dưới đây độc lập với lab React. Nó chỉ có hai file JavaScript đặt cùng thư mục. File **`math.js`** cung cấp hàm cộng:
+
+```js
+export function sum(a, b) {
+  return a + b;
+}
+```
+
+`export` cho phép file khác lấy hàm `sum` để dùng. File **`main.js`** lấy hàm đó về:
+
+```js
+import { sum } from './math.js';
+
+console.log(sum(2, 3)); // In ra 5 trong console
+```
+
+`'./math.js'` là đường dẫn tới file nằm cùng thư mục. `{ sum }` chọn giá trị được export với tên `sum`. Dòng import lấy hàm về; dòng `sum(2, 3)` mới gọi hàm để thực hiện phép cộng.
+
+Mỗi file được xử lý như một **module**, tức một đơn vị code riêng. Bạn không cần chép hàm cộng vào mọi file muốn dùng nó, cũng không cần đưa `sum` thành biến global để các file cùng truy cập.
+
+Để browser chạy ví dụ, một file HTML trong cùng thư mục khai báo:
+
+```html
+<script type="module" src="./main.js"></script>
+```
+
+`type="module"` báo cho browser xử lý script theo cơ chế ES modules. Khi các file được phục vụ qua HTTP, browser làm những việc sau:
+
+1. Đọc HTML và tải `main.js`.
+2. Thấy `main.js` import `./math.js`, tải thêm file đó.
+3. Khi dependency `math.js` đã sẵn sàng, chạy phần code trong `main.js` và in ra `5`.
+
+Với ví dụ JavaScript thuần này, không cần Vite hay React; chỉ cần một HTTP server phục vụ các file, thay vì mở HTML trực tiếp bằng `file://`. Browser hiện đại tự hiểu `import`/`export` và biết nạp module. Khi bài gọi đó là **native ESM**, chữ *native* chỉ khả năng hỗ trợ sẵn này của browser.
+
+**Giới hạn cần nhớ:** browser hiểu ES modules không có nghĩa nó hiểu TypeScript hay JSX. Ví dụ vừa rồi dùng `.js`; lab React bên dưới dùng `.tsx`, nên vẫn cần Vite chuyển code thành JavaScript trước khi browser chạy.
 
 ### Từ HTML đến React component
 
@@ -221,7 +262,7 @@ Chi phí rebuild vẫn phụ thuộc vào phạm vi module bị ảnh hưởng v
 
 Ở chế độ dev native ESM mặc định, browser đọc `index.html` rồi yêu cầu `/src/main.tsx`. Vite transform TSX thành JavaScript, xử lý đường dẫn import và trả kết quả. Browser đọc các import trong response rồi tiếp tục yêu cầu module cần thiết.
 
-**Native ESM** nghĩa là browser dùng cơ chế ES modules của chính nó để nạp code. Nó không có nghĩa browser tự hiểu TypeScript, JSX hoặc cách tìm package trong `node_modules`.
+Đây là **native ESM** đã thấy trong [ví dụ hai file JavaScript](#es-modules-là-gì): browser tự đọc import và yêu cầu module liên quan. Khác biệt là source ở đây có TSX nên Vite phải chuyển đổi trước. Vite cũng xử lý tên package như `'react'`; browser không tự tìm thư viện trong `node_modules`.
 
 Sơ đồ dưới đây tách app source khỏi dependency ít thay đổi:
 
@@ -247,16 +288,40 @@ Tuy nhiên, Vite vẫn có bước khởi tạo plugin, phân tích import và k
 
 ### Vì sao vẫn cần pre-bundle dependency?
 
-Dòng `import { useState } from 'react'` dùng một **bare import**: tên package chứ không phải URL tương đối hay tuyệt đối. Trong workflow này, Vite resolve package và rewrite import sang URL mà browser tải được.
+Bạn vừa thấy browser có thể tải từng file được import. Vậy tại sao Vite còn phải “gom code trước”? Vì source app bạn đang sửa và thư viện cài từ npm có đặc điểm khác nhau.
 
-Vite còn **pre-bundle dependency**, tức xử lý trước một nhóm dependency thành output phù hợp để phục vụ trong dev. Có hai lý do chính:
+Lấy dòng trong `App.tsx`:
 
-- Package phát hành dưới dạng CommonJS hoặc UMD cần được chuyển thành ESM.
-- Package ESM gồm rất nhiều file nhỏ có thể làm browser phát sinh quá nhiều request. Gom chúng lại giúp giảm chi phí nạp trang.
+```tsx
+import { useState } from 'react';
+```
 
-Vite 8 dùng Rolldown cho bước này và mặc định cache kết quả ở `node_modules/.vite`. Nó có thể tối ưu lại khi lockfile hoặc cấu hình liên quan thay đổi. Dependency mới chỉ được phát hiện sau một plugin transform cũng có thể kích hoạt thêm một lượt tối ưu.
+`react` là một **dependency**, tức thư viện mà app dùng. Bạn đã cài package này vào `node_modules` bằng npm. Khác với `'./math.js'`, tên `'react'` không phải đường dẫn để browser tải trực tiếp. Cách import bằng tên package này gọi là **bare import**.
 
-Đây là lý do câu “Vite dev hoàn toàn không bundling” không đúng. Chính xác hơn: **app source được phục vụ theo native ESM trong chế độ này, còn dependency có pipeline tối ưu riêng**.
+Vite tìm package tương ứng trên máy và đổi tên import thành URL mà browser có thể tải. Nhưng tìm được package mới chỉ là bước đầu: code bên trong thư viện có thể gồm nhiều file nhỏ hoặc dùng định dạng module mà browser không hỗ trợ trực tiếp.
+
+**Pre-bundle là gom và xử lý trước code của các dependency để browser dễ tải và chạy hơn trong dev.** Kết quả được lưu lại để dùng tiếp, thay vì lặp lại toàn bộ công việc mỗi khi bạn sửa một component. Có hai vấn đề cụ thể mà bước này giải quyết.
+
+**Vấn đề thứ nhất: thư viện có quá nhiều file nhỏ.** Giả sử một thư viện có 100 file JavaScript import lẫn nhau. Nếu phục vụ từng file riêng, browser có thể phải gửi rất nhiều request mới lấy đủ code. Vite gom các module đó thành ít file hơn để giảm số request. Con số 100 chỉ minh họa tình huống, không phải số file thực tế của React.
+
+**Vấn đề thứ hai: thư viện không dùng ES modules.** Một số package dùng **CommonJS**, một cơ chế module thường gặp trong Node.js. Chẳng hạn, chúng có thể nạp code bằng cú pháp `require('some-package')` thay vì `import`. Browser không trực tiếp cung cấp cơ chế `require()` đó. Khi tối ưu dependency dạng CommonJS, Vite chuyển code thành output ESM để browser nạp được.
+
+Trong Vite 8, công cụ làm bước pre-bundle này là **Rolldown**. Mặc định, Vite lưu kết quả đã xử lý vào thư mục cache:
+
+```text
+node_modules/.vite
+```
+
+Cache ở đây là bản kết quả được giữ lại để dùng lại. React thường không thay đổi khi bạn chỉ sửa chữ trong `App.tsx`, nên Vite có thể dùng lại phần dependency đã chuẩn bị. Bạn vẫn sửa app và thấy giao diện cập nhật mà không cần gom lại React sau mỗi lần lưu file.
+
+Cache không được dùng mãi bất kể thay đổi. Nếu lockfile hoặc cấu hình liên quan đổi, Vite có thể tối ưu dependency lại. Khi phát hiện thêm dependency chưa có trong cache, nó cũng có thể chạy thêm một lượt tối ưu.
+
+| Nhóm code trong ví dụ | Cách Vite xử lý trong chế độ dev đang xét |
+| --- | --- |
+| `App.tsx`, `math.ts` và source app bạn đang sửa | Chuyển đổi và phục vụ theo nhu cầu, dùng lại kết quả còn hợp lệ |
+| Dependency được tối ưu như React | Pre-bundle thành output phù hợp cho browser và cache để dùng lại |
+
+Vì vậy, **Vite không cần bundle toàn bộ app trước khi phục vụ trang, nhưng vẫn bundle dependency để tối ưu việc nạp thư viện**. Hai việc này không mâu thuẫn. Pre-bundle trong dev cũng không thay thế production build; phần production bên dưới sẽ giải thích công việc còn lại khi phát hành app.
 
 ### Khởi động nhanh khác với trang sẵn sàng nhanh
 
