@@ -19,6 +19,9 @@ Bạn chỉ cần quen `import`, React component và script trong `package.json`
 
 - [So sánh hai toolchain, không chỉ hai bundler](#so-sánh-hai-toolchain-không-chỉ-hai-bundler)
 - [Một ứng dụng để theo dõi xuyên suốt](#một-ứng-dụng-để-theo-dõi-xuyên-suốt)
+  - [Từ HTML đến React component](#từ-html-đến-react-component)
+  - [Lúc mở trang và lúc bấm nút](#lúc-mở-trang-và-lúc-bấm-nút)
+  - [Static import và dynamic import khác nhau ở đâu?](#static-import-và-dynamic-import-khác-nhau-ở-đâu)
 - [webpack làm gì khi mở trang lần đầu?](#webpack-làm-gì-khi-mở-trang-lần-đầu)
   - [Từ entry đến bundle có runtime](#từ-entry-đến-bundle-có-runtime)
   - [Compile lại không có nghĩa làm lại mọi thứ](#compile-lại-không-có-nghĩa-làm-lại-mọi-thứ)
@@ -62,28 +65,107 @@ Vì vậy, đối tượng so sánh thực tế là **Vite cùng plugin framewor
 
 ## Một ứng dụng để theo dõi xuyên suốt
 
-Ví dụ dùng một React app nhỏ. `index.html` của lab Vite khai báo entry bằng thẻ script:
+Mình dùng một màn hình React có hai việc rất nhỏ:
+
+- Vừa mở trang, bạn thấy dòng **Kết quả: 5**.
+- Khi bấm nút **Tải admin module**, bạn mới thấy thêm dòng **Admin module đã được tải**.
+
+Ta sẽ xem code tạo ra hai hành vi này. Trong ví dụ, một **module** là một file code có thể chia sẻ hàm hoặc component cho file khác bằng `export` và `import`.
+
+### Từ HTML đến React component
+
+Browser mở `index.html` trước. Trong phần body của file này có:
 
 ```html
+<div id="root"></div>
 <script type="module" src="/src/main.tsx"></script>
 ```
 
-`main.tsx` render `App`. Trong `App.tsx`, một import được dùng ngay, còn import kia nằm sau thao tác người dùng:
+`div` là chỗ để React gắn giao diện vào. Thẻ `script` yêu cầu browser tải code từ URL `/src/main.tsx`; `type="module"` cho phép script dùng cơ chế `import` của JavaScript.
+
+Đây là HTML dùng với **Vite dev server**, không phải file có thể mở trực tiếp rồi mong browser chạy TSX. Vite nhận request tới `main.tsx`, chuyển TSX thành JavaScript rồi mới trả về browser. Phần sau sẽ giải thích bước chuyển đổi này; ở đây chỉ cần nhớ browser vẫn chạy JavaScript.
+
+File `src/main.tsx` có nội dung:
 
 ```tsx
+import { createRoot } from 'react-dom/client';
+import App from './App';
+import './styles.css';
+
+const element = document.getElementById('root');
+if (!element) throw new Error('Missing #root');
+createRoot(element).render(<App />);
+```
+
+Đoạn cuối tìm vùng `root` trong HTML rồi yêu cầu React hiển thị component `App` vào đó. `import App from './App'` lấy component này từ file `src/App.tsx`. Vậy giao diện bạn nhìn thấy sẽ do `App` quyết định, không phải do thẻ `script` tự tạo ra.
+
+### Lúc mở trang và lúc bấm nút
+
+Đây là toàn bộ `src/App.tsx`, chỉ bỏ các comment đánh dấu vùng source:
+
+```tsx
+import { useState } from 'react';
 import { sum } from './math';
 
-async function openAdmin() {
-  const { getAdminMessage } = await import('./admin');
-  setMessage(getAdminMessage());
+export default function App() {
+  const [message, setMessage] = useState<string | null>(null);
+
+  async function openAdmin() {
+    const { getAdminMessage } = await import('./admin');
+    setMessage(getAdminMessage());
+  }
+
+  return (
+    <main>
+      <h1>Frontend build lab</h1>
+      <p>Kết quả: {sum(2, 3)}</p>
+      <button onClick={openAdmin}>Tải admin module</button>
+      {message && <p role="status">{message}</p>}
+    </main>
+  );
 }
 ```
 
-Đây là đoạn trích trong component, không phải file độc lập. `sum` phục vụ phép tính trên màn hình đầu tiên. `openAdmin` chỉ chạy khi bạn bấm nút **Tải admin module**.
+Đọc lần đầu, bạn chỉ cần theo dõi hai thời điểm.
 
-**Static import** là import được khai báo như dòng đầu tiên. **Dynamic import** là biểu thức `import()` trả về Promise; ở đây nó cho phép trì hoãn việc yêu cầu module admin. Cả Vite lẫn webpack đều hiểu hai dạng này, nhưng cách phục vụ chúng trong dev không giống nhau.
+**Khi vừa mở trang:** React chạy component `App` để tạo giao diện. Biểu thức `sum(2, 3)` gọi hàm cộng lấy từ `math.ts`, trả về `5`. Vì vậy dòng đầu hiển thị `Kết quả: 5`.
 
-Bạn có thể xem ngữ cảnh đầy đủ tại <SourceRef project="frontend-build-lab" file="src/App.tsx" region="lazy-import">hàm openAdmin trong React component</SourceRef>. Các bước chạy lab nằm ở phần thực hành bên dưới.
+`message` là giá trị mà React giữ giữa các lần cập nhật giao diện, thường gọi là **state**. Ban đầu nó là `null`, tức chưa có thông báo. Dòng `{message && ...}` chỉ hiển thị đoạn thông báo khi `message` có giá trị, nên lúc này bạn chưa thấy dòng nào bên dưới nút.
+
+Còn `openAdmin` thì sao? Component mới chỉ khai báo hàm đó. `onClick={openAdmin}` đăng ký hàm làm thao tác xử lý khi bấm nút; nó **không gọi hàm ngay trong lúc tạo giao diện**. Vì thế, dòng `import('./admin')` bên trong chưa chạy.
+
+**Khi bạn bấm nút:** React gọi `openAdmin`. Dòng `await import('./admin')` bắt đầu nạp module `admin.ts` và chờ lấy được các giá trị mà module export. Code lấy ra hàm `getAdminMessage`, gọi hàm để nhận chuỗi `Admin module đã được tải`, rồi đưa chuỗi đó vào `setMessage`.
+
+`setMessage` là hàm cập nhật state. React dùng giá trị mới để cập nhật giao diện; lúc này bạn mới thấy thông báo bên dưới nút. Lần bấm tiếp theo không nhất thiết tải lại code qua mạng vì module đã được nạp có thể được dùng lại.
+
+### Static import và dynamic import khác nhau ở đâu?
+
+Sau khi đã thấy luồng chạy, ta mới đặt tên cho hai cách import:
+
+```ts
+import { sum } from './math'; // Static import
+```
+
+**Static import** khai báo dependency ở cấp ngoài cùng của file. Module `App` cần dependency `math` sẵn sàng trước khi phần code của chính nó được thực thi. Trong ví dụ này, phép tính cần dùng ngay trên màn hình đầu tiên, nên cách viết đó phù hợp.
+
+Lưu ý: **import hàm không có nghĩa là gọi hàm**. Dòng import lấy hàm `sum`; biểu thức `sum(2, 3)` trong phần giao diện mới gọi hàm để tính ra `5`.
+
+```ts
+const { getAdminMessage } = await import('./admin'); // Dynamic import
+```
+
+**Dynamic import** là biểu thức có thể đặt bên trong hàm. Nó chỉ bắt đầu nạp module khi luồng chạy đến biểu thức đó. `import()` trả về một **Promise**, tức đối tượng đại diện cho kết quả sẽ có sau; `await` chờ kết quả đó trước khi chạy dòng tiếp theo trong hàm.
+
+Ở đây, chính việc đặt `import('./admin')` trong hàm xử lý nút bấm giúp trì hoãn nạp module admin. Không phải cứ viết `import()` là code tự chờ người dùng: nếu đặt biểu thức đó ở chỗ chạy ngay lúc khởi động, nó vẫn bắt đầu nạp ngay lúc khởi động.
+
+| Thời điểm trong ví dụ | Module math | Module admin |
+| --- | --- | --- |
+| Mở trang lần đầu | Cần sẵn sàng để App tính và hiển thị `5` | Chưa được yêu cầu qua `import('./admin')` |
+| Bấm nút tải admin | Đã được nạp | Bắt đầu được nạp, rồi cung cấp hàm tạo thông báo |
+
+**Điểm cần giữ để đọc tiếp:** app cần code tính toán ngay khi mở trang, còn code admin chỉ cần sau khi bấm nút. Vite và webpack đều hỗ trợ cách viết này. Phần tiếp theo so sánh cách mỗi toolchain đưa những module đó đến browser.
+
+Bạn có thể mở lại <SourceRef project="frontend-build-lab" file="src/App.tsx" region="lazy-import">hàm openAdmin trong React component</SourceRef> để đối chiếu source. Các bước chạy lab nằm ở phần thực hành bên dưới.
 
 ## webpack làm gì khi mở trang lần đầu?
 
