@@ -35,6 +35,9 @@ Bạn chỉ cần quen React component và script trong `package.json`. Bài s�
 - [Production vẫn cần một pipeline riêng](#production-vẫn-cần-một-pipeline-riêng)
   - [Bundling, tree shaking và code splitting khác nhau](#bundling-tree-shaking-và-code-splitting-khác-nhau)
   - [Dùng chung engine không làm dev giống production](#dùng-chung-engine-không-làm-dev-giống-production)
+- [Tổng kết khác biệt giữa dev và production](#tổng-kết-khác-biệt-giữa-dev-và-production)
+  - [Dev nhanh hơn nhưng vẫn có giới hạn](#dev-nhanh-hơn-nhưng-vẫn-có-giới-hạn)
+  - [Production cả hai đều build trước khi phục vụ](#production-cả-hai-đều-build-trước-khi-phục-vụ)
 - [TypeScript chạy được chưa chắc đúng type](#typescript-chạy-được-chưa-chắc-đúng-type)
 - [Thực hành bằng source có sẵn](#thực-hành-bằng-source-có-sẵn)
   - [Quan sát native ESM và cập nhật component](#quan-sát-native-esm-và-cập-nhật-component)
@@ -393,6 +396,52 @@ Mốc phiên bản giúp bạn đọc các bài hướng dẫn cũ đúng ngữ 
 
 Bảng không bao gồm bản chuyển tiếp `rolldown-vite` hay cấu hình thay thế. Muốn biết dự án đang dùng gì, kiểm tra lockfile và lệnh build thay vì đoán từ tên file `vite.config.ts`.
 
+## Tổng kết khác biệt giữa dev và production
+
+Với SPA phía client đang xét trong bài, có thể nhớ khác biệt qua hai câu hỏi: **khi đang sửa code, toolchain đưa code tới browser thế nào?** Và **khi phát hành, browser nhận những file nào?** Đừng dùng câu trả lời của dev để suy ra hành vi production.
+
+### Dev nhanh hơn nhưng vẫn có giới hạn
+
+Trong dev, webpack thông thường compile graph từ entry rồi phục vụ các bundles/chunks được tạo. Vite ở chế độ native ESM mặc định phục vụ module source theo nhu cầu: browser yêu cầu module, Vite chuyển đổi thành JavaScript và trả về. Browser đọc các import để yêu cầu module liên quan rồi liên kết và thực thi chúng. Riêng dependency thư viện, Vite vẫn có bước pre-bundle.
+
+Vì không phải bundle toàn bộ source app trước khi phục vụ trang, Vite thường giảm thời gian chờ khởi động. Khi sửa code, nó cũng có thể cập nhật các module liên quan mà không cần tạo lại app bundle. Điều này không có nghĩa webpack luôn làm lại mọi thứ: webpack có cache, incremental rebuild và HMR. Mức chênh lệch cần được đo trên cùng app và cùng trách nhiệm kiểm tra.
+
+Nhưng giả sử route đang mở cần hàng nghìn **module source**, Vite vẫn có thể gặp nút thắt:
+
+- Browser phải gửi nhiều request để lấy đủ module.
+- Import nằm sâu trong chuỗi phụ thuộc có thể tạo thêm các lượt chờ nối tiếp.
+- Vite phải chuyển đổi những module chưa có kết quả cache phù hợp.
+- Browser vẫn phải phân tích cú pháp và thực thi JavaScript nhận được.
+
+Ở đây nên nói **nhiều module**, không phải **nhiều bundle**: trong luồng dev này, app source chưa được gom thành production bundles. Tổng số file trong repository cũng không quyết định tất cả. Một app có nhiều route nhưng chỉ nạp code cần cho route hiện tại có thể nhẹ hơn một màn hình import gần như toàn bộ app.
+
+Kết luận để dùng khi đo: **server báo ready nhanh chưa chắc trang đã tương tác được nhanh**. Hãy kiểm tra cả lần mở trang và lần cập nhật sau khi sửa code, không chỉ số thời gian trong terminal.
+
+### Production cả hai đều build trước khi phục vụ
+
+Quay lại nút tải admin. Trong Vite dev, thao tác có thể yêu cầu module source đã được chuyển đổi. Sau `vite build`, browser yêu cầu chunk JavaScript đã tạo sẵn trong output. Hosting không nhận request tới `App.tsx` rồi nhờ Vite chuyển đổi file đó cho từng người dùng.
+
+Với webpack production, browser cũng tải các file đã build. Cả hai đều có thể bundle code, loại phần code không dùng khi an toàn, chia chunks và minify. **Khác biệt “Vite phục vụ từng module source, webpack phục vụ bundle” không còn mô tả đúng cách so sánh hai bản production.**
+
+| Điểm so sánh | Vite 8 production | webpack 5 production |
+| --- | --- | --- |
+| Engine bundling | Rolldown, được Vite điều phối | webpack, cùng loaders/plugins đã cấu hình |
+| File đưa lên hosting cho SPA | HTML, JavaScript chunks, CSS/assets đã build | HTML, JavaScript chunks, CSS/assets theo pipeline đã cấu hình |
+| Code admin được tải khi nào? | Có thể tải chunk sau thao tác qua dynamic import | Cũng có thể tải chunk sau thao tác qua dynamic import |
+| Output có giống nhau không? | Cách chia chunks, tối ưu và mã nạp chunk phụ thuộc engine/config | Cũng phụ thuộc engine/config; không mặc định trùng output của Vite |
+| Có tiếp tục transform source theo request không? | Không; hosting phục vụ output đã build | Không; hosting phục vụ output đã build |
+
+ES modules và bundling cũng không loại trừ nhau. Bundler có thể gom nhiều file source vào một chunk, rồi các chunks dùng cú pháp ESM để import lẫn nhau. Vì vậy, thấy `type="module"` hoặc `import` trong output không đủ để kết luận code chưa được bundle.
+
+Vẫn có khác biệt đáng đo ở production, nhưng phải tách hai loại thời gian:
+
+- **Thời gian build:** CI mất bao lâu để tạo output. Engine bundling, plugins, source map và các bước kiểm tra đều ảnh hưởng. Vite dev nhanh không tự chứng minh production build cũng nhanh hơn cùng tỷ lệ.
+- **Thời gian người dùng chờ:** browser mất bao lâu để tải và chạy app. Kích thước code cần cho route, cách chia chunks, HTTP cache, network và chi phí thực thi mới là những yếu tố phải đối chiếu. Build nhanh hơn không tự làm trang chạy nhanh hơn.
+
+Ở production, một bundle quá lớn có thể làm chậm tải và thực thi code. Chia thành quá nhiều chunks nhỏ lại có thể tăng số request và các lượt chờ để lấy đủ code. Cả Vite lẫn webpack đều có thể gặp hai vấn đề này. Mục tiêu không phải ít file nhất hay nhiều chunks nhất, mà là người dùng tải được phần code cần thiết đúng lúc và dùng lại cache hiệu quả.
+
+**Cách nhớ ngắn gọn:** dev khác nhau rõ ở cách phục vụ và cập nhật source; production khác nhau ở pipeline build và output tạo ra. Đừng mặc định app dùng Vite sẽ chạy nhanh hơn app dùng webpack trên máy người dùng — hãy đo bản production của cùng một app.
+
 ## TypeScript chạy được chưa chắc đúng type
 
 Giả sử một hàm khai báo trả về `number` nhưng lại trả về chuỗi:
@@ -546,6 +595,8 @@ Một bước thử hợp lý là chuyển một route đại diện hoặc mộ
 - [Vite 8: Rolldown, Oxc và hướng Full Bundle Mode](https://vite.dev/blog/announcing-vite8).
 - [Why Vite: native ESM dev và lý do cần production bundling](https://vite.dev/guide/why.html).
 - [Dependency pre-bundling: CommonJS, tối ưu request và cache](https://vite.dev/guide/dep-pre-bundling.html).
+- [Vite production build: tạo output sẵn để triển khai](https://vite.dev/guide/build).
+- [webpack production: cấu hình và tối ưu cho bản phát hành](https://webpack.js.org/guides/production/).
 - [Vite TypeScript: transform không thay cho type checking](https://vite.dev/guide/features.html#typescript).
 - [Vite environment variables và phạm vi expose xuống client](https://vite.dev/guide/env-and-mode.html).
 - [webpack HMR: compiler, runtime và cách áp dụng bản cập nhật](https://webpack.js.org/concepts/hot-module-replacement/).
