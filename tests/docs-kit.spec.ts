@@ -67,7 +67,7 @@ test('HTTP transcript, terminal commands, real source diff and waterfall are rea
   await expect(page.locator('.protocol-exchange')).toContainText('"items"');
   await page.goto('/behavioral/01-production-server-down/');
   await page.getByRole('button', { name: 'Sao chép lệnh bước 1', exact: true }).click();
-  await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe('kubectl describe pod <pod-name> -n production | grep -A5 "Last State"');
+  await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe('kubectl --context "$CTX" -n "$NS" get pods -l app=orders-api -o wide');
   await page.goto('/web/03-webpack-tu-source-den-trinh-duyet/');
   const diff = page.locator('.code-diff');
   await expect(diff).toHaveAttribute('data-view', 'split');
