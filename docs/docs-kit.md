@@ -103,7 +103,7 @@ Ví dụ thật trong docs:
 - **Code Diff:** `src/main.tsx` trước/sau async bootstrap trong
   `web/03-webpack-tu-source-den-trinh-duyet.mdx`. Code lấy từ hai snapshot source
   đã có; khi sửa source cần đồng bộ ví dụ này. Giữ các `SourceRef` gần đó.
-- **Span Waterfall:** transaction gọi Payment API/email trong
+- **Span Waterfall:** transaction chờ Payment API trong
   `database/05-long-running-transaction.mdx`. Ghi rõ `provenance.kind: illustrative`;
   không trình bày số minh họa như benchmark/trace production.
 
