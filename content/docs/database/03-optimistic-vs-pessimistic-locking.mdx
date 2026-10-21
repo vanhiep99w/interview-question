@@ -1,153 +1,514 @@
 ---
-title: "Optimistic Lock vs Pessimistic Lock: chọn thế nào?"
-description: "Cách ngăn lost update bằng @Version, SELECT FOR UPDATE, retry, timeout và transaction design trong Spring Boot 3 + PostgreSQL."
+title: "Optimistic và pessimistic locking: kiểm soát cập nhật đồng thời"
+description: "Từ lost update đến version check, SELECT FOR UPDATE và atomic UPDATE: hiểu cơ chế, triển khai với SQL và Spring/JPA, xử lý retry, deadlock và chọn cách bảo vệ đúng quy tắc nghiệp vụ."
 ---
 
-# Optimistic Lock vs Pessimistic Lock: chọn thế nào?
+<Callout type="info" title="Phạm vi bài viết">
+  Bạn cần biết `SELECT`, `UPDATE` và cách mở một database transaction bằng
+  `BEGIN`/`COMMIT`. Bài dùng ví dụ tồn kho xuyên suốt. SQL và lịch chạy hai
+  session lấy **PostgreSQL 18, isolation level `READ COMMITTED`** làm chuẩn, trừ
+  những chỗ ghi rõ khác. Phần Spring/JPA minh họa cách đưa cùng cơ chế vào ứng
+  dụng; không phải một project Spring Boot hoàn chỉnh.
+</Callout>
 
-## Câu hỏi
+## Mục lục
 
-> Optimistic Lock và Pessimistic Lock khác nhau như thế nào? Trong hệ thống Spring Boot dùng JPA/Hibernate và PostgreSQL, khi nào nên chọn mỗi loại, implement ra sao, và xử lý conflict, timeout, deadlock như thế nào?
+- [Bắt đầu từ một lần bán vượt tồn kho](#bắt-đầu-từ-một-lần-bán-vượt-tồn-kho)
+  - [Dữ liệu và quy tắc cần bảo vệ](#dữ-liệu-và-quy-tắc-cần-bảo-vệ)
+  - [Lost update khi hai request cùng dùng dữ liệu cũ](#lost-update-khi-hai-request-cùng-dùng-dữ-liệu-cũ)
+- [Transaction, isolation và locking là ba lớp khác nhau](#transaction-isolation-và-locking-là-ba-lớp-khác-nhau)
+- [Optimistic locking: chỉ ghi nếu dữ liệu vẫn còn đúng phiên bản](#optimistic-locking-chỉ-ghi-nếu-dữ-liệu-vẫn-còn-đúng-phiên-bản)
+  - [Đọc version rồi cập nhật có điều kiện](#đọc-version-rồi-cập-nhật-có-điều-kiện)
+  - [Một writer thắng, writer còn lại phát hiện conflict](#một-writer-thắng-writer-còn-lại-phát-hiện-conflict)
+  - [Diễn giải đúng kết quả không có row được cập nhật](#diễn-giải-đúng-kết-quả-không-có-row-được-cập-nhật)
+  - [Giữ version từ lúc đọc tới lúc người dùng bấm lưu](#giữ-version-từ-lúc-đọc-tới-lúc-người-dùng-bấm-lưu)
+  - [Mọi writer phải tuân thủ cùng một giao thức](#mọi-writer-phải-tuân-thủ-cùng-một-giao-thức)
+- [Pessimistic locking: lấy quyền cập nhật trước khi quyết định](#pessimistic-locking-lấy-quyền-cập-nhật-trước-khi-quyết-định)
+  - [Đọc và xử lý trong cùng transaction giữ lock](#đọc-và-xử-lý-trong-cùng-transaction-giữ-lock)
+  - [Request đến sau chờ rồi kiểm tra lại dữ liệu](#request-đến-sau-chờ-rồi-kiểm-tra-lại-dữ-liệu)
+  - [Row lock không chặn mọi kiểu đọc](#row-lock-không-chặn-mọi-kiểu-đọc)
+  - [Chọn lock mode và phạm vi khóa](#chọn-lock-mode-và-phạm-vi-khóa)
+  - [Giới hạn thời gian chờ với timeout và NOWAIT](#giới-hạn-thời-gian-chờ-với-timeout-và-nowait)
+  - [SKIP LOCKED dành cho công việc có thể bỏ qua](#skip-locked-dành-cho-công-việc-có-thể-bỏ-qua)
+- [Atomic conditional UPDATE: bỏ lượt đọc khi có thể](#atomic-conditional-update-bỏ-lượt-đọc-khi-có-thể)
+- [Khi quy tắc nghiệp vụ vượt ra ngoài một row](#khi-quy-tắc-nghiệp-vụ-vượt-ra-ngoài-một-row)
+  - [Write skew dù mỗi row đều có version](#write-skew-dù-mỗi-row-đều-có-version)
+  - [Bảo vệ một điểm chung của cả nhóm dữ liệu](#bảo-vệ-một-điểm-chung-của-cả-nhóm-dữ-liệu)
+  - [Row chưa tồn tại và vai trò của constraint](#row-chưa-tồn-tại-và-vai-trò-của-constraint)
+  - [Isolation level không thay thế hoàn toàn version check](#isolation-level-không-thay-thế-hoàn-toàn-version-check)
+- [Đưa cơ chế vào Spring và JPA](#đưa-cơ-chế-vào-spring-và-jpa)
+  - [Entity có version và kiểm tra dữ liệu cũ từ client](#entity-có-version-và-kiểm-tra-dữ-liệu-cũ-từ-client)
+  - [Repository dùng PESSIMISTIC_WRITE](#repository-dùng-pessimistic_write)
+  - [Flush, commit và những đường ghi bỏ qua ORM](#flush-commit-và-những-đường-ghi-bỏ-qua-orm)
+- [Xử lý conflict, deadlock và retry](#xử-lý-conflict-deadlock-và-retry)
+  - [Phân biệt lock wait với deadlock](#phân-biệt-lock-wait-với-deadlock)
+  - [Retry toàn bộ đơn vị nghiệp vụ trong transaction mới](#retry-toàn-bộ-đơn-vị-nghiệp-vụ-trong-transaction-mới)
+  - [Idempotency và side effect nằm ngoài database](#idempotency-và-side-effect-nằm-ngoài-database)
+- [Khác biệt cần nhớ giữa PostgreSQL và MySQL](#khác-biệt-cần-nhớ-giữa-postgresql-và-mysql)
+- [Chọn chiến lược theo thao tác thực tế](#chọn-chiến-lược-theo-thao-tác-thực-tế)
+- [Thực hành bằng hai session PostgreSQL](#thực-hành-bằng-hai-session-postgresql)
+  - [Chuẩn bị database riêng](#chuẩn-bị-database-riêng)
+  - [Thí nghiệm 1: tái hiện lost update](#thí-nghiệm-1-tái-hiện-lost-update)
+  - [Thí nghiệm 2: optimistic update chỉ có một bên thành công](#thí-nghiệm-2-optimistic-update-chỉ-có-một-bên-thành-công)
+  - [Thí nghiệm 3: quan sát FOR UPDATE giữ request đến sau](#thí-nghiệm-3-quan-sát-for-update-giữ-request-đến-sau)
+  - [Thí nghiệm 4: atomic UPDATE tự kiểm tra lại điều kiện](#thí-nghiệm-4-atomic-update-tự-kiểm-tra-lại-điều-kiện)
+- [Quan sát và kiểm thử trước khi đưa vào production](#quan-sát-và-kiểm-thử-trước-khi-đưa-vào-production)
+- [Checklist thiết kế](#checklist-thiết-kế)
+- [Tài liệu tham khảo và bài liên quan](#tài-liệu-tham-khảo-và-bài-liên-quan)
 
----
+## Bắt đầu từ một lần bán vượt tồn kho
 
-## Dành cho level
+Giả sử một sản phẩm chỉ còn một đơn vị. Hai request đặt hàng đến gần như cùng lúc. Mỗi request đều đọc thấy còn hàng, trừ đi một rồi ghi lại `remaining = 0`. Cả hai đều nhận kết quả cập nhật thành công.
 
-**Mid / Senior / Staff** — Mid cần giải thích được `@Version`, `SELECT ... FOR UPDATE`, lost update và transaction boundary. Senior cần chọn strategy theo conflict rate, thời gian giữ transaction, retry cost và business invariant; đồng thời biết xử lý exception, timeout, deadlock và idempotency. Staff cần thiết kế concurrency policy cho toàn hệ thống: đo contention, tránh hot row, đặt SLO/alert, capacity-test, chuẩn hóa retry budget và biết khi nào phải đổi data model thay vì thêm lock.
+Database cuối cùng không có số âm. Nhưng ứng dụng đã có thể chấp nhận hai đơn hàng cho một sản phẩm. Lỗi nằm ở chỗ cả hai request cùng ra quyết định dựa trên một giá trị đã đọc trước đó, không phải ở phép trừ.
 
----
+Optimistic locking và pessimistic locking là hai cách phối hợp những thao tác như vậy. Trước khi chọn, bạn cần xác định chính xác điều gì không được phép xảy ra.
 
-## Cốt lõi cần nhớ
+### Dữ liệu và quy tắc cần bảo vệ
 
-- **Optimistic Lock không khóa row ngay khi đọc**; nó kiểm tra version lúc ghi và reject transaction đã đọc dữ liệu cũ. Nó phù hợp khi conflict hiếm, read nhiều hơn write, transaction/conversation có thể kéo dài, và operation thất bại có thể retry hoặc yêu cầu user resolve.
-- **Pessimistic Lock lấy database lock trước khi xử lý**; transaction khác muốn sửa hoặc lock cùng row phải chờ, fail-fast hoặc skip. Nó phù hợp khi conflict cao, critical section ngắn, retry rất đắt, và tất cả dữ liệu bảo vệ nằm trong cùng transaction/database.
-- Đừng chọn theo cảm giác. Hãy bắt đầu từ **business invariant**, đo `optimistic conflict rate`, `lock wait time`, `deadlock rate`, retry cost và tail latency; đôi khi câu trả lời tốt nhất là atomic conditional `UPDATE`, unique/check constraint, `SERIALIZABLE`, queue theo key, hoặc redesign để bỏ hot row.
+Ví dụ dùng bảng nhỏ sau. Chỉ chạy SQL tạo bảng trong database thực hành riêng:
 
----
+```sql
+CREATE TABLE inventory (
+    product_id BIGINT PRIMARY KEY,
+    remaining  INTEGER NOT NULL CHECK (remaining >= 0),
+    version    BIGINT NOT NULL DEFAULT 0
+);
 
-## Câu trả lời mẫu
-
-> Trong production tôi chọn locking từ invariant cần bảo vệ và mức contention thực tế, không mặc định rằng payment phải pessimistic hay `@Version` luôn đủ. Với các aggregate đọc nhiều, sửa ít như profile hoặc order metadata, tôi ưu tiên Optimistic Lock bằng `@Version` vì request không giữ row lock trong lúc user hoặc service khác xử lý, và conflict hiếm thì throughput tốt hơn. Khi update, Hibernate thêm `version` vào `WHERE`; nếu affected rows bằng 0, tôi coi đó là concurrency conflict, rollback transaction rồi retry trong một transaction mới nếu command còn an toàn và idempotent. Với hot row như một inventory bucket trong flash sale, nơi hàng trăm request cùng tranh chấp và mỗi optimistic retry chỉ tạo thêm tải, tôi cân nhắc atomic conditional `UPDATE` trước, rồi mới dùng `PESSIMISTIC_WRITE` nếu business flow thật sự cần read–check–write nhiều bước. Nếu dùng pessimistic lock, tôi giữ transaction cực ngắn, không gọi HTTP/Kafka khi đang giữ lock, đặt lock timeout theo request budget, lock nhiều row theo thứ tự cố định và theo dõi lock wait/deadlock. Tôi cũng không dùng `synchronized` để bảo vệ dữ liệu chung giữa nhiều pod, vì lock phải nằm ở database hoặc một coordination mechanism dùng chung. Quyết định cuối cùng dựa trên load test và metric production: conflict rate, số retry, p95/p99 lock wait, transaction duration, deadlock và tỷ lệ request thất bại.
-
----
-
-## Phân tích chi tiết
-
-### 1. Bắt đầu bằng production bug: lost update
-
-Giả sử bảng inventory có 10 sản phẩm còn lại:
-
-```txt
-inventory(product_id=42, available=10)
+INSERT INTO inventory (product_id, remaining)
+VALUES (1, 1), (2, 1);
 ```
 
-Hai request mua hàng chạy đồng thời:
+`remaining` là lượng hàng còn có thể giữ cho đơn mới. `version` là số phiên bản của row; phần optimistic locking sẽ dùng nó để nhận biết một bản đọc đã cũ.
 
-```txt
-T1 đọc available = 10
-T2 đọc available = 10
+**Invariant** là quy tắc phải luôn đúng sau mỗi transaction thành công. Với ví dụ này, invariant cần bảo vệ là: tổng lượng hàng giữ thành công không vượt lượng hàng có thể bán. `remaining >= 0` là một ràng buộc hữu ích, nhưng riêng nó chưa diễn đạt hết quy tắc đó.
 
-T1 tính 10 - 7 = 3
-T2 tính 10 - 6 = 4
+Trong ứng dụng thật, giảm tồn kho và tạo bản ghi giữ hàng thường phải cùng một transaction. Nếu giảm kho thành công nhưng tạo đơn thất bại, toàn bộ transaction phải rollback. Bài tập SQL sẽ tách riêng bảng tồn kho để bạn nhìn rõ cơ chế concurrency, không giả định chỉ cần bảng này là đã có hệ thống đặt hàng hoàn chỉnh.
 
-T1 ghi available = 3
-T2 ghi available = 4
-```
+### Lost update khi hai request cùng dùng dữ liệu cũ
 
-Kết quả cuối là `4`, trong khi tổng cộng đã nhận order cho 13 sản phẩm. Một update đã ghi đè update còn lại; đây là **lost update**. `@Transactional` một mình không tự động chữa được bug này, vì hai request có hai transaction khác nhau và đều có thể đọc cùng snapshot hợp lệ trước khi ghi.
+**Lost update** là tình huống một cập nhật bị mất tác dụng vì writer khác ghi kết quả tính từ dữ liệu cũ lên cùng row. Writer ở đây là bên ghi dữ liệu, chẳng hạn một request hoặc background job. Với tồn kho ban đầu bằng `1`, lịch chạy sau là một ví dụ:
 
-Một cách update kiểu read–modify–write dễ gặp lỗi:
+| Thứ tự | Transaction A                    | Transaction B                    |
+| ------ | -------------------------------- | -------------------------------- |
+| 1      | Đọc `remaining = 1`              |                                  |
+| 2      |                                  | Đọc `remaining = 1`              |
+| 3      | Tính trong ứng dụng: `1 - 1 = 0` |                                  |
+| 4      |                                  | Tính trong ứng dụng: `1 - 1 = 0` |
+| 5      | Ghi `remaining = 0`, commit      |                                  |
+| 6      |                                  | Ghi `remaining = 0`, commit      |
 
-```java
-@Transactional
-public void reserve(Long productId, int quantity) {
-    Inventory inventory = repository.findById(productId).orElseThrow();
-
-    if (inventory.getAvailable() < quantity) {
-        throw new OutOfStockException(productId);
-    }
-
-    inventory.setAvailable(inventory.getAvailable() - quantity);
-}
-```
-
-Nếu entity không có `@Version`, SQL cuối cùng có thể gần như sau:
+Điểm nguy hiểm là câu SQL ghi một **kết quả đã tính sẵn**:
 
 ```sql
 UPDATE inventory
-SET available = 4
-WHERE product_id = 42;
+SET remaining = 0
+WHERE product_id = 1;
 ```
 
-`WHERE` chỉ có primary key nên database không biết request này đã tính toán từ giá trị cũ `10`. Cả hai câu `UPDATE` đều hợp lệ; câu chạy sau thắng.
+Cả hai lần `UPDATE` đều có thể cập nhật một row. Nếu ứng dụng xem đó là bằng chứng giữ hàng thành công, cả hai request sẽ được chấp nhận. `CHECK (remaining >= 0)` không phản đối vì `0` vẫn hợp lệ.
 
-Điểm interviewer muốn nghe trước tiên là: **locking strategy không phải để “làm transaction an toàn” một cách chung chung; nó phải bảo vệ một invariant cụ thể trước concurrent writes**.
+Nếu tồn kho ban đầu là `2`, cùng lỗi này khiến hai lần bán chỉ làm tồn kho từ `2` xuống `1`, thay vì xuống `0`. Hai biểu hiện có chung nguyên nhân: lần ghi thứ hai không biết dữ liệu nó dùng để tính đã lỗi thời.
 
----
+Đừng nhầm câu SQL trên với `SET remaining = remaining - 1`. Câu thứ hai yêu cầu database tính từ giá trị của row đang được cập nhật. Khi thêm điều kiện đủ hàng, nó trở thành một giải pháp riêng rất gọn; phần [atomic conditional UPDATE](#atomic-conditional-update-bỏ-lượt-đọc-khi-có-thể) sẽ phân tích cách này.
 
-### 2. Mental model: detect conflict muộn hay ngăn conflict sớm
+## Transaction, isolation và locking là ba lớp khác nhau
 
-Hai strategy khác nhau chủ yếu ở thời điểm xử lý conflict.
+Đặt đoạn đọc rồi ghi vào `@Transactional` không tự làm lost update biến mất. Transaction bảo đảm một nhóm thay đổi có thể commit hoặc rollback cùng nhau. Việc hai transaction được phép nhìn và sửa dữ liệu theo cách nào còn phụ thuộc **isolation level**, tức mức tách biệt giữa chúng.
 
-#### Optimistic Lock — làm trước, kiểm tra sau
+Ở PostgreSQL `READ COMMITTED`, một `SELECT` thông thường đọc dữ liệu đã commit theo snapshot của câu lệnh đó. **Snapshot** ở đây là góc nhìn dữ liệu tại một thời điểm, không phải lời hứa rằng dữ liệu sẽ giữ nguyên cho đến khi bạn ghi.
 
-```d2 title="Optimistic locking kiểm tra version khi ghi"
-direction: down
-read: "READ row version=7"
-compute: "Tính toán không giữ explicit row lock"
-update: "UPDATE WHERE id=? AND version=7"
-result: "Số row updated?" {shape: diamond}
-read -> compute
-compute -> update
-update -> result
-conflict: "Rollback / conflict"
-success: "Thành công, version=8"
-result -> conflict: "0"
-result -> success: "1"
+Database cũng tự lấy lock khi thực hiện `UPDATE`. Lock này ngăn hai writer sửa cùng row theo cách không hợp lệ ở tầng lưu trữ. Nó không tự hiểu rằng con số `0` do ứng dụng gửi xuống được tính từ một lần đọc cũ.
+
+Bạn có thể tách ba lớp như sau:
+
+| Lớp                  | Trách nhiệm                                                                                     | Không tự bảo đảm                                             |
+| -------------------- | ----------------------------------------------------------------------------------------------- | ------------------------------------------------------------ |
+| Transaction boundary | Gom giảm kho và tạo reservation thành một đơn vị commit/rollback                                | Quyết định dựa trên lần đọc cũ vẫn còn hợp lệ                |
+| Isolation level      | Quy định cách các transaction đồng thời quan sát và tác động lên dữ liệu                        | Mọi invariant nghiệp vụ đều được bảo vệ ở mọi mức isolation  |
+| Giao thức cập nhật   | Dùng version, explicit lock hoặc điều kiện ngay trong SQL để quyết định được phép ghi hay không | Side effect ở một hệ thống ngoài database cũng rollback cùng |
+
+Optimistic locking cho các bên đọc và xử lý trước, rồi kiểm tra xung đột (conflict) tại lúc ghi. Pessimistic locking lấy lock bảo vệ dữ liệu trước khi chạy phần quyết định phụ thuộc vào dữ liệu đó.
+
+Tên gọi “lạc quan” và “bi quan” nói về cách phối hợp, không phải hai mức độ an toàn. **Cả hai đều có thể đúng nếu phạm vi bảo vệ và cách xử lý thất bại đúng với invariant.**
+
+## Optimistic locking: chỉ ghi nếu dữ liệu vẫn còn đúng phiên bản
+
+Hình dung bạn sửa một bản tài liệu đã tải về. Lúc nộp bản sửa, hệ thống kiểm tra tài liệu gốc có còn đúng phiên bản bạn đã mở không. Nếu người khác đã thay đổi nó, hệ thống yêu cầu bạn xử lý conflict thay vì âm thầm ghi đè.
+
+Version của database row làm việc tương tự. Tuy nhiên, đây không phải một “khóa mềm” mà database giữ trong suốt lúc bạn suy nghĩ. Chính điều kiện trong lần ghi mới là thứ quyết định cập nhật có được chấp nhận.
+
+### Đọc version rồi cập nhật có điều kiện
+
+Giả sử row đang có `remaining = 1, version = 0`. Ứng dụng đọc cả hai giá trị:
+
+```sql
+SELECT product_id, remaining, version
+FROM inventory
+WHERE product_id = 1;
 ```
 
-Nó “optimistic” vì giả định đa số transaction sẽ không đụng nhau. Nếu giả định đúng, không ai phải chờ lock dài; nếu sai, work đã làm của transaction thua cuộc bị bỏ và có thể phải chạy lại.
+Sau khi kiểm tra yêu cầu giữ một đơn vị hàng, ứng dụng gửi lần ghi với version đã đọc:
 
-#### Pessimistic Lock — khóa trước, làm sau
-
-```d2 title="Pessimistic locking giữ lock đến hết transaction"
-direction: right
-n0: "BEGIN"
-n1: "SELECT ... FOR UPDATE"
-n2: "Giữ row lock trong transaction"
-n3: "Check + update"
-n4: "COMMIT / ROLLBACK → release lock"
-n0 -> n1 -> n2 -> n3 -> n4
+```sql
+UPDATE inventory
+SET remaining = remaining - 1,
+    version = version + 1
+WHERE product_id = 1
+  AND version = 0
+  AND remaining >= 1
+RETURNING remaining, version;
 ```
 
-Nó “pessimistic” vì giả định conflict đủ khả năng xảy ra để serialize access ngay từ đầu. Transaction sau không làm work trên state sắp hết hạn, nhưng phải chờ và có thể làm tăng tail latency.
+Ba phần trong `WHERE` có ba vai trò khác nhau:
 
-#### Bảng so sánh thực dụng
+- `product_id = 1` xác định row cần sửa.
+- `version = 0` yêu cầu row vẫn ở phiên bản ứng dụng đã đọc.
+- `remaining >= 1` yêu cầu còn đủ hàng tại thời điểm cập nhật.
 
-| Khía cạnh | Optimistic Lock | Pessimistic Lock |
-|---|---|---|
-| Thời điểm phát hiện/xử lý | Lúc flush/commit/update | Lúc đọc hoặc lúc xin lock |
-| Cơ chế thường gặp | Version/CAS trong `WHERE` | Database row lock, thường `FOR UPDATE` |
-| Khi conflict | Một transaction fail, rollback, có thể retry | Transaction sau chờ, timeout, fail-fast hoặc skip |
-| Throughput khi conflict thấp | Thường tốt | Tốn wait/lock management không cần thiết |
-| Khi hot row/conflict cao | Retry storm, wasted work | Serialize request nhưng queue/wait tăng |
-| Transaction dài | Không giữ explicit row lock, nhưng state có thể stale | Rất nguy hiểm: giữ lock lâu, block dây chuyền |
-| User “mở form 10 phút rồi Save” | Phù hợp để phát hiện stale edit | Không được giữ DB transaction/lock 10 phút |
-| Deadlock | Ít do explicit lock hơn, nhưng vẫn có thể có từ writes | Rủi ro cao hơn nếu lock nhiều object sai thứ tự |
-| Multi-pod | Có, vì check ở database | Có, vì lock ở database |
-| Failure cần thiết kế | Conflict/retry/merge UX | Timeout/deadlock/blocked transaction |
+Phép so sánh version và lần ghi diễn ra trong **cùng một câu `UPDATE`**. Đây là ý tưởng compare-and-swap, thường viết tắt là **CAS**: chỉ thay đổi dữ liệu khi giá trị dùng để so sánh vẫn đúng.
 
-Không có strategy nào loại bỏ hoàn toàn concurrency complexity. Optimistic chuyển cost sang **conflict handling**; pessimistic chuyển cost sang **waiting và lock management**.
+Nếu thành công, kết quả là `remaining = 0, version = 1`. Ứng dụng kiểm tra có đúng một row được cập nhật. Nếu còn phải tạo reservation, nó chỉ commit sau khi cả hai thao tác thành công.
 
----
+<Callout
+  type="warn"
+  title="Đừng tách kiểm tra và ghi thành hai câu lệnh độc lập"
+>
+  Đọc lại `version`, thấy vẫn bằng `0`, rồi chạy `UPDATE ... WHERE product_id =
+  1` không phải optimistic locking an toàn. Writer khác có thể chen vào giữa hai
+  câu lệnh. Điều kiện version phải nằm ngay trong câu ghi.
+</Callout>
 
-### 3. Optimistic Lock với `@Version` hoạt động như thế nào?
+### Một writer thắng, writer còn lại phát hiện conflict
 
-Entity portable theo Jakarta Persistence:
+Cả A và B có thể cùng đọc được version `0`. Điều này được phép; optimistic locking không ngăn hai lần đọc đó.
+
+Sơ đồ dưới minh họa A commit trước khi B ghi. Các mũi tên biểu diễn thứ tự logic, không phải thời gian đo được:
+
+```d2 interactive=false title="Optimistic locking: cùng đọc version 0 nhưng chỉ một lần ghi được chấp nhận"
+shape: sequence_diagram
+a: Transaction A
+pg: PostgreSQL {
+  icon: ../../diagrams/assets/postgresql.svg
+}
+b: Transaction B
+
+a -> pg: SELECT remaining, version
+pg -> a: remaining=1, version=0
+b -> pg: SELECT remaining, version
+pg -> b: remaining=1, version=0
+a -> pg: UPDATE với version=0
+pg -> a: 1 row, version mới=1
+a -> pg: COMMIT
+b -> pg: UPDATE với version=0
+pg -> b: 0 rows
+b -> pg: ROLLBACK ở tầng ứng dụng
+```
+
+B không thể ghi lên phiên bản `1` bằng điều kiện `version = 0`. Nó phải xử lý conflict: đọc lại để thử thực hiện lại ý định, hoặc trả thông báo cho người dùng.
+
+Nếu B gửi `UPDATE` trong lúc A chưa commit, B **vẫn có thể phải chờ row lock của A**. Sau khi A commit, PostgreSQL `READ COMMITTED` kiểm tra lại điều kiện trên phiên bản row mới; điều kiện `version = 0` không còn đúng nên B cập nhật zero rows.
+
+Nếu A rollback, thay đổi version của A cũng bị hủy. B có thể tiếp tục và cập nhật thành công nếu các điều kiện còn đúng. Vì vậy, optimistic locking không đồng nghĩa với “không có lock”, “không chờ” hay “không thể deadlock”. Nó chỉ không chủ động giữ row lock từ lượt đọc ban đầu.
+
+### Diễn giải đúng kết quả không có row được cập nhật
+
+Với câu `UPDATE` có nhiều điều kiện phía trên, zero rows có thể có nhiều nguyên nhân:
+
+| Nguyên nhân                        | Ví dụ                                   | Hướng xử lý                                        |
+| ---------------------------------- | --------------------------------------- | -------------------------------------------------- |
+| Version đã cũ                      | Writer khác đổi version từ `0` sang `1` | Báo conflict hoặc đọc lại để đánh giá lại thao tác |
+| Điều kiện nghiệp vụ không còn đúng | Hết hàng                                | Trả kết quả không đủ hàng; không retry vô hạn      |
+| Row không còn tồn tại              | Sản phẩm hoặc bản ghi đã bị xóa         | Xử lý resource không tồn tại                       |
+
+Một lần `SELECT` sau đó có thể giúp tạo thông báo phù hợp. Nhưng dữ liệu còn có thể thay đổi giữa lần `UPDATE` thất bại và lần `SELECT` chẩn đoán. Đừng coi lần đọc sau là bằng chứng tuyệt đối về nguyên nhân tại thời điểm trước đó.
+
+Một `UPDATE` trả zero rows là kết quả SQL bình thường, **không tự làm transaction rollback**. Nếu transaction đã ghi dữ liệu khác, ứng dụng phải chủ động hủy toàn bộ thao tác khi coi đó là conflict. Không được commit một reservation mà phần trừ kho đã thất bại.
+
+Ngược lại, nếu dùng câu ghi chỉ kiểm tra primary key và version, zero rows thường được diễn giải là row đã bị sửa hoặc xóa. Cách đặt điều kiện quyết định kết quả đó có ý nghĩa gì; không nên gom mọi trường hợp thành một thông báo “version conflict”.
+
+### Giữ version từ lúc đọc tới lúc người dùng bấm lưu
+
+Một form chỉnh sửa thường có hai HTTP request cách nhau vài phút: request tải dữ liệu và request lưu. Không nên mở database transaction xuyên suốt khoảng thời gian người dùng đang nhập.
+
+Thay vào đó, response đọc trả kèm version, ví dụ `7`. Khi lưu, client gửi lại `expectedVersion = 7`. Server kiểm tra version đó trước khi áp dụng thay đổi và vẫn dùng version check tại lúc ghi để chống writer chen vào sau lần kiểm tra.
+
+Nếu server chỉ tải bản mới nhất ở request lưu rồi áp nguyên dữ liệu form cũ lên đó, version mới tải có thể hoàn toàn hợp lệ. ORM sẽ không tự biết người dùng đang sửa từ bản `7`. **Version cần đi cùng bản dữ liệu người dùng thực sự đã nhìn thấy.**
+
+Với HTTP, bạn có thể biểu diễn cơ chế này qua một strong ETag và header `If-Match`. Khi precondition đó sai, phản hồi chuẩn là `412 Precondition Failed`. API dùng field `expectedVersion` riêng có thể quy ước `409 Conflict`; hãy ghi rõ contract thay vì xem hai status là tùy ý thay thế nhau trong mọi trường hợp.
+
+Với form chỉnh sửa, mình ưu tiên trả bản mới và yêu cầu người dùng xem lại khác biệt. Tự thay `expectedVersion` bằng version mới rồi lưu lại nguyên form có thể biến thao tác “retry” thành một lần ghi đè hợp lệ về kỹ thuật nhưng sai ý người dùng.
+
+### Mọi writer phải tuân thủ cùng một giao thức
+
+Cột `version` không có khả năng bảo vệ riêng nếu một đường ghi khác bỏ qua nó. Ví dụ, batch job thay `remaining` nhưng không tăng version sẽ khiến một request giữ version cũ không nhận ra dữ liệu đã đổi.
+
+Các đường ghi cần rà soát gồm API, background worker, script vận hành, native SQL và job import. Nếu một writer cập nhật dựa trên bản đọc cũ, nó phải kiểm tra expected version. Nếu writer dùng một atomic command hợp lệ trên dữ liệu hiện tại, nó vẫn cần tăng version để những bản đọc trước đó trở nên lỗi thời.
+
+Thông thường nên dùng một cột số nguyên do hệ thống quản lý. Dùng timestamp làm token cần hiểu độ chính xác và cách sinh timestamp của engine/provider; không thể mặc định hai thay đổi luôn nhận hai timestamp khác nhau. Với ví dụ này, `BIGINT` tăng dần dễ kiểm tra hơn.
+
+Không tự đặt version về giá trị cũ trong code nghiệp vụ. Các lệnh reset version ở phần thực hành chỉ dùng để tái lập dữ liệu của database sandbox.
+
+## Pessimistic locking: lấy quyền cập nhật trước khi quyết định
+
+Optimistic locking để các request xử lý trước rồi chấp nhận rằng một bên có thể phải làm lại. Pessimistic locking chuyển phần phối hợp lên đầu: transaction lấy row lock, đọc giá trị được bảo vệ rồi mới quyết định.
+
+Với PostgreSQL, một cách quen thuộc là `SELECT ... FOR UPDATE`.
+
+### Đọc và xử lý trong cùng transaction giữ lock
+
+Toàn bộ phần cần bảo vệ phải dùng cùng database transaction trên cùng connection:
+
+```sql
+BEGIN ISOLATION LEVEL READ COMMITTED;
+
+SELECT product_id, remaining, version
+FROM inventory
+WHERE product_id = 1
+FOR UPDATE;
+
+-- Ứng dụng kiểm tra remaining vừa đọc.
+-- Chỉ chạy UPDATE bên dưới nếu remaining >= 1.
+UPDATE inventory
+SET remaining = remaining - 1,
+    version = version + 1
+WHERE product_id = 1
+  AND remaining >= 1
+RETURNING remaining, version;
+
+-- Tạo reservation ở đây nếu đây là một phần của nghiệp vụ.
+COMMIT;
+```
+
+Khi `SELECT ... FOR UPDATE` trả row về, transaction đã giữ lock bảo vệ row đó trước các writer hoặc locking read xung đột. Các lock này thông thường được giữ đến khi `COMMIT` hoặc `ROLLBACK`; việc câu `SELECT` đã chạy xong không giải phóng chúng.
+
+Điều kiện đủ hàng trong `UPDATE` vẫn đáng giữ như một lớp kiểm tra gần dữ liệu. Với flow đơn giản này, ứng dụng đã kiểm tra sau khi lấy lock, nên writer khác không thể chen vào đổi tồn kho giữa lần kiểm tra và lần ghi. Nếu nhận zero rows ngoài dự kiến, ứng dụng vẫn phải xử lý thay vì bỏ qua.
+
+Cột version được tăng trong ví dụ để phối hợp với những đường ghi optimistic khác. Nếu một hệ thống chỉ dùng pessimistic locking cho mọi thao tác liên quan, bản thân cơ chế pessimistic không đòi hỏi phải có cột version.
+
+Một `UPDATE` từ connection khác cũng phải tôn trọng row lock đang giữ, dù connection đó không gọi `FOR UPDATE`. Nhưng nếu writer ấy đã tính kết quả từ một lượt đọc cũ, việc đợi đến sau commit rồi ghi kết quả cũ vẫn có thể gây lost update. Vì vậy, mọi đường đọc–tính–ghi liên quan đều cần lấy lock trước quyết định hoặc có guard phù hợp ở lần ghi.
+
+<Callout
+  type="warn"
+  title="Autocommit có thể làm mất vùng bảo vệ bạn tưởng đang có"
+>
+  Nếu `SELECT ... FOR UPDATE` chạy như một statement độc lập ngoài transaction
+  bao quanh nghiệp vụ, lock không bảo vệ lần `UPDATE` về sau. Tương tự, lấy lock
+  trong connection A rồi sửa bằng transaction ở connection B không phải cùng một
+  vùng bảo vệ. Với Spring, transaction phải thật sự được mở qua cơ chế proxy,
+  không chỉ có một annotation nằm trên method.
+</Callout>
+
+### Request đến sau chờ rồi kiểm tra lại dữ liệu
+
+Giả sử A lấy lock trên row còn một đơn vị hàng. B cũng muốn lấy `FOR UPDATE` trên row đó nên phải chờ.
+
+Sơ đồ minh họa kết quả khi A dùng hết lượng hàng cuối cùng và commit:
+
+```d2 interactive=false title="Pessimistic locking: B lấy được lock sau A nhưng phải đọc lại và từ chối khi hết hàng"
+shape: sequence_diagram
+a: Transaction A
+pg: PostgreSQL {
+  icon: ../../diagrams/assets/postgresql.svg
+}
+b: Transaction B
+
+a -> pg: SELECT FOR UPDATE
+pg -> a: remaining=1, A giữ lock
+b -> pg: SELECT FOR UPDATE
+pg."B chờ lock của A"
+a -> pg: UPDATE remaining=0
+a -> pg: COMMIT, giải phóng lock
+pg -> b: remaining=0, B giữ lock
+b."Kiểm tra lại và nhận biết hết hàng"
+b -> pg: ROLLBACK
+```
+
+Ở `READ COMMITTED`, sau khi chờ A commit, B có thể nhận phiên bản row đã cập nhật. Với query chỉ lọc `product_id = 1`, nó thấy `remaining = 0` và phải từ chối giữ hàng.
+
+Nếu query của B còn có điều kiện `remaining >= 1`, PostgreSQL sẽ kiểm tra lại điều kiện sau khi chờ. B có thể không nhận row nào vì hàng đã hết. Đó là lý do cần hiểu cả điều kiện query lẫn kết quả trả về, không chỉ thấy từ khóa `FOR UPDATE` là cho rằng thao tác chắc chắn thành công.
+
+Nếu A rollback, B có thể lấy lock và thấy lượng hàng chưa bị trừ. Trong cả hai trường hợp, quyết định của B phải dựa trên dữ liệu đọc được sau khi lấy lock, không phải một entity hay cache đã tải trước đó.
+
+### Row lock không chặn mọi kiểu đọc
+
+PostgreSQL dùng **MVCC** — lưu và quản lý nhiều phiên bản row để reader có thể đọc một góc nhìn phù hợp mà không nhất thiết chờ writer. Vì vậy, một `SELECT` thông thường có thể đọc bản đã commit trong lúc transaction khác đang giữ `FOR UPDATE`.
+
+Ví dụ A đang giữ lock và đã đổi `remaining` từ `1` sang `0` nhưng chưa commit. Một `SELECT` thường ở session C có thể vẫn thấy `1`. Nó không đọc thay đổi chưa commit của A, cũng không có quyền dựa vào con số đó để bỏ qua kiểm tra khi ghi.
+
+Row lock chủ yếu điều phối writer và những locking read xung đột trên cùng row. Nó không có nghĩa “cấm mọi request đọc sản phẩm này”. PostgreSQL còn có table lock phục vụ các mục đích khác; đừng suy rộng nhận xét về row lock sang mọi kiểu lock của database.
+
+Kết quả ở `REPEATABLE READ` hoặc `SERIALIZABLE` cũng không luôn giống lịch chạy trên. Nếu row đã đổi so với snapshot của transaction, PostgreSQL có thể báo serialization failure thay vì trả phiên bản mới. Code vẫn cần đường xử lý transaction thất bại.
+
+### Chọn lock mode và phạm vi khóa
+
+PostgreSQL có nhiều row lock mode. Bảng sau chỉ tóm tắt ý nghĩa liên quan đến bài này, không thay thế toàn bộ compatibility matrix:
+
+| Mode                | Công dụng đáng chú ý                                                                             |
+| ------------------- | ------------------------------------------------------------------------------------------------ |
+| `FOR UPDATE`        | Khóa mạnh trên row; xung đột với các row lock mode khác và các thao tác sửa/xóa liên quan        |
+| `FOR NO KEY UPDATE` | Nhẹ hơn `FOR UPDATE`; không chặn `FOR KEY SHARE`, phù hợp một số cập nhật không đổi key          |
+| `FOR SHARE`         | Cho nhiều transaction cùng giữ shared lock, nhưng chặn các cập nhật row thông thường             |
+| `FOR KEY SHARE`     | Chủ yếu bảo vệ key khỏi bị xóa hoặc thay đổi theo cách xung đột; không ngăn mọi thay đổi vào row |
+
+Đừng dùng `FOR SHARE` như cách “đọc trước để lát nữa ai cũng nâng lên ghi”. Hai transaction cùng giữ shared lock rồi cùng cần nâng lock có thể deadlock. Nếu biết sẽ cần sửa row, chọn mode phù hợp từ đầu.
+
+Tìm theo primary key giúp bạn xác định rõ resource đang bảo vệ. Một query lock nhiều row sẽ mở rộng vùng tranh chấp (contention); query có join còn có thể lock row ở nhiều bảng. Trong PostgreSQL, `FOR UPDATE OF <alias>` cho phép chỉ rõ bảng cần lấy row lock trong join.
+
+Index tốt giúp tìm row nhanh hơn và giảm thời gian làm việc trong transaction. Nhưng index không thay thế một giao thức concurrency đúng. Foreign key, trigger và các statement khác trong transaction cũng có thể làm phát sinh thêm lock ngoài row đang được giải thích trong ví dụ.
+
+### Giới hạn thời gian chờ với timeout và NOWAIT
+
+Chờ lock không phải luôn sai. Với transaction rất ngắn, chờ một writer hoàn thành có thể rẻ hơn việc bỏ kết quả và retry. Vấn đề là không nên chờ không giới hạn trong khi request đã hết thời gian phục vụ.
+
+PostgreSQL có thể đặt giới hạn trong transaction:
+
+```sql
+BEGIN;
+SET LOCAL lock_timeout = '500ms';
+SET LOCAL statement_timeout = '2s';
+
+SELECT product_id, remaining
+FROM inventory
+WHERE product_id = 1
+FOR UPDATE;
+
+ROLLBACK;
+```
+
+`500ms` và `2s` ở đây chỉ là cấu hình minh họa, không phải mức khuyến nghị cho mọi ứng dụng. `lock_timeout` giới hạn mỗi lần chờ lấy lock. `statement_timeout` giới hạn thời gian chạy statement, bao gồm cả thời gian chờ. Chúng không tự tạo ra một deadline cho toàn bộ workflow qua nhiều dịch vụ.
+
+Nếu nghiệp vụ muốn thất bại ngay khi row đang bị khóa, dùng `NOWAIT`:
+
+```sql
+SELECT product_id, remaining
+FROM inventory
+WHERE product_id = 1
+FOR UPDATE NOWAIT;
+```
+
+`NOWAIT` không làm database bỏ qua tính nhất quán. Nó đổi chính sách từ “chờ lock” sang “báo lỗi nếu không lấy được row lock ngay”. Ứng dụng có thể trả trạng thái bận hoặc retry có giới hạn. Tùy chọn này chỉ áp dụng cho row lock; không phải lời hứa statement sẽ không bao giờ chờ bất kỳ loại lock nào khác.
+
+### SKIP LOCKED dành cho công việc có thể bỏ qua
+
+Một worker lấy job từ queue có thể xử lý job khác nếu job đầu tiên đang được worker khác giữ. Trong kiểu workload đó, `SKIP LOCKED` hữu ích vì nó bỏ qua các row đang bị lock thay vì chờ.
+
+Nhưng một request mua đúng sản phẩm `1` không thể tùy ý coi sản phẩm đó như không tồn tại chỉ vì đang có writer khác. Ví dụ sau có thể trả zero rows dù row vẫn tồn tại và vẫn còn hàng:
+
+```sql
+SELECT product_id, remaining
+FROM inventory
+WHERE product_id = 1
+FOR UPDATE SKIP LOCKED;
+```
+
+Vì vậy, `SKIP LOCKED` không phải nút “bật lên để mọi thứ nhanh hơn”. Nó cố ý trả một tập kết quả không đầy đủ đối với những row đang bị lock.
+
+Với job queue, phần chọn job và đổi trạng thái sang đã claim phải nằm trong cùng transaction ngắn. Sau đó commit trước khi chạy công việc dài, đồng thời thiết kế cơ chế nhận lại job nếu worker chết. Có thể xem một workflow cụ thể ở bài [resumable Excel import](/system-design/06-resumable-excel-import).
+
+## Atomic conditional UPDATE: bỏ lượt đọc khi có thể
+
+Với yêu cầu đơn giản “giảm một đơn vị nếu còn đủ”, bạn chưa chắc cần đọc tồn kho về ứng dụng trước. Hãy để database kiểm tra và sửa trong cùng statement:
+
+```sql
+UPDATE inventory
+SET remaining = remaining - 1,
+    version = version + 1
+WHERE product_id = 1
+  AND remaining >= 1
+RETURNING remaining, version;
+```
+
+Câu này không kiểm tra expected version. Nó thể hiện một **command trên trạng thái hiện tại**: cứ giữ một đơn vị nếu lúc thực hiện vẫn còn đủ hàng.
+
+Với PostgreSQL `READ COMMITTED`, hai writer trên cùng row vẫn được điều phối bằng row lock. Writer đến sau có thể phải chờ. Sau khi writer trước commit, điều kiện `remaining >= 1` được kiểm tra lại trên row mới. Nếu tồn ban đầu là `1`, chỉ một bên giảm được hàng; bên còn lại nhận zero rows.
+
+Sự khác nhau giữa ba cách nằm ở ý nghĩa thao tác:
+
+| Cách ghi                          | Điều được yêu cầu                                                               |
+| --------------------------------- | ------------------------------------------------------------------------------- |
+| Ghi giá trị tính sẵn, không guard | “Đặt tồn kho thành `0`, bất kể dữ liệu đã thay đổi thế nào”                     |
+| Ghi với expected version          | “Chỉ chấp nhận thay đổi nếu bản tôi dùng để quyết định vẫn còn hiện hành”       |
+| Atomic conditional update         | “Thực hiện phép giảm trên dữ liệu hiện tại, miễn là vẫn thỏa điều kiện đủ hàng” |
+
+Mình ưu tiên atomic conditional update cho counter, quota hoặc tồn kho một row khi invariant diễn đạt gọn trong SQL. Nó giảm một lượt đọc và thu hẹp khoảng thời gian cần phối hợp. Với lượng đặt tùy ý, ứng dụng phải kiểm tra `quantity > 0`, rồi dùng cùng quantity trong phép trừ và điều kiện đủ hàng.
+
+Cách này không phù hợp nếu bạn phải từ chối cả trường hợp giá bán hoặc điều kiện khác đã thay đổi so với bản người dùng xem. Khi đó cần thêm guard tương ứng, chẳng hạn version của dữ liệu liên quan. Nó cũng không tự bảo vệ một quy tắc tính trên nhiều row.
+
+`version = version + 1` trong ví dụ giúp các reader optimistic cũ phát hiện thay đổi. Tuy nhiên, câu atomic update này vẫn không phải version-based optimistic locking vì nó không so sánh expected version.
+
+Nếu còn phải tạo reservation hoặc trừ thêm một quota khác, gom các thay đổi đó trong cùng transaction. “Atomic statement” không có nghĩa mọi statement tiếp theo tự động thuộc cùng một đơn vị atomic.
+
+## Khi quy tắc nghiệp vụ vượt ra ngoài một row
+
+Những ví dụ một row dễ làm bạn có cảm giác thêm `version` vào mọi bảng là đủ. Giới hạn xuất hiện khi một quyết định dựa trên cả nhóm dữ liệu, nhưng mỗi transaction chỉ sửa một phần của nhóm đó.
+
+### Write skew dù mỗi row đều có version
+
+Giả sử một ca trực có hai bác sĩ A và B. Quy tắc là luôn phải có ít nhất một bác sĩ đang trực. Mỗi bác sĩ có một row riêng với `on_call` và `version`.
+
+**Write skew** là kiểu lệch kết quả khi các transaction đọc dữ liệu có liên quan, rồi sửa các row khác nhau nên không tạo conflict ghi trên cùng row, nhưng kết quả chung vi phạm invariant.
+
+| Thứ tự | Transaction A                       | Transaction B                         |
+| ------ | ----------------------------------- | ------------------------------------- |
+| 1      | Đếm thấy có hai bác sĩ đang trực    |                                       |
+| 2      |                                     | Cũng đếm thấy có hai bác sĩ đang trực |
+| 3      | Đặt A nghỉ trực, tăng version row A |                                       |
+| 4      |                                     | Đặt B nghỉ trực, tăng version row B   |
+| 5      | Commit                              | Commit                                |
+
+Cả hai version check đều có thể thành công vì A và B sửa hai row khác nhau. Kết quả không còn ai trực. Đây không phải lost update: không có lần ghi nào bị đè mất; chính tổ hợp những lần ghi hợp lệ riêng lẻ mới gây lỗi.
+
+Khóa mỗi row bác sĩ sắp sửa cũng chưa đủ. Phạm vi phải bảo vệ là điều kiện của **cả ca trực**, không chỉ row riêng của người đang xin nghỉ.
+
+### Bảo vệ một điểm chung của cả nhóm dữ liệu
+
+Một hướng dễ lập luận là tạo row đại diện cho ca trực. Mọi thao tác có thể làm thay đổi điều kiện “còn người trực” đều đi qua row chung này.
+
+Với pessimistic locking ở `READ COMMITTED`, transaction lấy lock trên row ca trực trước. Sau đó nó đọc lại danh sách người trực, kiểm tra quy tắc và ghi thay đổi. Mọi writer liên quan, kể cả thao tác thêm/xóa hoặc chuyển ca, phải tuân thủ cùng thứ tự phối hợp.
+
+Với optimistic locking, bạn có thể quản lý version của **aggregate** — nhóm dữ liệu được xem là một đơn vị bảo vệ invariant. Transaction phải kiểm tra và tăng version chung của ca trực, đồng thời cập nhật các row bác sĩ trong cùng transaction. Nếu version chung không còn đúng, rollback toàn bộ thay đổi và đánh giá lại.
+
+Việc một bảng con có foreign key tới bảng cha không tự làm version của bảng cha tăng khi bảng con đổi. Nếu dùng aggregate version, ứng dụng phải chủ động thực thi contract này.
+
+Một lựa chọn khác là `SERIALIZABLE`, cùng cơ chế retry khi database phát hiện lịch chạy không thể tương đương một thứ tự tuần tự hợp lệ. Dù chọn cách nào, hãy viết rõ những thao tác nào có thể làm thay đổi invariant; bỏ sót một writer là bỏ sót một đường phá vỡ quy tắc.
+
+### Row chưa tồn tại và vai trò của constraint
+
+Trong PostgreSQL, `SELECT ... FOR UPDATE` không tạo row lock trên một row không tồn tại. Nếu hai request cùng kiểm tra chưa có booking cho một ghế, cả hai có thể cùng thấy kết quả rỗng rồi cùng thử insert.
+
+Nếu quy tắc là mỗi ghế chỉ có một booking trong một sự kiện, một unique constraint trên `(event_id, seat_no)` có thể làm database từ chối lần insert trùng. Khi cần quản lý hủy hoặc tái đặt, thiết kế lại key/constraint theo đúng ý nghĩa “booking đang có hiệu lực”, thay vì mặc định một unique constraint vĩnh viễn là đủ.
+
+Nếu phải phối hợp nhiều thay đổi hơn, có thể khóa một row ổn định đại diện cho ghế hoặc sự kiện trước khi kiểm tra. Trường hợp đặt chỗ theo khoảng thời gian còn cần mô hình chống khoảng giao nhau; unique constraint trên một timestamp chỉ chống giá trị bằng nhau, không chống mọi overlap.
+
+Constraint và locking bổ trợ nhau. Lock giúp phối hợp một workflow; constraint là lớp kiểm tra cuối cùng tại database cho những quy tắc diễn đạt được bằng constraint. Đừng thay unique constraint bằng một lần `SELECT` kiểm tra trùng ở ứng dụng.
+
+### Isolation level không thay thế hoàn toàn version check
+
+Trong PostgreSQL, ba mức isolation thường gặp có cách xử lý khác nhau:
+
+| Mức isolation     | Điểm cần nhớ với bài toán này                                                                                                              |
+| ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| `READ COMMITTED`  | Mỗi statement có snapshot riêng. `UPDATE` và locking read có thể chờ rồi kiểm tra lại row đã được writer trước cập nhật                    |
+| `REPEATABLE READ` | Giữ góc nhìn ổn định cho transaction. Có thể từ chối sửa/lock row đã đổi sau snapshot; vẫn có thể gặp các anomaly nhiều row như write skew |
+| `SERIALIZABLE`    | Các transaction commit thành công có kết quả tương đương một thứ tự tuần tự; ứng dụng phải xử lý serialization failure và retry            |
+
+`SERIALIZABLE` không có nghĩa database lấy một global lock rồi chạy lần lượt mọi transaction. PostgreSQL theo dõi những quan hệ phụ thuộc có thể tạo anomaly và hủy một transaction khi cần. Nếu dựa vào bảo đảm này để bảo vệ một invariant, mọi transaction liên quan cần dùng giao thức isolation phù hợp; một writer chạy ở isolation thấp hơn có thể làm mất giả định của thiết kế.
+
+Ngay cả khi dùng isolation cao, form chỉnh sửa vẫn có thể cần expected version. Lần GET và lần lưu thường là hai transaction khác nhau. Database không tự biết dữ liệu ở request lưu bắt nguồn từ một response cách đó vài phút.
+
+Chọn isolation cho phạm vi database transaction. Dùng version để diễn đạt thêm yêu cầu “không ghi đè lên một bản đã thay đổi kể từ lúc người dùng đọc”. Đây là hai hợp đồng liên quan nhưng không đồng nhất.
+
+## Đưa cơ chế vào Spring và JPA
+
+Trong Java, `@Version` và `LockModeType.PESSIMISTIC_WRITE` là những cách biểu đạt hai cơ chế trên qua JPA. Điều quan trọng vẫn là câu SQL thực tế và transaction boundary, không phải chỉ có đúng annotation.
+
+### Entity có version và kiểm tra dữ liệu cũ từ client
+
+Entity minh họa dưới đây dùng `jakarta.persistence`. Các getter chỉ mở những dữ liệu cần cho ví dụ; không có setter cho version:
 
 ```java
-package com.example.inventory;
-
+import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
 import jakarta.persistence.Id;
 import jakarta.persistence.Table;
@@ -156,474 +517,110 @@ import jakarta.persistence.Version;
 @Entity
 @Table(name = "inventory")
 public class Inventory {
-
     @Id
+    @Column(name = "product_id")
     private Long productId;
 
-    private int available;
+    @Column(nullable = false)
+    private int remaining;
 
     @Version
-    private long version;
+    @Column(nullable = false)
+    private Long version;
 
-    protected Inventory() {
-    }
-
-    public void reserve(int quantity) {
-        if (quantity <= 0) {
-            throw new IllegalArgumentException("quantity must be positive");
-        }
-        if (available < quantity) {
-            throw new OutOfStockException(productId);
-        }
-        available -= quantity;
-    }
+    protected Inventory() {}
 
     public long getVersion() {
         return version;
     }
+
+    public void reserve(int quantity) {
+        if (quantity <= 0) {
+            throw new IllegalArgumentException("Quantity must be positive");
+        }
+        if (remaining < quantity) {
+            throw new IllegalStateException("Insufficient stock");
+        }
+        remaining -= quantity;
+    }
 }
 ```
 
-Schema:
-
-```sql
-CREATE TABLE inventory (
-    product_id BIGINT PRIMARY KEY,
-    available  INTEGER NOT NULL CHECK (available >= 0),
-    version    BIGINT NOT NULL DEFAULT 0
-);
-```
-
-Hibernate đọc row:
-
-```sql
-SELECT product_id, available, version
-FROM inventory
-WHERE product_id = 42;
--- available=10, version=7
-```
-
-Khi flush, SQL về mặt ý tưởng là:
+Khi ghi thay đổi của một entity có version, provider kiểm tra version đã tải và cập nhật version mới. SQL có ý nghĩa tương đương dạng sau; tên cột, thứ tự parameter và cách provider phát lệnh có thể khác:
 
 ```sql
 UPDATE inventory
-SET available = 3,
-    version = 8
-WHERE product_id = 42
-  AND version = 7;
+SET remaining = ?, version = ?
+WHERE product_id = ? AND version = ?;
 ```
 
-Nếu T1 commit trước, version trong DB thành `8`. T2 vẫn dùng version đã đọc là `7`:
+Nếu số row cập nhật không phù hợp, provider phát hiện optimistic locking conflict. Bạn không cần tự tăng field `version` trong method `reserve()`; đó là việc của JPA provider đối với đường ghi entity này.
 
-```sql
-UPDATE inventory
-SET available = 4,
-    version = 8
-WHERE product_id = 42
-  AND version = 7;
--- affected rows = 0
-```
-
-Affected rows bằng 0 là tín hiệu state đã stale. Hibernate/JPA ném optimistic locking exception; Spring thường translate thành `ObjectOptimisticLockingFailureException` hoặc subclass tương ứng. Transaction đó phải rollback — không được nuốt exception rồi tiếp tục commit các thay đổi khác.
-
-#### Quy tắc quan trọng của `@Version`
-
-- Mỗi entity chỉ có một version attribute theo Jakarta Persistence.
-- Application được đọc nhưng **không tự tăng hoặc tự sửa** version; persistence provider quản lý nó.
-- Numeric version như `long` thường rõ ràng và đáng tin cậy hơn timestamp. Timestamp phụ thuộc precision/source của clock và dễ tạo portability issue hơn.
-- Version bảo vệ **entity/row được update**, không tự động bảo vệ invariant trải trên nhiều row hoặc nhiều service.
-- Version check thường xảy ra lúc flush/commit, không nhất thiết ngay tại dòng gọi setter hay `save()`.
-
----
-
-### 4. Timeline optimistic lock: chỉ một transaction thắng
-
-Giả sử cả hai transaction đọc version `7`:
-
-```d2 title="Optimistic conflict khi hai transaction cùng version"
-shape: sequence_diagram
-t1: "Transaction T1"
-db: "Database"
-t2: "Transaction T2"
-t1 -> db: "SELECT → available=10, version=7"
-db -> t1: "available=10, version=7"
-t2 -> db: "SELECT → available=10, version=7"
-db -> t2: "available=10, version=7"
-t1 -> t1: "reserve(7) → available=3"
-t2 -> t2: "reserve(6) → available=4"
-t1 -> db: "UPDATE WHERE version=7 → 1 row"
-t1 -> db: "COMMIT → DB version=8"
-t2 -> db: "UPDATE WHERE version=7 → 0 row"
-db -> t2: "OptimisticLockException"
-t2 -> db: "ROLLBACK"
-```
-
-Optimistic lock **không đảm bảo mọi request đều thành công**. Nó đảm bảo stale request không âm thầm ghi đè dữ liệu mới. Business/API vẫn phải quyết định:
-
-```txt
-Conflict này có thể retry tự động không?
-Nếu retry, command có còn đúng trên state mới không?
-Nếu không retry, trả HTTP status nào và UI merge/refresh ra sao?
-Side effect nào đã chạy trước DB commit và có bị lặp không?
-```
-
-Đây là khác biệt giữa “đã thêm `@Version`” và “đã thiết kế concurrency end-to-end”.
-
----
-
-### 5. Implement Optimistic Lock trong Spring Boot đúng transaction boundary
-
-Repository không cần annotation lock đặc biệt cho `@Version`:
+Nếu request đến từ một bản dữ liệu cũ của client, service còn phải kiểm tra `expectedVersion`. Ví dụ sau dùng entity đang được quản lý bởi persistence context — nơi JPA theo dõi các entity trong một phiên làm việc:
 
 ```java
-package com.example.inventory;
-
-import org.springframework.data.jpa.repository.JpaRepository;
-
-public interface InventoryRepository extends JpaRepository<Inventory, Long> {
-}
-```
-
-Service xử lý một attempt:
-
-```java
-package com.example.inventory;
-
+import jakarta.persistence.EntityManager;
+import jakarta.persistence.PersistenceContext;
+import org.springframework.orm.ObjectOptimisticLockingFailureException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 @Service
-public class InventoryService {
-
-    private final InventoryRepository repository;
-
-    public InventoryService(InventoryRepository repository) {
-        this.repository = repository;
-    }
+public class OptimisticInventoryService {
+    @PersistenceContext
+    private EntityManager entityManager;
 
     @Transactional
-    public ReservationResult reserveOnce(Long productId, int quantity) {
-        Inventory inventory = repository.findById(productId)
-            .orElseThrow(() -> new ProductNotFoundException(productId));
-
-        inventory.reserve(quantity);
-
-        // Không bắt buộc gọi save() với managed entity.
-        // Hibernate dirty-check và flush khi transaction commit.
-        return new ReservationResult(productId, quantity);
-    }
-}
-```
-
-Lưu ý: method có thể return trước về mặt source code, nhưng transaction interceptor commit sau khi method body hoàn tất. Optimistic exception có thể xuất hiện trong bước commit đó, nên nơi retry phải nằm **bên ngoài transaction attempt**.
-
-#### Sai: retry bên trong cùng transaction đã bị đánh dấu rollback-only
-
-```java
-@Transactional
-public void reserveWithBrokenRetry(Long productId, int quantity) {
-    for (int i = 0; i < 3; i++) {
-        try {
-            reserveOnce(productId, quantity);
-            return;
-        } catch (ObjectOptimisticLockingFailureException ex) {
-            // Sai: persistence context/transaction hiện tại có thể đã hỏng
-            // và self-invocation không tạo transaction mới.
+    public void reserve(long productId, int quantity, long expectedVersion) {
+        Inventory item = entityManager.find(Inventory.class, productId);
+        if (item == null) {
+            throw new IllegalArgumentException("Inventory not found");
         }
-    }
-}
-```
-
-Có ba vấn đề:
-
-1. Optimistic exception thường xuất hiện lúc outer transaction commit, tức vòng `try/catch` chưa chắc nhìn thấy nó.
-2. Transaction đã fail phải rollback; không được dùng lại persistence context chứa entity stale.
-3. Gọi method `@Transactional` từ method khác trong cùng object là self-invocation, thường không đi qua Spring proxy nên không mở transaction mới như kỳ vọng.
-
-#### Đúng: mỗi retry là một transaction mới
-
-Dùng `TransactionTemplate` để boundary hiển thị rõ:
-
-```java
-package com.example.inventory;
-
-import java.time.Duration;
-import java.util.concurrent.ThreadLocalRandom;
-
-import org.springframework.orm.ObjectOptimisticLockingFailureException;
-import org.springframework.stereotype.Service;
-import org.springframework.transaction.support.TransactionTemplate;
-
-@Service
-public class InventoryReservationExecutor {
-
-    private static final int MAX_ATTEMPTS = 3;
-
-    private final TransactionTemplate transactionTemplate;
-    private final InventoryRepository repository;
-
-    public InventoryReservationExecutor(
-        TransactionTemplate transactionTemplate,
-        InventoryRepository repository
-    ) {
-        this.transactionTemplate = transactionTemplate;
-        this.repository = repository;
-    }
-
-    public ReservationResult reserve(Long productId, int quantity) {
-        for (int attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-            try {
-                return transactionTemplate.execute(status -> {
-                    Inventory inventory = repository.findById(productId)
-                        .orElseThrow(() -> new ProductNotFoundException(productId));
-                    inventory.reserve(quantity);
-
-                    // Commit/flush xảy ra khi callback kết thúc.
-                    return new ReservationResult(productId, quantity);
-                });
-            } catch (ObjectOptimisticLockingFailureException ex) {
-                if (attempt == MAX_ATTEMPTS) {
-                    throw new InventoryBusyException(productId, ex);
-                }
-                sleepWithJitter(attempt);
-            }
+        if (item.getVersion() != expectedVersion) {
+            throw new ObjectOptimisticLockingFailureException(
+                Inventory.class, productId
+            );
         }
 
-        throw new IllegalStateException("unreachable");
-    }
-
-    private void sleepWithJitter(int attempt) {
-        long baseMs = switch (attempt) {
-            case 1 -> 20L;
-            case 2 -> 50L;
-            default -> 100L;
-        };
-        long jitterMs = ThreadLocalRandom.current().nextLong(0, 21);
-
-        try {
-            Thread.sleep(Duration.ofMillis(baseMs + jitterMs));
-        } catch (InterruptedException ex) {
-            Thread.currentThread().interrupt();
-            throw new IllegalStateException("retry interrupted", ex);
-        }
+        item.reserve(quantity);
+        entityManager.flush();
     }
 }
 ```
 
-`3 attempts` và backoff `20/50/100 ms` **không phải magic number dùng cho mọi hệ thống**. Đây chỉ là điểm bắt đầu cho API có latency budget ngắn: giới hạn số attempt để không nhân tải vô hạn; backoff + jitter cho transaction thắng có thời gian commit và tránh các request retry đồng nhịp. Giá trị production phải lấy từ request timeout, p99 transaction duration, conflict rate và load test.
+So sánh trong Java giúp phát hiện ngay client đang dùng bản cũ. Nhưng nó không thay thế version check của ORM: writer khác vẫn có thể commit sau lần so sánh đó và trước lúc service ghi.
 
-Nếu operation chứa side effect bên ngoài database — charge payment, gửi email, gọi service khác — không được retry mù toàn bộ flow. Hãy dùng idempotency key, outbox hoặc tách transaction state machine để mỗi side effect có semantics rõ ràng.
+Entity đã được quản lý nên JPA có thể ghi thay đổi qua **dirty checking**, tức phát hiện state đã khác so với lúc tải. Không bắt buộc gọi `save()` để “bật” optimistic locking. Điều kiện là entity thực sự có `@Version` và được ghi qua đường mà provider quản lý.
 
----
+`IllegalArgumentException` và `IllegalStateException` trong ví dụ giữ code ngắn. Ứng dụng thật nên dùng domain error riêng cho dữ liệu đầu vào sai, không tìm thấy resource và không đủ hàng, rồi map chúng ra API contract phù hợp. Đừng coi mọi lỗi trong method này là lỗi cần retry.
 
-### 6. Optimistic Lock cho REST API và “long conversation”
+### Repository dùng PESSIMISTIC_WRITE
 
-Case phổ biến không phải hai transaction chạy cùng millisecond, mà là hai user mở cùng một order:
-
-```txt
-09:00 Alice GET order → version=12
-09:01 Bob   GET order → version=12
-09:05 Bob   PUT order → success, version=13
-09:10 Alice PUT order → client vẫn gửi version=12
-```
-
-Không thể giữ transaction và row lock từ `09:00` đến `09:10`. Đúng hơn là expose revision token cho client:
-
-```json
-{
-  "id": 1001,
-  "status": "PENDING",
-  "shippingAddress": "Hanoi",
-  "version": 12
-}
-```
-
-Request update gửi version đã đọc:
-
-```http
-PUT /api/orders/1001
-If-Match: "12"
-Content-Type: application/json
-
-{
-  "shippingAddress": "Da Nang"
-}
-```
-
-Application update có điều kiện:
-
-```sql
-UPDATE orders
-SET shipping_address = 'Da Nang',
-    version = version + 1
-WHERE id = 1001
-  AND version = 12;
-```
-
-Nếu zero rows affected, API có thể trả:
-
-- `412 Precondition Failed` khi dùng semantics `If-Match`/ETag.
-- `409 Conflict` nếu API model conflict ở business layer thay vì HTTP precondition.
-
-Response nên chứa đủ thông tin để client refresh hoặc hiển thị diff, nhưng không tự merge các field có business meaning nguy hiểm. Ví dụ hai user sửa hai field profile độc lập có thể merge; hai user cùng thay đổi order status thì cần state-transition validation.
-
-**Không bind trực tiếp version từ client vào managed entity rồi gọi `save()` một cách mù quáng.** Hãy load state hiện tại, validate ownership/transition, so sánh expected version và để transaction thực hiện conditional update.
-
----
-
-### 7. Atomic conditional UPDATE: đôi khi tốt hơn cả hai lựa chọn quen thuộc
-
-Với bài toán decrement inventory đơn giản, không nhất thiết phải:
-
-```txt
-SELECT → kiểm tra → UPDATE
-```
-
-Có thể đưa invariant vào một statement atomic:
-
-```sql
-UPDATE inventory
-SET available = available - :quantity,
-    version = version + 1
-WHERE product_id = :productId
-  AND available >= :quantity;
-```
-
-- Affected rows `1`: reserve thành công.
-- Affected rows `0`: product không tồn tại hoặc không đủ stock; query thêm nếu cần phân biệt.
-- `CHECK (available >= 0)` là defense-in-depth ở database.
-
-Spring Data JPA:
+Với Spring Data JPA, có thể khai báo một query chuyên lấy lock:
 
 ```java
-public interface InventoryRepository extends JpaRepository<Inventory, Long> {
-
-    @Modifying(clearAutomatically = true, flushAutomatically = true)
-    @Query("""
-        update Inventory i
-           set i.available = i.available - :quantity,
-               i.version = i.version + 1
-         where i.productId = :productId
-           and i.available >= :quantity
-        """)
-    int reserveIfAvailable(Long productId, int quantity);
-}
-```
-
-Service:
-
-```java
-@Transactional
-public void reserveAtomically(Long productId, int quantity) {
-    if (quantity <= 0) {
-        throw new IllegalArgumentException("quantity must be positive");
-    }
-
-    int updated = repository.reserveIfAvailable(productId, quantity);
-    if (updated == 0) {
-        throw new OutOfStockOrMissingException(productId);
-    }
-}
-```
-
-Tại sao cách này thường tốt cho counter/inventory?
-
-- Không có khoảng trống giữa read và write ở application.
-- Không cần retry chỉ để tính lại phép trừ.
-- Database serialize writes trên row trong thời gian rất ngắn.
-- Invariant `available >= quantity` nằm cùng statement với mutation.
-
-Nhưng atomic update không giải quyết mọi flow. Nếu quyết định phụ thuộc nhiều row, cần tạo reservation record, enforce quota theo customer, kiểm tra order state và ghi audit cùng lúc, ta phải thiết kế transaction/invariant rộng hơn.
-
-**Cảnh báo:** bulk JPQL/SQL update bypass dirty checking của entity đang nằm trong persistence context. Nếu tự viết bulk update mà quên điều kiện/version increment, `@Version` không tự cứu. Vì vậy cần clear persistence context sau bulk update và review SQL semantics rõ ràng.
-
----
-
-### 8. Pessimistic Lock thực sự làm gì ở PostgreSQL?
-
-Query điển hình:
-
-```sql
-BEGIN;
-
-SELECT product_id, available, version
-FROM inventory
-WHERE product_id = 42
-FOR UPDATE;
-
--- check business rule
-UPDATE inventory
-SET available = available - 7,
-    version = version + 1
-WHERE product_id = 42;
-
-COMMIT;
-```
-
-`FOR UPDATE` lock row được chọn đến cuối transaction. Trong PostgreSQL:
-
-- `UPDATE`, `DELETE` và transaction khác dùng locking clause xung đột trên cùng row sẽ chờ hoặc fail theo timeout/`NOWAIT`.
-- Một `SELECT` thông thường không dùng locking clause vẫn có thể đọc nhờ MVCC; đừng nói đơn giản rằng `FOR UPDATE` “chặn mọi read”.
-- Lock chỉ tồn tại trong transaction; method không có transaction boundary đúng sẽ không giữ lock qua toàn bộ read–check–write như mong muốn.
-- Lock row không khóa “object Java”; Hibernate dùng locking mechanism của database, nên nó có hiệu lực giữa nhiều pod cùng truy cập database đó.
-
-Timeline:
-
-```d2 title="Pessimistic locking buộc transaction thứ hai chờ"
-shape: sequence_diagram
-t1: "Transaction T1"
-db: "Database"
-t2: "Transaction T2"
-t1 -> db: "BEGIN; SELECT FOR UPDATE → lock row"
-t2 -> db: "BEGIN; SELECT FOR UPDATE"
-t2."WAIT — T1 đang giữ row lock"
-t1 -> db: "Validate + UPDATE"
-t1 -> db: "COMMIT → release lock"
-db -> t2: "Lock acquired, đọc state mới"
-t2 -> db: "Validate + UPDATE / REJECT"
-t2 -> db: "COMMIT"
-```
-
-Điểm mạnh là T2 không làm business calculation trên state cũ. Điểm yếu là thời gian T2 chờ phụ thuộc transaction T1; nếu T1 gọi payment API 3 giây trong transaction, mọi request cùng product có thể xếp hàng phía sau.
-
----
-
-### 9. Implement Pessimistic Lock với Spring Data JPA
-
-Repository:
-
-```java
-package com.example.inventory;
-
-import java.util.Optional;
-
 import jakarta.persistence.LockModeType;
-import jakarta.persistence.QueryHint;
-
+import java.util.Optional;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Lock;
 import org.springframework.data.jpa.repository.Query;
-import org.springframework.data.jpa.repository.QueryHints;
 import org.springframework.data.repository.query.Param;
 
 public interface InventoryRepository extends JpaRepository<Inventory, Long> {
-
     @Lock(LockModeType.PESSIMISTIC_WRITE)
-    @QueryHints(@QueryHint(
-        name = "jakarta.persistence.lock.timeout",
-        value = "2000"
-    ))
     @Query("select i from Inventory i where i.productId = :productId")
-    Optional<Inventory> findByIdForUpdate(@Param("productId") Long productId);
+    Optional<Inventory> findForUpdate(@Param("productId") long productId);
 }
 ```
 
-Service:
+Gọi query trong một service có transaction thật sự bao quanh phần đọc và sửa:
 
 ```java
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
 @Service
 public class PessimisticInventoryService {
-
     private final InventoryRepository repository;
 
     public PessimisticInventoryService(InventoryRepository repository) {
@@ -631,593 +628,441 @@ public class PessimisticInventoryService {
     }
 
     @Transactional
-    public ReservationResult reserve(Long productId, int quantity) {
-        Inventory inventory = repository.findByIdForUpdate(productId)
-            .orElseThrow(() -> new ProductNotFoundException(productId));
+    public void reserve(long productId, int quantity) {
+        Inventory item = repository.findForUpdate(productId)
+            .orElseThrow(() ->
+                new IllegalArgumentException("Inventory not found")
+            );
 
-        // Chỉ CPU/local DB work ngắn trong critical section.
-        inventory.reserve(quantity);
-
-        return new ReservationResult(productId, quantity);
+        item.reserve(quantity);
+        repository.flush();
     }
 }
 ```
 
-Hibernate dialect thường chuyển `PESSIMISTIC_WRITE` thành SQL tương ứng như `SELECT ... FOR UPDATE`. Tuy nhiên SQL cụ thể, timeout và fallback lock mode phụ thuộc database/dialect/provider; phải xem generated SQL và integration-test trên đúng PostgreSQL version đang chạy.
+Ví dụ giả định entity chưa bị tải thành một bản cũ trong cùng persistence context trước đó. Nếu bạn đã giữ entity cũ, đừng mặc định một thao tác nâng lock sẽ tự refresh tất cả field. Hãy kiểm tra hành vi provider và dùng cách tải/refresh phù hợp trước khi ra quyết định.
 
-#### Vì sao timeout `2000 ms`?
+Lock được giữ đến cuối transaction, không phải đến cuối method repository. Với entity có `@Version` như trên, các thay đổi ghi qua ORM vẫn được quản lý version, kể cả khi lượt đọc dùng pessimistic lock.
 
-Không phải vì 2 giây luôn đúng. Ví dụ API có timeout end-to-end 3 giây, normal DB transaction p99 dưới 100 ms, thì chờ lock tối đa 2 giây để lại khoảng budget cho application map lỗi và trả response thay vì treo tới gateway timeout. Nếu API budget chỉ 500 ms, 2 giây là sai; nếu background reconciliation cho phép chờ lâu hơn, 2 giây có thể quá ngắn.
+JPA quy định ý nghĩa của lock mode, nhưng SQL cụ thể do provider và dialect của database quyết định. Không mặc định `PESSIMISTIC_READ` luôn được map thành cùng một kiểu shared lock trên mọi engine. Tương tự, các timeout hint của JPA cần được kiểm chứng trên đúng provider/driver đang chạy.
 
-`jakarta.persistence.lock.timeout` là **hint**, không phải mọi driver/database đều đảm bảo honor chính xác. Với PostgreSQL, team có thể cấu hình `lock_timeout` ở session/transaction level qua cơ chế đã kiểm chứng, nhưng phải tránh rò setting sang connection khác trong pool. Luôn test bằng hai connection thật và đo elapsed time thay vì chỉ tin annotation.
+### Flush, commit và những đường ghi bỏ qua ORM
 
-#### Exception cần phân biệt
+`save()` không đồng nghĩa “SQL đã chạy và commit xong”. `flush()` đẩy các thay đổi đang chờ xuống database, nhưng **không commit và không giải phóng row lock của transaction**.
 
-- `LockTimeoutException`: không lấy được lock trong thời gian cho phép nhưng theo JPA có thể không đánh dấu toàn transaction rollback.
-- `PessimisticLockException`: failure lấy lock khiến transaction rollback.
-- Spring có thể translate thành `CannotAcquireLockException`, `PessimisticLockingFailureException` hoặc exception data-access cụ thể tùy provider/cause.
-- PostgreSQL deadlock abort một transaction; application phải rollback và chỉ retry nếu operation an toàn.
+Optimistic conflict có thể được báo khi gọi API của provider, lúc flush hoặc lúc commit. Trong Spring, commit thường diễn ra tại transaction interceptor sau khi thân method `@Transactional` đã trả về. Nếu cần retry, phần retry phải bao quanh cả transaction invocation, không chỉ bao quanh vài dòng bên trong method.
 
-Đừng bind logic chỉ vào một class exception mà không test translation trên stack thật. Metric nên phân loại theo SQLState/root cause để timeout, deadlock và connection failure không bị gộp thành “DB error”.
+Sau `OptimisticLockException`, transaction đang hoạt động bị đánh dấu rollback. Không bắt exception rồi tiếp tục sửa entity và cố commit cùng transaction đó. Hãy để transaction kết thúc và xử lý ở lớp ngoài; Spring có thể dịch exception sang nhóm optimistic locking failure tùy đường truy cập.
 
----
+Bulk JPQL/HQL và native SQL cần được xem như những đường ghi riêng. Đừng mặc định một câu bulk update sẽ kiểm tra và tăng `@Version` cho từng entity như dirty checking. Nếu bulk update tác động đến dữ liệu có version, bạn phải chủ động thiết kế guard, tăng version khi cần và xử lý persistence context có thể đang giữ dữ liệu cũ.
 
-### 10. `PESSIMISTIC_READ`, `PESSIMISTIC_WRITE`, `NOWAIT`, `SKIP LOCKED`
+Với cùng một workflow, tránh để code vừa sửa entity đang được quản lý vừa native-update cùng row mà không có kế hoạch refresh/clear context. Nếu không, lần flush về sau có thể dùng state cũ mà bạn không còn nhìn thấy trong code SQL riêng lẻ.
 
-#### `PESSIMISTIC_READ`
+## Xử lý conflict, deadlock và retry
 
-Mục đích là lấy shared/read lock để ngăn row bị update/delete trong khi transaction đang dùng nó. Database có thể không hỗ trợ đúng shared mode và provider được phép dùng lock mạnh hơn. Nếu flow cuối cùng sẽ update row, xin read lock rồi upgrade có thể tăng complexity/deadlock; thường xin mode mạnh nhất cần thiết ngay từ đầu.
+Một thiết kế concurrency chưa hoàn thành ở câu `UPDATE` đúng. Nó còn cần quyết định khi nào trả lỗi, khi nào làm lại và làm lại phần nào.
 
-#### `PESSIMISTIC_WRITE`
+### Phân biệt lock wait với deadlock
 
-Dùng cho read–check–write cần độc quyền trên row. Đây là mode phổ biến nhất khi nói “pessimistic locking” trong JPA.
+**Lock wait** là một transaction đang đợi lock của transaction khác. Nếu bên đang giữ lock sớm commit, bên chờ có thể tiếp tục.
 
-#### `NOWAIT`
+**Deadlock** là vòng chờ: mỗi bên giữ một resource mà bên còn lại cần. Ví dụ hai transaction cùng phải khóa hai sản phẩm:
 
-Fail ngay nếu row đang bị lock:
+| Bước | Transaction A         | Transaction B         |
+| ---- | --------------------- | --------------------- |
+| 1    | Giữ lock sản phẩm `1` |                       |
+| 2    |                       | Giữ lock sản phẩm `2` |
+| 3    | Chờ lock sản phẩm `2` |                       |
+| 4    |                       | Chờ lock sản phẩm `1` |
+
+Không bên nào tự đi tiếp được. PostgreSQL phát hiện vòng chờ và hủy một transaction để phá vòng; không được dựa vào giả định bên nào luôn là nạn nhân.
+
+Một biện pháp giảm deadlock là thống nhất thứ tự khóa resource. Với nhiều sản phẩm, mọi đường xử lý có thể lấy lock theo `product_id` tăng dần thay vì theo thứ tự người dùng gửi. Với chuyển tiền, thống nhất thứ tự theo account ID thay vì luôn khóa “tài khoản nguồn trước”.
+
+Điều này giảm một lớp deadlock, không chứng minh hệ thống không còn deadlock. Foreign key, index và những câu SQL khác cũng có thể tham gia vòng chờ. Optimistic writer vẫn lấy lock khi ghi nhiều row, nên cũng cần chiến lược tương tự.
+
+### Retry toàn bộ đơn vị nghiệp vụ trong transaction mới
+
+Bảng dưới dùng SQLSTATE của PostgreSQL để phân biệt những trường hợp thường gặp:
+
+| Kết quả hoặc lỗi       | Ý nghĩa                                               | Hướng xử lý                                                                   |
+| ---------------------- | ----------------------------------------------------- | ----------------------------------------------------------------------------- |
+| `UPDATE` trả zero rows | Guard không còn đúng; chưa phải SQL error             | Xác định conflict/hết hàng/không tồn tại và quyết định nghiệp vụ              |
+| `40001`                | Serialization failure                                 | Retry toàn bộ transaction nếu thao tác có thể làm lại                         |
+| `40P01`                | Deadlock detected                                     | Rollback, rồi retry có giới hạn; điều tra thứ tự khóa nếu lặp lại             |
+| `55P03`                | Lock không lấy được, ví dụ `NOWAIT` hoặc lock timeout | Trả trạng thái bận hoặc retry theo budget của request                         |
+| `57014`                | Statement bị cancel, có thể do statement timeout      | Phân loại nguồn cancel; không tự động coi mọi trường hợp là conflict tạm thời |
+
+Nếu PostgreSQL báo lỗi statement trong một transaction tường minh, transaction thường không tiếp tục xử lý bình thường cho tới khi rollback. Một số hệ thống dùng savepoint để phục hồi cục bộ, nhưng đó không phải mặc định của các ví dụ này. Với nghiệp vụ giữ hàng, rollback cả attempt rồi mở transaction mới là ranh giới dễ kiểm chứng hơn.
+
+Một attempt retry đúng thường gồm các bước:
+
+1. Mở transaction mới.
+2. Đọc lại dữ liệu cần cho invariant, lấy lock hoặc version theo chiến lược đã chọn.
+3. Tính lại quyết định từ dữ liệu mới, không dùng lại kết quả tính cũ.
+4. Ghi tất cả thay đổi và commit.
+5. Chỉ khi attempt đã rollback và lỗi được phân loại là có thể retry, chờ backoff rồi chạy attempt tiếp theo.
+
+**Backoff** là tăng khoảng nghỉ giữa các lần thử. **Jitter** thêm độ ngẫu nhiên vào khoảng nghỉ để nhiều request không đồng loạt thử lại cùng lúc. Đặt giới hạn số attempt và tổng deadline; retry không giới hạn chỉ chuyển contention thành tải bổ sung.
+
+Với Spring, một cách tổ chức là đặt coordinator retry ngoài transaction, còn mỗi attempt gọi vào một bean `@Transactional` riêng hoặc dùng `TransactionTemplate`. Gọi lại một method qua `this` không tự đi qua transactional proxy. Cũng đừng để transaction bên ngoài vô tình bao trùm toàn bộ vòng retry.
+
+Không phải optimistic conflict nào cũng nên tự retry. Với command “giữ một đơn vị nếu còn hàng”, đọc lại và đánh giá lại thường phù hợp. Với form “thay nội dung bằng bản tôi đang sửa”, tự retry có thể ghi đè thay đổi của người khác; nên trả conflict để người dùng quyết định.
+
+### Idempotency và side effect nằm ngoài database
+
+**Idempotency** là khả năng gửi lại cùng một yêu cầu mà không tạo thêm một lần tác động nghiệp vụ ngoài ý muốn. Ví dụ cùng một `request_id` không được tạo hai reservation chỉ vì client không nhận được response đầu tiên.
+
+Lock và version chỉ điều phối truy cập dữ liệu. Chúng không tự nhận biết hai request mang cùng một ý định. Thông thường bạn cần một idempotency key được bảo vệ bằng unique constraint, đồng thời lưu kết quả nghiệp vụ trong cùng transaction với thay đổi tồn kho.
+
+Nếu connection đứt trong lúc commit, client có thể không biết transaction đã commit hay chưa. Đây không phải bằng chứng transaction thất bại. Retry mù một request có thể trừ kho lần thứ hai; hãy tra cứu trạng thái theo idempotency key hoặc dùng một giao thức có thể khôi phục kết quả.
+
+Đừng gọi Payment API hoặc gửi email trong khi đang giữ row lock rồi kỳ vọng rollback database sẽ thu hồi side effect. Database transaction không bao trùm tự động một hệ thống ngoài nó.
+
+Khi cần phát event sau thay đổi dữ liệu, **transactional outbox** là một lựa chọn: ghi event cần gửi vào bảng outbox trong cùng transaction, sau đó worker publish. Consumer vẫn cần xử lý khả năng nhận trùng; outbox không tự biến toàn bộ luồng thành exactly-once.
+
+Nếu nghiệp vụ cần giữ hàng trong vài phút để chờ thanh toán, hãy biểu diễn reservation và hạn hết hiệu lực bằng dữ liệu. Đừng giữ một database transaction và row lock mở trong suốt thời gian đó. Bài [long-running transaction](/database/05-long-running-transaction) đi sâu hơn vào ranh giới này.
+
+## Khác biệt cần nhớ giữa PostgreSQL và MySQL
+
+Version-based optimistic locking là một mẫu thiết kế có thể áp dụng trên nhiều database. Nhưng hành vi locking read và isolation không giống hoàn toàn giữa các engine.
+
+Bảng này so sánh PostgreSQL với **MySQL 8.4 dùng InnoDB**. Đây không phải cam kết áp dụng cho mọi storage engine của MySQL:
+
+| Điểm so sánh                      | PostgreSQL                                                           | MySQL/InnoDB                                                                                            |
+| --------------------------------- | -------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| Isolation mặc định thông thường   | `READ COMMITTED`                                                     | `REPEATABLE READ`                                                                                       |
+| `UPDATE ... WHERE version = ...`  | Dùng được để triển khai version check                                | Cùng ý tưởng áp dụng được                                                                               |
+| Plain read dưới MVCC              | Thường không chờ row lock của writer                                 | Consistent read thường đọc theo read view, không bị row lock chặn như locking read                      |
+| Locking read                      | Hành vi phụ thuộc isolation; lịch chạy trong bài là `READ COMMITTED` | Locking read dùng dữ liệu hiện hành theo cơ chế InnoDB, không nên đồng nhất với snapshot của plain read |
+| Phạm vi lock khi query theo range | `FOR UPDATE` không cung cấp cơ chế next-key gap locking như InnoDB   | Ở `REPEATABLE READ`, range/non-unique search có thể lấy next-key/gap lock trên phạm vi index được quét  |
+| Tìm bằng unique key đầy đủ        | Có thể xác định rõ row cần lock nếu row tồn tại                      | Với lookup khớp một unique record, thường chỉ cần record lock, không khóa gap phía trước record đó      |
+| `RETURNING` trong ví dụ `UPDATE`  | Được hỗ trợ                                                          | Không copy nguyên cú pháp PostgreSQL; kiểm tra affected-row count qua driver                            |
+| Timeout và mã lỗi                 | Dùng các cấu hình/SQLSTATE của PostgreSQL                            | Dùng cấu hình/mã lỗi của MySQL và cách driver/framework map lỗi                                         |
+
+**Gap lock** bảo vệ khoảng trống giữa các index record. **Next-key lock** kết hợp record lock với gap phía trước record. Vì vậy, trong InnoDB, câu “tôi chỉ query vài row” chưa đủ để kết luận phạm vi bị khóa chỉ là những row xuất hiện trong kết quả.
+
+Index được dùng và isolation level ảnh hưởng mạnh đến lock footprint — tập resource mà transaction giữ lock. Không có index phù hợp có thể làm query quét rộng và tạo contention lớn hơn bạn dự kiến. Kiểm tra execution plan cùng bằng chứng lock thực tế; chỉ nhìn SQL không phải lúc nào cũng suy ra đầy đủ phạm vi lock.
+
+Điểm thực hành quan trọng nhất: **không mang nguyên kết quả một thí nghiệm PostgreSQL `READ COMMITTED` sang kết luận cho InnoDB `REPEATABLE READ`.** Hãy chạy lại lịch concurrency trên đúng engine, isolation, schema và driver của ứng dụng.
+
+## Chọn chiến lược theo thao tác thực tế
+
+Mình bắt đầu từ hình dạng thao tác, không bắt đầu từ nhận xét “hệ thống đọc nhiều” hay “tài chính phải dùng pessimistic”. Cùng một ứng dụng có thể dùng nhiều cách cho những invariant khác nhau.
+
+| Thao tác                                                | Điểm xuất phát hợp lý                                       | Lý do và giới hạn                                                                              |
+| ------------------------------------------------------- | ----------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| Sửa form từ một bản đã đọc trước                        | Optimistic locking với expected version từ client           | Tránh giữ lock trong thời gian người dùng nhập; cần UX xử lý conflict                          |
+| Giảm tồn kho/counter/quota trên một row                 | Atomic conditional update                                   | Guard và phép thay đổi nằm cùng statement; không phát hiện mọi thay đổi khác như version check |
+| Đọc rồi tính nhiều bước ngắn trên dữ liệu dễ tranh chấp | Pessimistic locking với transaction ngắn                    | Bên đến sau đợi trước khi ra quyết định; phải quản lý wait và deadlock                         |
+| Invariant trên nhiều row                                | Constraint, guard row/aggregate version hoặc `SERIALIZABLE` | Một version trên mỗi row độc lập có thể không đủ                                               |
+| Nhiều worker lấy các job có thể thay thế nhau           | Claim ngắn bằng `FOR UPDATE SKIP LOCKED`                    | Chấp nhận bỏ qua job đang bị giữ; cần recovery khi worker chết                                 |
+| Workflow qua nhiều dịch vụ hoặc chờ người dùng          | State machine/reservation/idempotency và cơ chế bù phù hợp  | Không kéo database lock xuyên suốt workflow                                                    |
+
+Optimistic locking thường hợp khi conflict ít và phần công việc phải làm lại không quá đắt. Nếu một sản phẩm rất nóng, nhiều request cùng đọc version rồi tranh ghi sẽ tạo nhiều attempt thất bại. Khi đó, đo conflict rate và cân nhắc atomic update, phối hợp theo key hoặc một mô hình xử lý khác.
+
+Pessimistic locking có thể tránh phần tính toán dựa trên dữ liệu sắp lỗi thời, nhưng chuyển chi phí sang thời gian chờ. Mỗi transaction giữ lock lâu sẽ làm những request khác dồn lại trên cùng resource. Row lock không làm biến mất hotspot — một key bị rất nhiều request tranh chấp.
+
+Đừng suy ra chiến lược từ tổng QPS của cả service. Một service có ít request vẫn có thể tranh chấp mạnh nếu mọi request sửa cùng một row. Ngược lại, nhiều request trải trên các key khác nhau có thể ít conflict. Các số cần đo là contention theo key, thời gian giữ lock, tỷ lệ retry và độ trễ ở các request chậm, không phải chỉ tỷ lệ đọc/ghi tổng thể.
+
+## Thực hành bằng hai session PostgreSQL
+
+Các thí nghiệm dưới đây cố định thứ tự chạy để phân biệt từng cơ chế. Đây không phải benchmark; không dùng thời gian thao tác bằng tay để so sánh hiệu năng hai chiến lược.
+
+### Chuẩn bị database riêng
+
+Dùng một database local bỏ đi được. Nếu môi trường đã có PostgreSQL và quyền tạo database, có thể tạo rồi mở hai terminal:
+
+```bash
+createdb locking_lab
+export LAB_DATABASE_URL='postgresql:///locking_lab'
+psql "$LAB_DATABASE_URL"
+```
+
+Chạy `export` và `psql` trong cả hai terminal để có **hai connection riêng**, gọi là session A và session B. Nếu kết nối bằng host/user riêng, dùng connection string của sandbox thay cho ví dụ; không đưa credential thật vào tài liệu hoặc Git.
+
+Trong session A, chạy phần `CREATE TABLE` và `INSERT` ở [đầu bài](#dữ-liệu-và-quy-tắc-cần-bảo-vệ). Chỉ cần tạo một lần. Trước mỗi thí nghiệm, bảo đảm transaction của cả hai session trước đó đã kết thúc, rồi reset dữ liệu:
 
 ```sql
-SELECT *
+UPDATE inventory
+SET remaining = 1, version = 0
+WHERE product_id IN (1, 2);
+```
+
+<Callout type="warn" title="Chỉ reset dữ liệu trong sandbox">
+  Các thí nghiệm cố ý dùng cách ghi sai và đặt lại version để tạo cùng điểm xuất
+  phát. Không chạy chúng trên database ứng dụng thật. Nếu session báo đang ở
+  transaction lỗi, chạy `ROLLBACK` trước khi bắt đầu lại; đừng mở thêm session
+  rồi để transaction cũ giữ lock.
+</Callout>
+
+Các kết quả chính dưới đây đã được kiểm tra trên PostgreSQL 18 trong một cluster local tạm. Tên header hoặc cách trình bày row của `psql` có thể khác theo cấu hình; điều cần đối chiếu là số row được cập nhật, trạng thái dữ liệu và chỗ statement phải chờ.
+
+### Thí nghiệm 1: tái hiện lost update
+
+**Bước 1 — chạy ở cả A và B trước khi bên nào ghi:**
+
+```sql
+BEGIN ISOLATION LEVEL READ COMMITTED;
+
+SELECT remaining, version
 FROM inventory
-WHERE product_id = 42
-FOR UPDATE NOWAIT;
+WHERE product_id = 1;
 ```
 
-Phù hợp khi chờ không có giá trị, ví dụ user có thể bấm lại hoặc worker sẽ requeue. Fail-fast bảo vệ thread pool và latency, nhưng caller phải hiểu đây là “resource busy”, không phải “resource không tồn tại”.
+Cả hai đọc được `remaining = 1, version = 0`. Mỗi bên tự tính giá trị mới bằng `0`.
 
-#### `SKIP LOCKED`
-
-Bỏ qua row đã bị worker khác khóa:
+**Bước 2 — A ghi và commit:**
 
 ```sql
-SELECT id
-FROM jobs
-WHERE status = 'READY'
-ORDER BY created_at, id
-FOR UPDATE SKIP LOCKED
-LIMIT 100;
+UPDATE inventory
+SET remaining = 0
+WHERE product_id = 1;
+
+COMMIT;
 ```
 
-Phù hợp cho nhiều worker claim job độc lập. `LIMIT 100` là batch minh họa: batch lớn giảm round-trip nhưng giữ nhiều row lock và kéo dài transaction; batch nhỏ công bằng hơn nhưng tăng query overhead. Hãy chọn theo processing time, lock duration và throughput benchmark.
-
-`SKIP LOCKED` **không phù hợp cho API “lấy chính xác order 42”**: bỏ qua row bị lock có thể khiến application hiểu sai là order không tồn tại. Nó cũng không cung cấp snapshot nhất quán của toàn tập dữ liệu, vì một số row bị ẩn tạm thời.
-
----
-
-### 11. Chọn strategy theo workload, không theo tên domain
-
-| Tình huống | Lựa chọn khởi đầu | Lý do |
-|---|---|---|
-| User sửa profile, conflict hiếm | Optimistic `@Version` | Không giữ lock trong long conversation; conflict hiển thị/merge được |
-| Admin cùng sửa order status | Optimistic + validate state transition | Detect stale command và không serialize mọi người từ lúc mở màn hình |
-| Counter/decrement một row | Atomic conditional `UPDATE` | Invariant nằm trong một statement, ít round-trip |
-| Inventory bình thường, conflict thấp | Optimistic hoặc atomic update | Pessimistic lock có thể không đáng cost |
-| Flash sale tranh một SKU hot | Atomic update, partition token/reservation, queue theo key; cân nhắc pessimistic | Optimistic retry có thể khuếch đại load; một row vẫn là bottleneck dù dùng lock nào |
-| Transfer giữa hai account | Transaction + lock hai account theo ID cố định, hoặc conditional update/ledger design | Invariant trải nhiều row; phải tránh deadlock và audit đúng |
-| Worker claim jobs | `FOR UPDATE SKIP LOCKED` | Nhiều worker lấy các row khác nhau, không chờ nhau |
-| User mở form lâu | Optimistic version/ETag | Không giữ DB lock trong thời gian user suy nghĩ |
-| Gọi external payment API | State machine + idempotency/outbox, không giữ row lock qua network | Network latency/failure không nên kéo dài DB transaction |
-| Invariant “tối đa N booking trong time range” | Constraint/data model/`SERIALIZABLE` hoặc lock đúng phạm vi | Lock/version một row có thể không thấy phantom/write skew |
-
-Một câu trả lời Senior tốt thường nói: **tôi sẽ thử đưa invariant xuống database bằng constraint hoặc conditional write trước; chỉ dùng explicit pessimistic lock khi transaction thật sự phải đọc rồi quyết định trên state được bảo vệ**.
-
----
-
-### 12. Conflict rate và retry cost quyết định điểm crossover
-
-Không có ngưỡng universal kiểu “conflict trên 10% thì dùng pessimistic”. Cần đo ít nhất:
-
-```txt
-optimistic_conflicts / total_write_attempts
-average và p99 attempts per successful command
-CPU/DB queries sinh ra bởi retry
-lock acquisition wait p50/p95/p99
-transaction duration khi giữ lock
-business cost của abort/retry
-request timeout và queue depth
-```
-
-Ví dụ hai workload cùng conflict 5% nhưng quyết định khác nhau:
-
-- Update profile chỉ chạy vài query local, retry 1 lần rẻ → Optimistic vẫn hợp lý.
-- Generate report 2 giây rồi mới update version, retry làm lại computation đắt → cần move expensive work ra trước, rút ngắn transaction, revalidate trước commit, hoặc chọn coordination khác.
-
-Khi optimistic conflict tăng, đừng lập tức đổi toàn repository sang pessimistic. Hãy tìm **key distribution**: có thể 99,9% entity không conflict nhưng một SKU/tenant/account cực hot. Giải pháp theo hot key — queue/partition/atomic update — tốt hơn làm mọi request chờ lock.
-
----
-
-### 13. Isolation level không thay thế locking strategy — và ngược lại
-
-Các khái niệm liên quan nhưng không đồng nghĩa:
-
-- Isolation level quy định transaction nhìn thấy thay đổi đồng thời thế nào.
-- Optimistic version check phát hiện entity đã thay đổi từ lúc đọc.
-- Pessimistic row lock chặn conflicting writer/locker trên row đã chọn.
-- Constraint bảo vệ invariant được biểu diễn trong schema.
-
-Ở PostgreSQL `READ COMMITTED`, mỗi statement có snapshot mới. Một flow read–modify–write ở application vẫn có thể lost update nếu SQL cuối không có version/condition đúng. Tăng lên `REPEATABLE READ` hoặc `SERIALIZABLE` có thể khiến anomaly thành serialization failure thay vì silent corruption, nhưng application vẫn cần retry whole transaction.
-
-#### Write skew: `@Version` từng row có thể không đủ
-
-Giả sử rule: luôn phải có ít nhất một bác sĩ on-call.
-
-```txt
-Doctor A: on_call=true, version=1
-Doctor B: on_call=true, version=1
-```
-
-T1 đọc cả A/B và tắt A. T2 cũng đọc cả A/B và tắt B. Mỗi transaction update **row khác nhau**, nên cả hai version check đều thành công; cuối cùng không ai on-call. Đây là write skew: invariant trải nhiều row không được một row version bảo vệ.
-
-Giải pháp tùy data model:
-
-- `SERIALIZABLE` và retry serialization failure.
-- Lock một coordination row đại diện schedule trước khi thay đổi.
-- Thiết kế aggregate để invariant nằm trong một row/transaction boundary.
-- Dùng constraint nếu invariant biểu diễn được bằng database constraint.
-
-Senior phải nói được **phạm vi invariant** trước khi chọn lock mode.
-
----
-
-### 14. Transaction boundary: nơi dễ làm pessimistic lock thành incident
-
-Critical section nên chỉ chứa logic cần state ổn định:
-
-```txt
-BEGIN
-  acquire lock
-  read/check
-  write
-COMMIT
-```
-
-Không nên:
-
-```txt
-BEGIN
-  acquire lock
-  gọi Payment API 3 giây
-  publish Kafka đồng bộ
-  upload S3
-  render PDF
-  sleep/retry network
-COMMIT
-```
-
-Vì connection pool và database lock đều là tài nguyên hữu hạn. Một external dependency chậm có thể khiến transaction giữ connection + row lock lâu; request sau xếp hàng; thread và pool cạn; cuối cùng một lỗi payment biến thành database-wide incident.
-
-Thiết kế tốt hơn:
-
-```txt
-Transaction 1 ngắn:
-  lock/check state
-  ghi state=PENDING_PAYMENT + outbox
-  commit
-
-Worker gọi payment bằng idempotency key
-
-Transaction 2 ngắn:
-  lock/version-check current state
-  ghi PAID hoặc PAYMENT_FAILED + outbox
-  commit
-```
-
-Đổi lại, flow trở thành state machine/eventual completion và phải có reconciliation. Đây thường là trade-off đúng hơn giữ DB transaction qua network.
-
----
-
-### 15. Deadlock: nguyên nhân, phòng tránh và retry
-
-Ví dụ transfer:
-
-```d2 title="Hai thứ tự lock ngược nhau có thể gây deadlock"
-shape: sequence_diagram
-t1: "Transaction T1"
-a10: "Account 10"
-a20: "Account 20"
-t2: "Transaction T2"
-t1 -> a10: "Acquire lock"
-t2 -> a20: "Acquire lock"
-t1 -> a20: "Wait — T2 đang giữ lock"
-t2 -> a10: "Wait — T1 đang giữ lock"
-```
-
-Hai transaction chờ nhau. PostgreSQL detect deadlock và abort một transaction, nhưng application không nên dựa vào transaction nào sẽ bị chọn.
-
-Phòng tránh bằng lock ordering cố định:
-
-```java
-@Transactional
-public void transfer(long fromId, long toId, BigDecimal amount) {
-    long firstId = Math.min(fromId, toId);
-    long secondId = Math.max(fromId, toId);
-
-    Account first = repository.findByIdForUpdate(firstId).orElseThrow();
-    Account second = repository.findByIdForUpdate(secondId).orElseThrow();
-
-    Account from = fromId == firstId ? first : second;
-    Account to = toId == firstId ? first : second;
-
-    from.debit(amount);
-    to.credit(amount);
-}
-```
-
-Checklist:
-
-1. Mọi code path lock cùng loại resource theo cùng thứ tự canonical.
-2. Xin lock mode mạnh nhất thực sự cần ngay từ đầu, tránh upgrade bất ngờ.
-3. Transaction ngắn; index đúng để query không lock/scan nhiều row hơn dự kiến.
-4. Đặt timeout và log blocked/blocking transaction.
-5. Retry deadlock victim trong transaction mới, có bounded attempts + jitter và idempotency.
-
-Deadlock rate thấp nhưng khác zero vẫn có thể xảy ra do code path/foreign key/index/internal DB behavior. Vì vậy vừa phòng tránh, vừa có controlled retry và observability.
-
----
-
-### 16. Optimistic Lock không đồng nghĩa “không có database lock”
-
-Tên gọi dễ gây hiểu sai. Khi optimistic transaction thực hiện `UPDATE`, database vẫn lấy lock cần thiết để thực thi statement và bảo vệ physical consistency. Khác biệt là application không lấy **long-lived explicit lock từ lúc đọc**; nó dùng conditional write để phát hiện row đã đổi.
-
-Tương tự, Pessimistic Lock không có nghĩa database khóa cả table. `SELECT ... FOR UPDATE` thường lấy row-level lock trên rows được chọn, dù query vẫn lấy các table-level lock nhẹ cần thiết và execution plan/index quyết định số row được chạm. Query predicate quá rộng hoặc thiếu index có thể lock nhiều row hơn business mong đợi.
-
-Vì vậy generated SQL và `EXPLAIN` vẫn quan trọng. Annotation không thay thế hiểu biết về database.
-
----
-
-### 17. Multi-instance, cache và message broker
-
-#### Nhiều pod Kubernetes
-
-```java
-public synchronized void reserve(...) { ... }
-```
-
-Chỉ serialize threads trong **một JVM**. Nếu EKS chạy 10 pod, mỗi pod có monitor riêng; 10 request vẫn vào critical section đồng thời. Database lock/version, distributed lock hoặc key-partitioned queue mới coordination được giữa pod.
-
-Distributed lock bằng Redis cũng không tự động tốt hơn DB lock. Nó thêm lease expiry, fencing token, network partition và consistency concern. Nếu dữ liệu/invariant nằm trong PostgreSQL, DB transaction/constraint thường là nơi đơn giản và an toàn hơn để bắt đầu.
-
-#### Cache
-
-Không dùng Redis cached version làm source of truth cho optimistic concurrency nếu database là source of truth. Cache có thể stale; check và write phải atomic ở authoritative store. Sau commit, invalidate/update cache theo strategy rõ ràng; nếu publish event, outbox giúp tránh DB commit thành công nhưng cache invalidation event bị mất.
-
-#### Kafka consumer
-
-Kafka có thể redeliver message. Lock ngăn hai transaction sửa cùng lúc nhưng **không ngăn cùng command được xử lý hai lần ở hai thời điểm**. Cần idempotency key/inbox table với unique constraint:
+**Bước 3 — B ghi kết quả tính cũ rồi commit:**
 
 ```sql
-CREATE TABLE processed_commands (
-    command_id UUID PRIMARY KEY,
-    processed_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
+UPDATE inventory
+SET remaining = 0
+WHERE product_id = 1;
+
+COMMIT;
 ```
 
-Trong cùng transaction business, insert `command_id`; duplicate vi phạm unique constraint thì coi là đã xử lý. Locking và idempotency giải hai bài toán khác nhau.
+Cả hai lần cập nhật đều có command tag `UPDATE 1`. Giá trị cuối là `remaining = 0, version = 0`. Không có version guard và cũng không có điều kiện chứng minh B thực sự lấy được một đơn vị hàng còn lại.
 
----
+Nếu ứng dụng tạo một reservation sau mỗi `UPDATE 1` đó, cả hai có thể báo thành công. Chính điều này chứng minh `CHECK (remaining >= 0)` và transaction riêng cho mỗi request chưa đủ để tránh lỗi.
 
-### 18. Những góc cạnh JPA/Hibernate dễ bị bỏ sót
+### Thí nghiệm 2: optimistic update chỉ có một bên thành công
 
-#### `save()` không có nghĩa SQL chạy ngay
+Kết thúc transaction cũ ở cả hai session. Riêng thí nghiệm này, đặt tồn kho thành `2` để tách lỗi stale version khỏi trường hợp hết hàng:
 
-Hibernate có thể defer SQL tới flush/commit. Test kỳ vọng exception tại `repository.save(entity)` có thể sai; dùng `saveAndFlush()` trong test khi cần ép SQL, nhưng production retry boundary vẫn phải bao quanh transaction commit.
-
-#### Bulk update bypass entity lifecycle
-
-```java
-@Modifying
-@Query("update Inventory i set i.available = i.available - :q where i.productId = :id")
-int decrement(...);
+```sql
+UPDATE inventory
+SET remaining = 2, version = 0
+WHERE product_id = 1;
 ```
 
-JPQL bulk update không tự áp optimistic version semantics giống dirty checking của managed entity. Phải tự đưa condition/increment version nếu cần và clear persistence context để không giữ entity stale.
+Sau đó mở transaction và đọc ở cả A lẫn B giống bước 1 của thí nghiệm trước. Cả hai thấy `remaining = 2` và giữ expected version bằng `0`.
 
-#### Native SQL từ code path khác
+**A chạy câu sau rồi commit:**
 
-Nếu một batch job update table nhưng không increment/check version, transaction JPA có thể không phát hiện đúng mọi thay đổi hoặc version trở nên không phản ánh row state. Mọi writer — API, batch, migration, admin script — phải tuân thủ concurrency contract.
+```sql
+UPDATE inventory
+SET remaining = remaining - 1,
+    version = version + 1
+WHERE product_id = 1
+  AND version = 0
+  AND remaining >= 1
+RETURNING remaining, version;
 
-#### Detached entity và merge
-
-Entity rời persistence context mang version cũ có thể conflict khi merge, đó là điều tốt. Nhưng mapping DTO → entity mới không đúng cách, bỏ version, hoặc dùng update SQL không condition có thể vô hiệu hóa protection. Nên load managed entity hiện tại rồi apply command đã validate.
-
-#### Association không tự động được khóa như aggregate trong đầu bạn
-
-Lock parent entity không mặc định có nghĩa mọi row child/related đều được lock theo business expectation. `PessimisticLockScope.EXTENDED` có portability/provider limitation; query join/fetch và database semantics cần kiểm chứng. Nếu invariant gồm child rows, hãy thiết kế query/lock scope/test concurrency rõ ràng.
-
-#### Versionless optimistic locking
-
-Hibernate có extension `@OptimisticLocking` với `ALL` hoặc `DIRTY` để đưa all/dirty columns vào `WHERE` cho legacy schema. Nó có use case thật nhưng phức tạp hơn, phụ thuộc Hibernate và tương tác với dynamic update/detached entities. Với schema mới, dedicated numeric `@Version` thường portable, dễ quan sát và dễ reasoning hơn.
-
----
-
-### 19. Observability: metric nào chứng minh lựa chọn đang đúng?
-
-Tối thiểu nên có:
-
-```txt
-app_optimistic_lock_conflicts_total{entity,operation}
-app_concurrency_retries_total{operation,result}
-app_lock_acquire_seconds{operation}
-app_transaction_seconds{operation}
-app_deadlocks_total{operation}
-app_lock_timeouts_total{operation}
-db_pool_active / db_pool_pending
-http_server_duration p95/p99
+COMMIT;
 ```
 
-Không gắn `entity_id`, `product_id` trực tiếp làm Prometheus label vì cardinality có thể bùng nổ. Hot key nên log/sample vào structured logs hoặc aggregate top-N ở tracing/log analytics.
+A nhận một row với `remaining = 1, version = 1` và command tag `UPDATE 1`.
 
-PostgreSQL query để tìm blocker:
+**B vẫn dùng expected version đã đọc, không tự đổi sang `1`:**
+
+```sql
+UPDATE inventory
+SET remaining = remaining - 1,
+    version = version + 1
+WHERE product_id = 1
+  AND version = 0
+  AND remaining >= 1
+RETURNING remaining, version;
+
+ROLLBACK;
+```
+
+B nhận zero rows và command tag `UPDATE 0` **dù vẫn còn một đơn vị hàng**. Chính điều kiện version làm lần ghi thất bại. Nếu nghiệp vụ cho phép retry, B phải đọc lại và đánh giá lại từ version `1`, không tự thay token trong câu ghi cũ.
+
+Ở đây `ROLLBACK` biểu diễn quyết định hủy attempt của ứng dụng, không phải phản ứng tự động của SQL khi update zero rows.
+
+Muốn quan sát việc optimistic writer vẫn chờ lock, thử lại nhưng giữ A chưa commit sau `UPDATE`. Cho B gửi câu update, xác nhận B đang chờ, rồi mới commit A. Kết quả của B vẫn là zero rows sau khi chờ.
+
+### Thí nghiệm 3: quan sát FOR UPDATE giữ request đến sau
+
+Reset dữ liệu, rồi **A chạy và để transaction mở**:
+
+```sql
+BEGIN ISOLATION LEVEL READ COMMITTED;
+
+SELECT remaining, version
+FROM inventory
+WHERE product_id = 1
+FOR UPDATE;
+```
+
+A thấy còn một đơn vị. **B chạy ở connection riêng:**
+
+```sql
+BEGIN ISOLATION LEVEL READ COMMITTED;
+
+SELECT remaining, version
+FROM inventory
+WHERE product_id = 1
+FOR UPDATE;
+```
+
+Câu `SELECT` của B chưa trả kết quả vì A giữ lock. Đừng cancel ngay; quay lại A và chạy:
+
+```sql
+UPDATE inventory
+SET remaining = remaining - 1,
+    version = version + 1
+WHERE product_id = 1
+  AND remaining >= 1;
+
+COMMIT;
+```
+
+B tiếp tục và đọc được `remaining = 0, version = 1`. B lúc này đã lấy lock, nhưng hàng đã hết nên phải từ chối giữ hàng. Kết thúc B bằng:
+
+```sql
+ROLLBACK;
+```
+
+Có thể thử lại với `FOR UPDATE NOWAIT` ở B để quan sát lỗi thay vì chờ. Sau lỗi trong transaction, chạy `ROLLBACK` ở B. Với `SKIP LOCKED`, B có thể nhận kết quả rỗng ngay; đó không phải bằng chứng row đã bị xóa.
+
+### Thí nghiệm 4: atomic UPDATE tự kiểm tra lại điều kiện
+
+Reset dữ liệu. Lần này không đọc trước.
+
+**A chạy, nhưng chưa commit:**
+
+```sql
+BEGIN ISOLATION LEVEL READ COMMITTED;
+
+UPDATE inventory
+SET remaining = remaining - 1,
+    version = version + 1
+WHERE product_id = 1
+  AND remaining >= 1
+RETURNING remaining, version;
+```
+
+A nhận một row mới. **B chạy cùng câu update trong transaction riêng:**
+
+```sql
+BEGIN ISOLATION LEVEL READ COMMITTED;
+
+UPDATE inventory
+SET remaining = remaining - 1,
+    version = version + 1
+WHERE product_id = 1
+  AND remaining >= 1
+RETURNING remaining, version;
+```
+
+B chờ row lock. Quay lại A chạy `COMMIT;`. B sau đó nhận zero rows vì điều kiện đủ hàng không còn đúng. Kết thúc B bằng `ROLLBACK;`.
+
+Kiểm tra cuối cùng ở một session đã thoát transaction:
+
+```sql
+SELECT remaining, version
+FROM inventory
+WHERE product_id = 1;
+```
+
+Kết quả là `remaining = 0, version = 1`. Không có expected version trong câu ghi, nhưng phép kiểm tra đủ hàng và phép giảm đã nằm chung một statement. Đây là điều làm thí nghiệm này khác lost update ở thí nghiệm 1.
+
+## Quan sát và kiểm thử trước khi đưa vào production
+
+Khi gặp request chậm, cần phân biệt thời gian chạy query với thời gian chờ lock. PostgreSQL cho phép xem những backend đang bị backend khác chặn:
 
 ```sql
 SELECT
-    blocked.pid AS blocked_pid,
-    blocked.usename AS blocked_user,
-    now() - blocked.query_start AS blocked_for,
-    blocked.query AS blocked_query,
-    blocker.pid AS blocker_pid,
-    now() - blocker.query_start AS blocker_for,
-    blocker.query AS blocker_query
-FROM pg_stat_activity blocked
-CROSS JOIN LATERAL unnest(pg_blocking_pids(blocked.pid)) AS p(blocker_pid)
-JOIN pg_stat_activity blocker ON blocker.pid = p.blocker_pid
-WHERE cardinality(pg_blocking_pids(blocked.pid)) > 0;
+    pid,
+    state,
+    wait_event_type,
+    wait_event,
+    pg_blocking_pids(pid) AS blocking_pids,
+    now() - xact_start AS transaction_age,
+    query
+FROM pg_stat_activity
+WHERE datname = current_database()
+  AND cardinality(pg_blocking_pids(pid)) > 0;
 ```
 
-Cần alert theo baseline/SLO, không copy một ngưỡng mù quáng. Ví dụ lock wait p99 tăng từ 20 ms lên 500 ms có thể đã nghiêm trọng cho API budget 700 ms, dù chưa có timeout. Đồng thời xem transaction duration và pool pending; lock contention thường lan thành connection-pool exhaustion trước khi error rate tăng rõ.
-
-Trace nên đánh dấu:
-
-```txt
-concurrency.strategy = optimistic|pessimistic|conditional_update
-concurrency.attempt = 1|2|3
-concurrency.outcome = success|conflict|timeout|deadlock
-```
-
-Không log raw PII hoặc toàn SQL parameter nhạy cảm.
-
----
-
-### 20. Test concurrency đúng cách
-
-Unit test một thread không chứng minh locking hoạt động. Cần integration test với PostgreSQL thật — Testcontainers là lựa chọn phù hợp — vì H2 có semantics, SQL dialect và timeout khác production.
-
-#### Test optimistic conflict
-
-1. Tạo inventory version `0`.
-2. Mở hai transaction độc lập bằng hai thread/connection.
-3. Cả hai đọc trước khi cho transaction nào commit.
-4. Cho T1 commit.
-5. Cho T2 commit và assert optimistic exception.
-6. Assert final state/version và không có partial side effect.
-
-Dùng `CountDownLatch`/barrier để điều khiển interleaving, không dùng `Thread.sleep()` làm synchronization chính vì test sẽ flaky.
-
-Pseudo-code test:
-
-```java
-var bothLoaded = new CountDownLatch(2);
-var allowCommit = new CountDownLatch(1);
-
-// Thread 1 và Thread 2 chạy qua TransactionTemplate riêng.
-// Sau khi load, countDown bothLoaded rồi await allowCommit.
-// Test điều khiển thứ tự commit và assert đúng một transaction conflict.
-```
-
-#### Test pessimistic blocking/timeout
-
-1. T1 `SELECT ... FOR UPDATE` và giữ transaction mở bằng latch.
-2. T2 xin cùng lock.
-3. Assert T2 chưa đi qua critical section khi T1 chưa release.
-4. Với test timeout, giữ T1 quá configured timeout và assert exception/root SQLState mong đợi.
-5. Release latch trong `finally` để test không treo connection.
-
-#### Test deadlock/order
-
-Chạy nhiều transfer ngược chiều với account IDs giống nhau. Nếu code lock canonical order, test phải hoàn tất và giữ tổng balance. Đồng thời inject một code path cố ý lock ngược để xác nhận monitoring/retry nhận đúng deadlock — test này hữu ích cho runbook nhưng cần tách khỏi suite unit nhanh.
-
-#### Load test
-
-Concurrency correctness test trả lời “có corrupt data không”; load test trả lời “strategy có chịu được traffic không”. Với phân phối key giống production, đo throughput, p99, conflict/retry amplification, lock wait, pool saturation và database CPU. Flash sale phải test skew/hot SKU, không chỉ random đều trên hàng triệu SKU vì random uniform sẽ che mất contention thật.
-
----
-
-### 21. Quy trình ra quyết định có thể dùng trong interview
-
-Đi theo thứ tự sau:
-
-```txt
-1. Viết invariant
-   "available không âm", "mỗi command chỉ chạy một lần",
-   "ít nhất một doctor on-call", ...
-
-2. Xác định scope
-   Một row? Nhiều row? Nhiều table? Nhiều database/service?
-
-3. Tìm primitive nhỏ nhất
-   Constraint → atomic conditional update → @Version
-   → row lock → SERIALIZABLE/queue/redesign
-
-4. Đo workload
-   QPS, hot-key distribution, conflict rate, transaction duration,
-   retry cost, API latency budget
-
-5. Thiết kế failure path
-   Conflict, retry, timeout, deadlock, idempotency, user-visible response
-
-6. Rút ngắn critical section
-   Không network call khi giữ DB transaction/lock
-
-7. Test interleaving + load
-   PostgreSQL thật, nhiều connection, distribution giống production
-
-8. Monitor và có đường đổi strategy
-   Metric theo operation/entity type, feature flag hoặc code path tách rõ
-```
-
-Nếu chỉ trả lời “ít conflict dùng optimistic, nhiều conflict dùng pessimistic”, bạn mới trả lời được phần đầu. Senior answer cần nói thêm **conflict xảy ra thì hệ thống làm gì, transaction giữ bao lâu, invariant nằm ở đâu và đo bằng metric nào**.
-
----
-
-## Bẫy thường gặp
-
-❌ **"Có `@Transactional` là không thể lost update"**
-
-→ Tại sao sai: Hai request chạy trong hai transaction khác nhau vẫn có thể cùng đọc state cũ rồi ghi đè nhau, tùy isolation và SQL update.
-
-✅ Đúng hơn: Dùng version/conditional update/pessimistic lock/serializable hoặc constraint phù hợp với invariant; kiểm tra generated SQL và test concurrent interleaving.
-
----
-
-❌ **"Optimistic Lock không dùng lock nào trong database"**
-
-→ Tại sao sai: Câu `UPDATE` vẫn cần database lock; optimistic chỉ không giữ explicit row lock từ lúc read và phát hiện conflict bằng version/CAS.
-
-✅ Đúng hơn: Phân biệt short lock khi thực thi write với long-lived explicit lock của `SELECT ... FOR UPDATE`.
-
----
-
-❌ **"Bắt OptimisticLockException rồi retry ngay trong cùng `@Transactional` method"**
-
-→ Tại sao sai: Transaction/persistence context đã stale hoặc rollback-only; exception còn có thể chỉ xuất hiện lúc commit ngoài method body.
-
-✅ Đúng hơn: Rollback hoàn toàn, tạo transaction mới cho mỗi attempt, giới hạn retry, thêm jitter và chỉ retry command idempotent/an toàn.
-
----
-
-❌ **"Pessimistic lock chặn tất cả request đọc row"**
-
-→ Tại sao sai: Với PostgreSQL MVCC, plain `SELECT` vẫn có thể đọc; `FOR UPDATE` chủ yếu block conflicting writers và lockers.
-
-✅ Đúng hơn: Mô tả behavior theo database cụ thể và test generated SQL/lock compatibility trên stack production.
-
----
-
-❌ **"Giữ `FOR UPDATE` rồi gọi payment API để chắc chắn không ai sửa order"**
-
-→ Tại sao sai: Network call kéo dài transaction, giữ connection và row lock, tạo convoy/pool exhaustion khi dependency chậm.
-
-✅ Đúng hơn: Transaction ngắn ghi state + outbox, gọi external service bằng idempotency key, rồi transaction ngắn khác transition state.
-
----
-
-❌ **"Dùng `synchronized` là đủ vì service method chỉ chạy một thread tại một thời điểm"**
-
-→ Tại sao sai: `synchronized` chỉ có hiệu lực trong một JVM; nhiều pod EKS không chia sẻ monitor, batch/script khác cũng bypass nó.
-
-✅ Đúng hơn: Đặt concurrency control tại source of truth hoặc coordination layer dùng chung; nếu dùng distributed lock phải có lease/fencing semantics đúng.
-
----
-
-❌ **"Bulk JPQL update vẫn tự check `@Version`"**
-
-→ Tại sao sai: Bulk DML bypass managed entity dirty checking; query tự viết có thể không chứa expected version và không increment version.
-
-✅ Đúng hơn: Viết conditional/version update rõ ràng, kiểm tra affected row count và clear persistence context sau bulk operation.
-
----
-
-❌ **"Conflict cao thì chỉ cần retry nhiều hơn"**
-
-→ Tại sao sai: Retry làm tăng query/CPU đúng lúc database đã contention, tạo positive feedback thành retry storm.
-
-✅ Đúng hơn: Bounded retry; tìm hot key; ưu tiên atomic update, serialize theo key, partition inventory token hoặc redesign data model.
-
----
-
-❌ **"Lock một parent row thì toàn bộ aggregate relation tự được bảo vệ"**
-
-→ Tại sao sai: Association/child rows không mặc định được lock theo ý nghĩa domain; scope phụ thuộc query, provider và database.
-
-✅ Đúng hơn: Xác định mọi row tham gia invariant, lock/query theo thứ tự rõ ràng hoặc thiết kế coordination row/aggregate boundary thích hợp.
-
----
-
-❌ **"Pessimistic Lock sẽ loại bỏ overselling trong mọi kiến trúc"**
-
-→ Tại sao sai: Nó chỉ serialize writers cùng đi qua đúng database/row/transaction; stale cache, writer bypass lock, nhiều inventory shard hoặc duplicate Kafka command vẫn có thể phá business result.
-
-✅ Đúng hơn: Kết hợp database invariant, idempotency, ownership một nguồn, reconciliation và concurrency contract áp dụng cho mọi writer.
-
----
-
-## Câu hỏi follow-up
-
-### 1. Khi nào nên tự động retry Optimistic Lock conflict?
-
-Chỉ retry khi command vẫn có cùng ý nghĩa trên state mới và mọi side effect là idempotent hoặc chưa xảy ra. “Tăng counter thêm 1” thường retry được; “set balance bằng giá trị user nhìn thấy 10 phút trước” có thể cần trả conflict để user xác nhận. Mỗi attempt phải là transaction mới, có max attempts và jitter. Nếu retry rate tăng, coi đó là signal thiết kế contention chứ không tiếp tục tăng max retry.
-
-### 2. `@Version` có ngăn duplicate Kafka message không?
-
-Không. Version xử lý concurrent/stale write trên entity, còn duplicate message có thể đến sau khi transaction đầu đã commit với version mới và vẫn được apply lần hai hợp lệ. Cần idempotency key/inbox record với unique constraint trong cùng business transaction. Consumer chỉ commit offset sau khi transaction thành công theo processing model đã chọn.
-
-### 3. Vì sao không dùng Redis distributed lock thay Pessimistic DB Lock?
-
-Nếu invariant và mutation đều nằm trong PostgreSQL, DB lock giữ check + write trong một atomic transaction và ít moving parts hơn. Redis lock thêm lease expiry, process pause, network partition và nhu cầu fencing token để writer hết lease không tiếp tục ghi stale. Distributed lock hợp lý khi coordinate resource ngoài một database, nhưng phải thiết kế failure semantics chứ không chỉ `SET NX PX`. Không nên thêm Redis chỉ để tránh dùng row lock mà không đo bottleneck.
-
-### 4. `PESSIMISTIC_WRITE` có đảm bảo fairness theo thứ tự request đến không?
-
-Không nên giả định strict FIFO fairness. Database lock scheduler, query timing, deadlock resolution và connection scheduling có thể làm thứ tự thực tế khác. Nếu business cần ordering rõ như xử lý commands theo account, queue/partition theo key với sequence có thể phù hợp hơn. Dù vậy vẫn cần idempotency và recovery khi consumer fail.
-
-### 5. Có nên dùng `SERIALIZABLE` thay cho cả Optimistic/Pessimistic Lock không?
-
-`SERIALIZABLE` mạnh khi invariant trải nhiều reads/rows và khó lock thủ công, vì database phát hiện execution không thể tương đương serial order. Nhưng nó có thể abort transaction với serialization failure, nên application vẫn phải retry toàn transaction. Cost phụ thuộc workload và database; không bật toàn hệ thống theo khẩu hiệu. Hãy dùng cho transaction cần thiết, giữ chúng ngắn và load-test conflict rate.
-
-### 6. Nếu hai user sửa hai field khác nhau của cùng entity thì `@Version` có conflict không?
-
-Với một version chung cho entity, thường có: transaction commit sau thấy version cũ dù hai field không overlap. Đây là false conflict về mặt field nhưng có thể đúng về mặt aggregate consistency. Có thể tách entity/aggregate nếu hai nhóm field thật sự độc lập, dùng command merge có kiểm soát, hoặc Hibernate-specific dirty-field optimistic locking cho legacy/use case đặc biệt. Đừng loại field khỏi version chỉ để giảm conflict nếu lost update field đó không chấp nhận được.
-
-### 7. HTTP nên trả `409` hay `412` khi version conflict?
-
-Nếu client dùng `ETag` và `If-Match`, `412 Precondition Failed` diễn đạt đúng việc precondition version không còn đúng. Nếu conflict phát sinh từ business state transition hoặc API không expose conditional HTTP semantics, `409 Conflict` thường dễ hiểu hơn. Dù chọn status nào, contract phải nhất quán và response nên giúp client refresh/reconcile. Không biến concurrency conflict dự kiến thành `500`.
-
-### 8. Làm sao rollout `@Version` vào bảng đang có hàng trăm triệu row?
-
-Dùng migration expand–backfill–contract: thêm nullable/default-compatible column theo cách tránh table rewrite/lock dài trên đúng PostgreSQL version, deploy writer hiểu cả trạng thái migration, backfill theo batch có throttle, rồi enforce `NOT NULL` khi hoàn tất. Mọi writer cũ/native SQL phải được inventory và sửa để increment/check version theo contract. Theo dõi lock, replication lag, WAL và duration; thử trên bản sao dữ liệu production trước. Chi tiết DDL online phụ thuộc PostgreSQL version và schema nên không copy một lệnh duy nhất cho mọi hệ thống.
-
-### 9. Có nên lock trước hay gọi external service trước?
-
-Không giữ DB lock qua external call. Thường ghi intent/state trong transaction ngắn, commit, gọi external service bằng idempotency key, rồi re-enter transaction và validate version/state trước khi finalize. Nếu external response đến muộn, state machine phải reject transition không còn hợp lệ hoặc đưa vào reconciliation. Đây là saga/workflow problem hơn là row-lock problem.
-
-### 10. Hot inventory row vẫn là bottleneck dù dùng Pessimistic Lock thì làm gì?
-
-Pessimistic lock chỉ biến concurrent writes thành hàng đợi trên một row; throughput tối đa vẫn bị giới hạn bởi critical-section latency. Hãy giảm work trong transaction, dùng atomic update, chia inventory thành reservation tokens/buckets có invariant tổng rõ, hoặc serialize commands theo SKU qua Kafka partition. Mỗi cách đổi consistency, fairness và recovery complexity nên phải capacity-test với skew giống flash sale. Cuối cùng vẫn cần reconciliation để phát hiện mismatch giữa reservation, order và payment.
-
-### 11. Làm sao phân biệt Optimistic Lock conflict với “không tìm thấy row”?
-
-Ở ORM-managed update, provider biết entity từng tồn tại và affected row bằng zero thường được translate thành stale/optimistic conflict, nhưng row cũng có thể đã bị xóa. Với custom conditional update, zero rows có thể là missing, version mismatch hoặc business predicate fail. Nếu API cần phân biệt, query current state sau rollback trong transaction mới hoặc thiết kế return path/stored procedure phù hợp. Tránh query thêm trên mọi success chỉ để phân biệt một failure hiếm.
-
-### 12. `SELECT FOR UPDATE SKIP LOCKED` có bảo đảm job không chạy hai lần không?
-
-Nó ngăn hai worker đồng thời claim cùng row trong lúc lock/transaction còn hiệu lực, nhưng không bảo đảm exactly-once end-to-end. Worker có thể commit claim rồi crash, hoặc hoàn thành side effect nhưng fail trước khi ghi DONE. Cần lease/status/attempt, idempotency key và reaper/reconciliation cho job bị kẹt. `SKIP LOCKED` là primitive phân phối work, không phải delivery guarantee hoàn chỉnh.
-
----
-
-## Xem thêm
-
-- [SQL vs NoSQL: chọn database như thế nào?](/database/01-sql-vs-nosql) — transaction, consistency, constraint và data model.
-- [Fuzzy search trên cột phone_number đã mã hoá](/database/04-fuzzy-search-encrypted-column) — trade-off database giữa security và searchability.
-- [Merge 1 triệu bản ghi vào bảng 1 tỷ rows](/java/02-bulk-upsert-billion-rows) — lock contention, deadlock và batch update ở quy mô lớn.
-- [Hibernate ORM User Guide — Locking](https://docs.hibernate.org/stable/orm/userguide/html_single/Hibernate_User_Guide.html#locking) — hành vi `@Version`, lock modes và Hibernate-specific options.
-- [Spring Data JPA — Locking](https://docs.spring.io/spring-data/jpa/reference/jpa/locking.html) — cách dùng `@Lock` trên repository query methods.
-- [PostgreSQL — Explicit Locking](https://www.postgresql.org/docs/current/explicit-locking.html) — row lock modes, deadlock và `FOR UPDATE` semantics.
+Trong thí nghiệm 3 hoặc 4, chạy query này từ session C trong khi B đang chờ A. Bạn có thể thấy PID của B cùng PID đang chặn nó. Quyền xem chi tiết query của các session khác phụ thuộc role; không cấp quyền rộng chỉ để chạy một truy vấn chẩn đoán.
+
+Một query chỉ ra blocker chưa đủ kết luận vì sao transaction đó mở lâu. Cần đối chiếu request ID, thời điểm mở transaction và đoạn code đang chạy: có thể transaction đang gọi dịch vụ ngoài, chờ ứng dụng hoặc đã bỏ quên connection ở trạng thái `idle in transaction`.
+
+Ở phía ứng dụng, nên quan sát tối thiểu:
+
+- Số attempt optimistic thất bại, tách khỏi lỗi hết hàng hoặc không tìm thấy row.
+- Thời gian giữ transaction và thời gian chờ lock, đặc biệt ở nhóm request chậm.
+- Deadlock, serialization failure, lock timeout và số lần retry theo thao tác.
+- Mức sử dụng connection pool khi nhiều request đang chờ cùng một key.
+- Tỷ lệ request hoàn thành sau retry so với request hết deadline.
+
+Tránh gắn mọi product ID vào metric label vì số lượng giá trị khác nhau có thể tăng rất lớn. Dùng log/trace đã xử lý dữ liệu nhạy cảm để điều tra một key cụ thể khi cần.
+
+Bài kiểm thử concurrency cũng phải ép được lịch chạy cần kiểm tra. Hai lần gọi service nối tiếp không chứng minh cơ chế đúng khi chạy đồng thời. Với integration test, dùng hai connection và barrier — điểm đồng bộ buộc cả hai bên đã tới một bước nhất định — thay vì chỉ thêm `sleep` rồi hy vọng tạo được race.
+
+Các tình huống quan trọng gồm:
+
+| Kiểm thử                                    | Điều cần xác nhận                                              |
+| ------------------------------------------- | -------------------------------------------------------------- |
+| Hai writer đọc cùng version                 | Chỉ một lần ghi dựa trên version ban đầu được chấp nhận        |
+| Writer đầu rollback                         | Writer chờ hoặc retry không bỏ mất hàng một cách sai lệch      |
+| Row bị xóa sau lượt đọc                     | Ứng dụng xử lý đúng, không nhầm thành cập nhật thành công      |
+| Hai command cùng tranh phần hàng cuối       | Chỉ một reservation thành công                                 |
+| Hai transaction khóa nhiều row khác thứ tự  | Có đường xử lý deadlock, không treo hoặc retry vô hạn          |
+| Bulk/native writer sửa dữ liệu              | Version và persistence context vẫn tuân thủ contract           |
+| Hai writer sửa hai row trong cùng invariant | Không để write skew lọt qua chỉ vì version từng row đều đúng   |
+| Gửi lại cùng idempotency key                | Không tạo thêm một lần trừ kho hoặc reservation                |
+| Mất kết nối quanh thời điểm commit          | Có cách khôi phục kết quả thay vì đoán transaction đã thất bại |
+
+Các thí nghiệm SQL phía trên không thay thế kiểm thử Spring/JPA, connection pool hoặc UX xử lý conflict. Chạy thêm test trên đúng provider, driver và database của ứng dụng trước khi dựa vào annotation hoặc timeout hint.
+
+## Checklist thiết kế
+
+Trước khi thêm một lock, hãy viết một câu mô tả invariant cần bảo vệ. Với tồn kho, câu đó là “không chấp nhận giữ hàng nhiều hơn lượng có thể bán”, không phải “method này phải có `@Transactional`”.
+
+- [ ] Xác định invariant nằm trên một row, nhiều row hay nhiều hệ thống.
+- [ ] Liệt kê mọi writer có thể thay đổi dữ liệu liên quan.
+- [ ] Kiểm tra xem một atomic conditional statement hoặc constraint đã giải quyết được phần cốt lõi chưa.
+- [ ] Nếu dùng optimistic locking, giữ expected version từ đúng lượt đọc và kiểm tra ngay trong lần ghi.
+- [ ] Nếu dùng pessimistic locking, lấy lock trước quyết định phụ thuộc dữ liệu và giữ transaction ngắn.
+- [ ] Thống nhất thứ tự lấy lock khi đụng nhiều resource.
+- [ ] Quy định zero rows, conflict, hết hàng và resource không tồn tại được trả về thế nào.
+- [ ] Đặt retry ngoài transaction attempt, có backoff, giới hạn và deadline.
+- [ ] Bảo vệ request gửi lại bằng idempotency; không trộn side effect ngoài database vào vùng giữ lock.
+- [ ] Kiểm chứng bằng ít nhất hai connection trên đúng engine và isolation đang dùng.
+
+Một lựa chọn khởi đầu thực tế cho bài toán trong bài là atomic conditional update để giữ hàng, cộng transaction cho reservation và idempotency cho request. Thêm expected version khi thao tác còn có nghĩa “chỉ chấp nhận nếu bản tôi đã xem chưa thay đổi”. Chuyển sang explicit row lock khi quyết định thật sự cần một vùng đọc–kiểm tra–ghi nhiều bước được bảo vệ.
+
+## Tài liệu tham khảo và bài liên quan
+
+Các tài liệu chính thức dùng để đối chiếu cơ chế và giới hạn:
+
+- [PostgreSQL 18 — Transaction Isolation](https://www.postgresql.org/docs/18/transaction-iso.html): snapshot, kiểm tra lại điều kiện ở `READ COMMITTED`, `REPEATABLE READ` và `SERIALIZABLE`.
+- [PostgreSQL 18 — Explicit Locking](https://www.postgresql.org/docs/18/explicit-locking.html): row lock mode, deadlock và thời gian giữ lock.
+- [PostgreSQL 18 — SELECT](https://www.postgresql.org/docs/18/sql-select.html): locking clause, `NOWAIT` và `SKIP LOCKED`.
+- [MySQL 8.4 — InnoDB Locking Reads](https://dev.mysql.com/doc/refman/8.4/en/innodb-locking-reads.html): locking read, consistent read và các tùy chọn không chờ.
+- [MySQL 8.4 — Locks Set by Different SQL Statements](https://dev.mysql.com/doc/refman/8.4/en/innodb-locks-set.html): ảnh hưởng của index và phạm vi quét đến lock.
+- [Jakarta Persistence 3.2 Specification](https://jakarta.ee/specifications/persistence/3.2/jakarta-persistence-spec-3.2.html): versioned entity, lock mode và bulk update.
+- [Jakarta Persistence — OptimisticLockException](https://jakarta.ee/specifications/persistence/3.2/apidocs/jakarta.persistence/jakarta/persistence/OptimisticLockException.html): thời điểm exception có thể xuất hiện và trạng thái rollback của transaction.
+
+<Cards>
+  <Card
+    title="Long-running transaction"
+    href="/database/05-long-running-transaction"
+    description="Thu hẹp transaction boundary để không giữ lock và connection trong lúc chờ việc ngoài database."
+  />
+  <Card
+    title="Index trên nullable column"
+    href="/database/02-index-on-nullable-column"
+    description="Hiểu cách query và index tương tác trước khi đánh giá tốc độ truy cập dữ liệu."
+  />
+  <Card
+    title="Resumable Excel import"
+    href="/system-design/06-resumable-excel-import"
+    description="Áp dụng claim job, recovery và idempotency vào một workflow chạy dài."
+  />
+</Cards>
