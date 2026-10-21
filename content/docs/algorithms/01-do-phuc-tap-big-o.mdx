@@ -1,886 +1,524 @@
 ---
-title: "Từ O(n²) xuống O(n), nhưng RAM tăng lên — có đáng không?"
-description: "Học cách phân tích time complexity, space complexity và lựa chọn time–space trade-off qua code Java, recursion, collection và các tình huống thực tế."
+title: "Độ phức tạp thuật toán: Big O, thời gian và bộ nhớ"
+description: "Học cách xác định kích thước đầu vào, đếm công việc, phân tích vòng lặp và đệ quy, rồi lựa chọn thuật toán theo time và space complexity."
 ---
 
-## Câu hỏi
+Một đoạn code kiểm tra dữ liệu trùng có thể chạy ổn với 100 phần tử, nhưng trở nên quá chậm khi mảng có một triệu phần tử. Trước khi đổi máy hoặc tối ưu từng dòng, bạn cần nhìn vào cách lượng công việc tăng theo dữ liệu. So sánh mọi cặp phần tử và duyệt mảng một lần là hai cách giải cùng bài toán, nhưng chúng tăng chi phí rất khác nhau.
 
-> **Cho một hàm xử lý `n` phần tử: làm thế nào bạn xác định chính xác time complexity và space complexity, kể cả chi phí ẩn trong collection, recursion và output? Nếu có thể giảm thời gian từ `O(n²)` xuống expected `O(n)` bằng cách dùng thêm `O(n)` bộ nhớ, bạn sẽ quyết định thế nào?**
+Bài này đi từ việc đếm những thao tác cụ thể đến cách dùng Big O để mô tả tốc độ tăng trưởng. Sau đó, bạn sẽ áp dụng cùng một cách suy luận cho vòng lặp, binary search, đệ quy và bộ nhớ. Các ví dụ dùng JavaScript, nhưng cách phân tích áp dụng được cho những ngôn ngữ khác.
 
----
+<Callout type="info" title="Kiến thức cần có">
+Bạn chỉ cần đọc được hàm, mảng, vòng lặp và lời gọi đệ quy. Các con số trong bảng là số thao tác của mô hình minh họa, không phải kết quả benchmark hay thời gian chạy đo được.
+</Callout>
 
-## Dành cho level
+## Mục lục
 
-`Mid` `Senior`
+- [Từ code đến mô hình chi phí](#từ-code-đến-mô-hình-chi-phí)
+  - [Xác định kích thước đầu vào](#xác-định-kích-thước-đầu-vào)
+  - [Chọn thao tác để đếm](#chọn-thao-tác-để-đếm)
+- [Big O và các ký hiệu tăng trưởng](#big-o-và-các-ký-hiệu-tăng-trưởng)
+  - [Cận trên và cận chặt](#cận-trên-và-cận-chặt)
+  - [Bỏ hệ số và số hạng nhỏ](#bỏ-hệ-số-và-số-hạng-nhỏ)
+- [Best case, worst case và average case](#best-case-worst-case-và-average-case)
+- [Các mức tăng trưởng thường gặp](#các-mức-tăng-trưởng-thường-gặp)
+- [Phân tích vòng lặp bằng tổng số lần chạy](#phân-tích-vòng-lặp-bằng-tổng-số-lần-chạy)
+  - [Các đoạn nối tiếp và hai đầu vào độc lập](#các-đoạn-nối-tiếp-và-hai-đầu-vào-độc-lập)
+  - [Vòng lặp tam giác](#vòng-lặp-tam-giác)
+  - [Vòng lặp giảm một nửa](#vòng-lặp-giảm-một-nửa)
+  - [Hai con trỏ không quay lại](#hai-con-trỏ-không-quay-lại)
+- [Binary search và chi phí chuẩn bị](#binary-search-và-chi-phí-chuẩn-bị)
+- [Đệ quy: đếm cả cây lời gọi](#đệ-quy-đếm-cả-cây-lời-gọi)
+  - [Chia đôi nhưng xử lý cả hai nửa](#chia-đôi-nhưng-xử-lý-cả-hai-nửa)
+  - [Lặp lại cùng một bài toán con](#lặp-lại-cùng-một-bài-toán-con)
+- [Amortized cost khác average case](#amortized-cost-khác-average-case)
+- [Space complexity và bộ nhớ sống đồng thời](#space-complexity-và-bộ-nhớ-sống-đồng-thời)
+  - [Input, output và auxiliary space](#input-output-và-auxiliary-space)
+  - [Call stack và bản sao dữ liệu](#call-stack-và-bản-sao-dữ-liệu)
+- [Một bài toán hoàn chỉnh: phát hiện phần tử trùng](#một-bài-toán-hoàn-chỉnh-phát-hiện-phần-tử-trùng)
+- [Kiểm chứng bằng bộ đếm thay vì đoán](#kiểm-chứng-bằng-bộ-đếm-thay-vì-đoán)
+- [Quy trình phân tích để dùng lại](#quy-trình-phân-tích-để-dùng-lại)
 
-Ở mức Mid, interviewer muốn bạn định nghĩa đúng `n`, phân tích được loop nối tiếp, loop lồng nhau, binary search, collection và recursion stack. Bạn phải luôn đưa ra **cả time lẫn auxiliary space**, thay vì chỉ nhìn số vòng `for`.
+## Từ code đến mô hình chi phí
 
-Ở mức Senior, interviewer muốn nghe rõ worst case, expected và amortized complexity; phân biệt peak memory với tổng allocation; đồng thời biết đặt Big O vào constraint thật như kích thước input, memory limit, p99 latency và chi phí GC.
+Giả sử bạn cần cộng các số trong một mảng:
 
-**Điểm cộng:** trình bày được time–space trade-off bằng một phương án thay thế cụ thể, rồi đề xuất benchmark/profile thay vì kết luận chỉ từ ký hiệu Big O.
-
----
-
-## Cốt lõi cần nhớ
-
-**Time complexity đo tốc độ tăng của lượng công việc; space complexity đo tốc độ tăng của bộ nhớ cần dùng đồng thời.** Cả hai đều phải được biểu diễn theo input đã định nghĩa rõ, ví dụ `n` records, `V` vertices hay `L` characters.
-
-**Không đếm syntax, hãy đếm operation thật.** Một vòng `for` có `List.contains()` bên trong có thể là `O(n × m)`; một hàm không tạo collection vẫn có thể dùng `O(n)` stack vì recursion.
-
-**Space thường là peak memory, không phải tổng số byte từng được allocate trong suốt quá trình chạy.** Một object tạm được tạo rồi giải phóng ở mỗi iteration có thể tạo `O(n)` tổng allocation nhưng chỉ cần `O(1)` peak live space.
-
-**Big O giúp loại phương án không chịu được scale; constraint và benchmark quyết định phương án nên dùng.** Giảm time bằng hash table, cache hoặc memoization thường phải đổi bằng memory, preprocessing và độ phức tạp vận hành.
-
----
-
-## Câu trả lời mẫu
-
-> “Tôi sẽ bắt đầu bằng việc định nghĩa input, chẳng hạn `n` là số phần tử trong danh sách, rồi xác định operation nào thực sự lặp lại. Với time complexity, tôi mở cả chi phí ẩn trong method call: một loop `n` lần gọi `List.contains()` trên list dài `m` có worst-case time `O(n × m)`, không phải `O(n)`. Với space complexity, tôi nói rõ đang tính auxiliary space, sau đó kiểm tra collection tạo thêm, bản copy dữ liệu, output và maximum recursion depth. Nếu chuyển list dùng để lookup thành `HashSet`, tôi phải tính cả expected `O(m)` để build set, expected `O(n)` để scan, nên tổng là expected `O(n + m)` và đổi lại dùng thêm `O(m)` memory. Tôi không kết luận phương án hash luôn tốt hơn: nếu input tối đa chỉ có vài phần tử hoặc service bị giới hạn heap, cách scan đơn giản có thể hợp lý hơn. Tôi sẽ dùng Big O để dự đoán đường tăng trưởng, rồi benchmark trên kích thước và phân bố dữ liệu gần production, đồng thời đo latency, peak memory và GC.”
-
----
-
-## Phân tích chi tiết
-
-### 1. Bài toán thực tế: nhanh hơn nhưng tốn RAM hơn
-
-Giả sử cần kiểm tra một danh sách có phần tử trùng hay không.
-
-Cách đầu tiên so sánh từng cặp:
-
-```java
-static boolean hasDuplicate(List<String> values) {
-    for (int i = 0; i < values.size(); i++) {
-        for (int j = i + 1; j < values.size(); j++) {
-            if (values.get(i).equals(values.get(j))) {
-                return true;
-            }
-        }
-    }
-    return false;
+```javascript
+function sum(values) {
+  let total = 0;
+  for (let i = 0; i < values.length; i++) {
+    total += values[i];
+  }
+  return total;
 }
 ```
 
-Nếu không có phần tử trùng, số lần so sánh là:
+Mảng có 10 phần tử thì dòng cộng chạy 10 lần. Mảng có 1.000 phần tử thì dòng đó chạy 1.000 lần. Đặt `n = values.length`, bạn có thể viết số phép cộng là `A(n) = n`.
 
-```text
-(n - 1) + (n - 2) + ... + 1
-= n(n - 1) / 2
-= Θ(n²)
-```
+**Time complexity mô tả lượng công việc tăng thế nào khi đầu vào lớn lên.** Nó không trực tiếp cho biết hàm mất bao nhiêu mili giây. Cùng một thuật toán vẫn có thời gian thực khác nhau trên hai máy, hai runtime hoặc hai cách bố trí dữ liệu trong bộ nhớ.
 
-Kết quả phân tích:
+### Xác định kích thước đầu vào
 
-- **Worst-case time:** `O(n²)`.
-- **Best-case time:** `O(1)` nếu cặp đầu tiên đã trùng.
-- **Auxiliary space:** `O(1)` vì chỉ dùng các biến `i`, `j`.
+Trong ví dụ trên, `n` là số phần tử. Với một hàm nhận hai mảng, bạn có thể cần `n` và `m` riêng biệt. Với đồ thị, thường dùng `V` cho số đỉnh và `E` cho số cạnh.
 
-Có thể đổi sang `HashSet`:
-
-```java
-static boolean hasDuplicate(List<String> values) {
-    Set<String> seen = new HashSet<>();
-
-    for (String value : values) {
-        if (!seen.add(value)) {
-            return true;
-        }
-    }
-    return false;
-}
-```
-
-Kết quả mới:
-
-- **Expected time:** `O(n)` nếu hash phân bố đủ tốt.
-- **Auxiliary space:** `O(n)` trong trường hợp phải lưu toàn bộ phần tử.
-- **Worst-case behavior:** phụ thuộc collision và implementation của hash table.
-
-Đây là một **time–space trade-off**: giảm lượng so sánh bằng cách giữ thêm trạng thái trong memory.
-
-| Phương án | Time | Auxiliary space | Phù hợp khi |
-| --- | --- | --- | --- |
-| So sánh từng cặp | Worst `O(n²)` | `O(1)` | `n` nhỏ, memory rất hạn chế |
-| Dùng `HashSet` | Expected `O(n)` | `O(n)` | `n` có thể lớn, membership lookup là hot path |
-| Sort rồi scan | `O(n log n)` | Tùy cách sort/copy | Cần deterministic bound hoặc muốn tránh hash table |
-
-> [!IMPORTANT]
-> Từ “expected” không phải trang trí. `HashSet` thường cho lookup expected `O(1)`, nhưng không nên mô tả là tuyệt đối `O(1)` cho mọi key và mọi implementation.
-
----
-
-### 2. Time complexity là gì?
-
-Time complexity mô tả **lượng công việc tăng như thế nào khi input lớn lên**. Nó không trực tiếp cho biết chương trình chạy bao nhiêu millisecond.
-
-Nếu một hàm có số operation gần đúng:
-
-```text
-T(n) = 4n² + 10n + 200
-```
-
-Khi `n` đủ lớn, `n²` tăng nhanh hơn `n` và constant `200`. Ta mô tả growth rate bằng `Θ(n²)`; trong giao tiếp thông thường, nhiều người nói “Big O là `O(n²)`”.
-
-Big O cố ý bỏ qua:
-
-- Constant factor, ví dụ `4` trong `4n²`.
-- Thành phần bậc thấp, ví dụ `10n` khi đã có `n²`.
-- Đơn vị thời gian cụ thể.
-- Chi tiết CPU, JVM hay operating system.
-
-Nhưng các yếu tố đó vẫn quan trọng trong production. Hai hàm cùng `O(n)` có thể khác nhau rất lớn nếu một hàm thực hiện phép cộng trong RAM còn hàm kia gửi `n` HTTP requests.
-
-#### Trước khi nói `O(...)`, phải trả lời ba câu
-
-1. **Input nào tăng?** `n` là số item, số byte hay số node?
-2. **Operation nào đang được tính?** Comparison, hash lookup, byte copy hay network call?
-3. **Case nào đang xét?** Best, average, worst, expected hay amortized?
-
-Ví dụ một câu trả lời đầy đủ:
-
-```text
-Với n user và m quyền, worst-case method thực hiện n × m phép so sánh,
-nên time là O(n × m). Method chỉ dùng các biến tạm cố định,
-nên auxiliary space là O(1), chưa tính output.
-```
-
----
-
-### 3. Space complexity là gì?
-
-Space complexity mô tả **lượng memory cần dùng đồng thời** khi input tăng. Khi trả lời, cần nói rõ convention đang dùng.
-
-#### Total space và auxiliary space
-
-- **Total space:** input + output + memory được thuật toán tạo thêm.
-- **Auxiliary space:** memory bổ sung ngoài input; output có thể được tách riêng nếu đã nói rõ.
-
-Trong interview, “space complexity” thường ám chỉ auxiliary space. Câu trả lời an toàn là:
-
-> “Auxiliary space là `O(n)` cho hash table; output space là `O(k)` nếu hàm trả `k` kết quả.”
-
-#### Những phần memory thường bị bỏ quên
-
-| Nguồn memory | Ví dụ | Cách tính |
-| --- | --- | --- |
-| Biến scalar | `int left`, `long sum` | Thường `O(1)` |
-| Collection tạo thêm | `HashSet`, `HashMap`, queue | Theo số entry sống đồng thời |
-| Bản copy input | `Arrays.copyOf(values, n)` | `O(n)` |
-| Recursion stack | Một frame cho mỗi recursive call đang active | Theo maximum depth |
-| Output | List chứa `k` kết quả | `O(k)` output space |
-| Buffer | `StringBuilder`, byte buffer | Theo capacity/độ dài lớn nhất |
-| Memoization | Cache một kết quả cho mỗi state | Theo số state được lưu |
-
-#### Peak live memory khác tổng allocation
-
-Xét đoạn code:
-
-```java
-for (Record record : records) {
-    String normalized = normalize(record);
-    send(normalized);
-}
-```
-
-Giả sử mỗi `normalized` có kích thước bị chặn và không bị giữ sau `send()`:
-
-- Có `n` strings được tạo trong cả vòng đời hàm.
-- **Total allocation** có thể tăng `O(n)`.
-- Chỉ một string cần sống tại một thời điểm, nên **peak live auxiliary space** có thể là `O(1)` theo số records.
-
-Dù Big O peak space là `O(1)`, allocation rate vẫn có thể làm Garbage Collector (GC) hoạt động nhiều và tăng p99 latency. Vì vậy production analysis nên tách hai metric:
-
-```text
-Peak live memory: O(1) theo n
-Total allocation: O(n)
-```
-
----
-
-### 4. Quy trình phân tích time và space
-
-Dùng cùng một quy trình cho loop, recursion và library call:
-
-```d2 title="4. Quy trình phân tích time và space"
-direction: down
-A: "Định nghĩa input: n, m, V, E, k"
-B: "Chọn operation cần đếm"
-C: "Mở chi phí của method/library call"
-D: "Lập biểu thức time trước khi rút gọn"
-E: "Xác định best, worst, expected hoặc amortized"
-F: "Tính peak auxiliary space"
-G: "Tách output space nếu cần"
-H: "Nêu trade-off và kiểm chứng bằng benchmark"
-A -> B
-B -> C
-C -> D
-D -> E
-E -> F
-F -> G
-G -> H
-```
-
-#### Bước 1 — Định nghĩa input
-
-| Bài toán | Biến nên dùng |
+| Đầu vào | Đại lượng nên nêu rõ |
 | --- | --- |
-| Duyệt array | `n` = số phần tử |
-| So sánh hai list độc lập | `n`, `m` = kích thước hai list |
-| Duyệt matrix | `r`, `c` = số row và column |
-| Duyệt graph | `V`, `E` = số vertex và edge |
-| Xử lý chuỗi | `L` = tổng số character/code unit |
-| Trả kết quả tìm kiếm | `n` = input, `k` = số kết quả |
+| Một mảng | `n`: số phần tử |
+| Hai chuỗi | `n`, `m`: độ dài từng chuỗi |
+| Ma trận | `r`, `c`: số hàng và số cột |
+| Đồ thị dạng adjacency list | `V`, `E`: số đỉnh và số cạnh |
+| Số nguyên có độ dài tùy ý | `b`: số bit biểu diễn số đó |
 
-Không được tự ý biến `O(n + m)` thành `O(n)` khi `m` tăng độc lập. Tương tự, matrix `r × c` có time `O(r × c)`, không mặc định là `O(n²)`.
+Đừng mặc định giá trị của một số chính là kích thước đầu vào. Số `1.000.000` chỉ cần khoảng 20 bit để biểu diễn. Một vòng lặp chạy từ 1 đến giá trị đó là tuyến tính theo **giá trị**, nhưng không tuyến tính theo **số bit** của đầu vào.
 
-#### Bước 2 — Chọn operation
+### Chọn thao tác để đếm
 
-Đừng chỉ nói “hàm chạy `n` lần”. Hãy nói nó thực hiện `n` comparisons, `n` hash lookups hay `n` database round trips. Cùng `O(n)`, nhưng chi phí thực tế hoàn toàn khác nhau.
+Với hàm `sum`, đếm phép cộng đủ để nhận ra tốc độ tăng trưởng. Nếu đếm thêm truy cập mảng, tăng biến và kiểm tra điều kiện, bạn sẽ nhận một biểu thức dạng `an + b`. Các hệ số thay đổi, nhưng số lần xử lý mỗi phần tử vẫn tỷ lệ với `n`.
 
-#### Bước 3 — Mở chi phí ẩn
+Trong bài này, mình dùng mô hình đơn giản: truy cập một phần tử mảng theo index, gán biến, cộng và so sánh số có kích thước cố định đều có chi phí hằng số. Mảng được giả định là mảng thông thường, không có getter hay proxy chạy thêm code khi truy cập.
 
-```java
-for (String id : requestedIds) {       // n lần
-    if (existingIds.contains(id)) {    // List scan tối đa m phần tử
-        process(id);
-    }
-}
-```
+Giả định này cần được thay khi dữ liệu thay đổi. So sánh hai chuỗi dài có thể phải đọc nhiều ký tự. Cộng hai số nguyên tùy ý lớn phải xử lý nhiều bit. Khi phân tích code xử lý chuỗi hoặc `BigInt`, bạn cần tính cả những độ dài đó, không coi mọi toán tử là một thao tác hằng số.
 
-Nếu `existingIds` là `List`, worst-case time là `O(n × m)`. Nếu là `HashSet`, loop có expected time `O(n)`, nhưng phải cộng chi phí build set `O(m)` nếu set được tạo trong chính request này.
+## Big O và các ký hiệu tăng trưởng
 
-#### Bước 4 — Lập biểu thức rồi mới rút gọn
+### Cận trên và cận chặt
+
+Nếu lượng công việc là `T(n) = 3n + 7`, thì với `n >= 7` ta có:
 
 ```text
-Build HashSet: expected O(m)
-Scan n items × expected O(1) lookup: expected O(n)
-Tổng: expected O(n + m)
-Auxiliary space: O(m)
+3n <= T(n) <= 4n
 ```
 
-Viết đầy đủ trước giúp tránh bỏ nhầm một input độc lập hoặc một operation đắt.
+Từ một ngưỡng trở đi, `T(n)` bị kẹp giữa hai bội số cố định của `n`. Đây là cách nói chính xác rằng nó tăng tuyến tính.
 
-#### Bước 5 — Tính peak memory
+Ba ký hiệu thường dùng mô tả các kiểu giới hạn khác nhau:
 
-Kiểm tra collection, copy, buffer, output và maximum recursion depth. Không cộng tất cả allocation nếu chúng không cùng sống một lúc.
+| Ký hiệu | Ý nghĩa | Với `T(n) = 3n + 7` |
+| --- | --- | --- |
+| `O(f(n))` | Cận trên: từ một ngưỡng trở đi, `T(n) <= c × f(n)` với một hằng số dương `c` | `T(n)` thuộc `O(n)` |
+| `Ω(f(n))` | Cận dưới: từ một ngưỡng trở đi, `T(n) >= c × f(n)` với một hằng số dương `c` | `T(n)` thuộc `Ω(n)` |
+| `Θ(f(n))` | Cận chặt: có cả cận trên và cận dưới cùng bậc | `T(n)` thuộc `Θ(n)` |
 
----
+Trong các định nghĩa này, hằng số và ngưỡng không được phụ thuộc vào `n`. Phân tích như vậy gọi là **phân tích tiệm cận**: tập trung vào xu hướng khi kích thước đầu vào đủ lớn.
 
-### 5. Các growth rate cần nhận ra
+Về toán học, `3n + 7` cũng thuộc `O(n²)`. Cận trên đó đúng nhưng quá rộng, giống như nói một chuyến đi 5 km dài không quá 1.000 km. Khi mô tả một thuật toán, hãy tìm cận chặt nhất bạn chứng minh được. Bài này dùng `Θ` khi đã xác định được đúng bậc tăng trưởng; `O` dùng khi chỉ cần một bảo đảm cận trên.
 
-| Complexity | Khi input tăng gấp đôi | Pattern thường gặp |
-| --- | ---: | --- |
-| `O(1)` | Gần như không đổi | Array access theo index |
-| `O(log n)` | Chỉ tăng thêm một ít | Mỗi bước chia đôi search space |
-| `O(n)` | Khoảng 2 lần | Scan toàn bộ input |
-| `O(n log n)` | Hơn 2 lần một chút | Merge sort, comparison sort tốt |
-| `O(n²)` | Khoảng 4 lần | So sánh mọi cặp |
-| `O(n³)` | Khoảng 8 lần | Ba chiều cùng tăng |
-| `O(2ⁿ)` | Tăng cực nhanh | Thử mọi subset |
-| `O(n!)` | Tăng nhanh hơn exponential | Thử mọi permutation |
+### Bỏ hệ số và số hạng nhỏ
 
-Bảng operation count dưới đây chỉ để cảm nhận growth, không phải thời gian chạy:
+Nếu một thuật toán làm `2n² + 5n + 20` thao tác, số hạng `n²` quyết định bậc tăng trưởng. Khi `n` tăng gấp đôi, phần bậc hai tăng gấp bốn, còn phần tuyến tính chỉ tăng gấp đôi. Vì thế tổng có độ phức tạp `Θ(n²)`.
 
-| `n` | `log₂ n` | `n` | `n log₂ n` | `n²` | `2ⁿ` |
-| ---: | ---: | ---: | ---: | ---: | ---: |
-| 10 | ~3,3 | 10 | ~33 | 100 | 1.024 |
-| 100 | ~6,6 | 100 | ~664 | 10.000 | Rất lớn |
-| 1.000 | ~10 | 1.000 | ~10.000 | 1.000.000 | Không thực tế |
-| 1.000.000 | ~20 | 1.000.000 | ~20.000.000 | 10¹² | Không thực tế |
-
-> [!NOTE]
-> `O(n²)` không tự động là “xấu” nếu business rule chặn `n ≤ 10`. Ngược lại, `O(n)` remote calls vẫn có thể là bottleneck nghiêm trọng. Luôn đặt complexity cạnh constraint thật.
-
----
-
-### 6. Quy tắc tính time complexity khi đọc loop
-
-#### Loop nối tiếp: cộng
-
-```java
-for (Order order : orders) {       // O(n)
-    validate(order);
-}
-
-for (Rule rule : rules) {          // O(m)
-    validate(rule);
-}
-```
-
-Tổng time là `O(n + m)`. Nếu cả hai loop đều chạy trên cùng input `n`, tổng là `O(2n) = O(n)`.
-
-Auxiliary space vẫn có thể là `O(1)` nếu `validate()` không giữ thêm dữ liệu và không tính output.
-
-#### Loop lồng nhau: thường nhân
-
-```java
-for (User user : users) {          // n
-    for (Role role : roles) {      // m cho mỗi user
-        check(user, role);
-    }
-}
-```
-
-Time là `O(n × m)`. Nếu `n = m`, có thể viết `O(n²)`.
-
-#### Inner loop phụ thuộc outer loop: dùng summation
-
-```java
-for (int i = 0; i < n; i++) {
-    for (int j = 0; j < i; j++) {
-        consume(i, j);
-    }
-}
-```
-
-Số lần gọi `consume()` là:
+Các phép rút gọn thường gặp:
 
 ```text
-0 + 1 + 2 + ... + (n - 1) = n(n - 1) / 2 = Θ(n²)
+7n + 100           thuộc Θ(n)
+3n² + n           thuộc Θ(n²)
+n log₂(n) + n     thuộc Θ(n log n)
+50                thuộc Θ(1)
 ```
 
-#### Mỗi bước nhân hoặc chia: logarithmic
+Bỏ hệ số **không có nghĩa hệ số không quan trọng trong thực tế**. Một cách làm `100n` thao tác có thể chậm hơn cách làm `n²` thao tác khi `n` nhỏ. Big O giúp chọn hướng tăng trưởng phù hợp; benchmark giúp chọn implementation phù hợp với dữ liệu và môi trường cụ thể.
 
-```java
-for (int size = 1; size < n; size *= 2) {
-    process(size);
+## Best case, worst case và average case
+
+Cùng kích thước mảng, vị trí phần tử cần tìm có thể làm số thao tác thay đổi:
+
+```javascript
+function indexOf(values, target) {
+  for (let i = 0; i < values.length; i++) {
+    if (values[i] === target) return i;
+  }
+  return -1;
 }
 ```
 
-Sau `k` bước, `size = 2ᵏ`. Loop dừng khi `2ᵏ ≥ n`, nên time là `O(log n)`.
+Nếu `target` nằm ở đầu mảng không rỗng, hàm chỉ cần một lần so sánh. Nếu nó nằm cuối hoặc không tồn tại, hàm cần `n` lần so sánh.
 
-#### Hai pointer không có nghĩa là quadratic
+- **Best case:** trường hợp ít công việc nhất trong các đầu vào cùng kích thước. Ở đây là `Θ(1)`.
+- **Worst case:** trường hợp nhiều công việc nhất trong các đầu vào cùng kích thước. Ở đây là `Θ(n)`.
+- **Average case:** chi phí kỳ vọng theo một mô hình xác suất được nêu rõ.
 
-```java
-int left = 0;
-int right = values.length - 1;
+Ví dụ, giả sử phần tử chắc chắn tồn tại và có xác suất bằng nhau ở mỗi vị trí. Số lần so sánh trung bình là `(1 + 2 + ... + n) / n = (n + 1) / 2`, nên average case vẫn là `Θ(n)`.
 
-while (left < right) {
-    if (shouldMoveLeft(values[left])) {
-        left++;
+Nếu không có giả định về phân bố dữ liệu, bạn chưa có cơ sở để kết luận average case. Khi không nói gì thêm, các phân tích vòng lặp trong bài sẽ xét worst case.
+
+<Callout type="warn" title="Big O không đồng nghĩa với worst case">
+Big O là ký hiệu cận trên, còn worst case là cách chọn trường hợp đầu vào. Bạn có thể mô tả cả best case lẫn worst case bằng Big O. Tương tự, `Ω` không tự động có nghĩa là best case.
+</Callout>
+
+## Các mức tăng trưởng thường gặp
+
+Bảng dưới thay trực tiếp `n = 8` và `n = 16` vào từng hàm. Đây là so sánh toán học, không khẳng định mọi thuật toán cùng bậc đều chạy đúng số thao tác trong bảng.
+
+| Bậc tăng trưởng | Tên thường gọi | `n = 8` | `n = 16` | Ví dụ điển hình |
+| --- | --- | ---: | ---: | --- |
+| `1` | Constant | 1 | 1 | Đọc một index hợp lệ |
+| `log₂ n` | Logarithmic | 3 | 4 | Thu hẹp khoảng tìm kiếm còn một nửa mỗi lượt |
+| `n` | Linear | 8 | 16 | Duyệt toàn bộ mảng một lần |
+| `n log₂ n` | Linearithmic | 24 | 64 | Merge sort với bước merge tuyến tính |
+| `n²` | Quadratic | 64 | 256 | Duyệt mọi cặp có thứ tự |
+| `2ⁿ` | Exponential | 256 | 65.536 | Liệt kê các tập con, chỉ tính số tập |
+| `n!` | Factorial | 40.320 | 20.922.789.888.000 | Liệt kê các hoán vị, chỉ tính số hoán vị |
+
+Logarithm xuất hiện khi bạn liên tục chia dữ liệu cho một hệ số cố định. Với `n = 1.024`, chia đôi 10 lần thì còn 1. Đổi cơ số log chỉ làm thay đổi một hệ số hằng, nên thường viết `O(log n)` thay vì ghi cơ số.
+
+Với một triệu phần tử, so sánh mỗi cặp khác nhau đã cần `n(n - 1) / 2`, tức gần 500 tỷ phép so sánh trong worst case. Đây là lý do nên xem xét thuật toán trước khi cố giảm vài phép gán.
+
+Một giới hạn khác đến từ kích thước kết quả. Có `2ⁿ` tập con của một tập `n` phần tử, nhưng nếu bạn tạo một mảng riêng cho từng tập con, tổng số phần tử phải ghi là `n × 2ⁿ⁻¹` với `n >= 1`. Khi đó việc ghi đầy đủ output đã tốn `Θ(n × 2ⁿ)` công việc. Chỉ đếm số kết quả chưa chắc đã đếm đủ chi phí tạo kết quả.
+
+## Phân tích vòng lặp bằng tổng số lần chạy
+
+Cách đáng tin cậy nhất là chọn một thao tác trong thân vòng lặp và đếm tổng số lần nó được thực hiện. Nhìn số lượng từ khóa `for` thôi chưa đủ.
+
+### Các đoạn nối tiếp và hai đầu vào độc lập
+
+Hai vòng lặp chạy lần lượt thì chi phí cộng lại:
+
+```javascript
+function sumBoth(left, right) {
+  let total = 0;
+  for (const value of left) total += value;
+  for (const value of right) total += value;
+  return total;
+}
+```
+
+Đặt `n = left.length`, `m = right.length`. Hàm làm `n + m` phép cộng, nên time là `Θ(n + m)` và auxiliary space là `Θ(1)` — phần bộ nhớ phụ ngoài input và output, sẽ được giải thích kỹ ở phần sau.
+
+Nếu hai vòng lặp lồng nhau và vòng trong luôn chạy hết `right`, mỗi phần tử của `left` đi với `m` phần tử của `right`. Tổng là `n × m`, nên time là `Θ(nm)` khi cả hai mảng không rỗng. Không nên rút thành `Θ(n²)` trừ khi đã biết quan hệ giữa `m` và `n`. Tính cả trường hợp mảng rỗng và chi phí điều khiển vòng ngoài, có thể ghi `Θ(1 + n + nm)` cho kiểu lặp đó.
+
+### Vòng lặp tam giác
+
+Để kiểm tra mỗi cặp index đúng một lần, vòng trong thường bắt đầu từ `i + 1`. Walkthrough dưới đây tách các bước đếm; nó không tự thực thi code.
+
+```code-walkthrough
+title: Đếm các cặp index khác nhau
+language: javascript
+snapshots:
+  - id: pairs
+    title: countPairs.js
+    code: |-
+      function countPairs(values) {
+        let count = 0;
+        for (let i = 0; i < values.length; i++) {
+          for (let j = i + 1; j < values.length; j++) {
+            count++;
+          }
+        }
+        return count;
+      }
+steps:
+  - id: outer
+    snapshot: pairs
+    title: Cố định index đầu tiên
+    description: Vòng ngoài chọn i từ 0 đến n - 1. Chưa thể nhân n với n vì số lượt của vòng trong phụ thuộc vào i.
+    ranges: [[3, 3]]
+  - id: inner
+    snapshot: pairs
+    title: Đếm những index còn lại
+    description: Với mỗi i, j chạy n - i - 1 lần. Khi n bằng 5, các lượt tương ứng là 4, 3, 2, 1 và 0.
+    ranges: [[4, 5]]
+  - id: total
+    snapshot: pairs
+    title: Cộng toàn bộ lượt chạy
+    description: count tăng tổng cộng n(n - 1)/2 lần. Cộng cả điều khiển vòng lặp, time vẫn là Θ(n²), còn bộ nhớ phụ là Θ(1).
+    ranges: [[3, 8]]
+```
+
+Tổng số lần tăng `count` là:
+
+```text
+(n - 1) + (n - 2) + ... + 1 + 0 = n(n - 1) / 2
+```
+
+Vòng trong ngắn dần, nhưng tổng vẫn chứa số hạng bậc hai. Việc chỉ xét nửa số cặp giảm hệ số, không đổi bậc tăng trưởng.
+
+### Vòng lặp giảm một nửa
+
+Một vòng lặp đơn như dưới đây chỉ có `Θ(log n)` lượt với số nguyên dương `n`:
+
+```javascript
+function halvingRounds(n) {
+  let rounds = 0;
+  for (let size = n; size > 1; size = Math.floor(size / 2)) {
+    rounds++;
+  }
+  return rounds;
+}
+```
+
+Với `n = 16`, các giá trị `size` đi vào thân vòng lặp là 16, 8, 4, 2. Sau 4 lượt, `size` bằng 1 và vòng lặp dừng.
+
+Nhưng thêm một vòng lặp bên trong không tự động biến nó thành `Θ(n log n)`:
+
+```javascript
+function shrinkingWork(n) {
+  let work = 0;
+  for (let size = n; size >= 1; size = Math.floor(size / 2)) {
+    for (let j = 0; j < size; j++) {
+      work++;
+    }
+  }
+  return work;
+}
+```
+
+Lần này số lượt của vòng trong là `n`, rồi khoảng `n/2`, rồi `n/4`. Với `n = 16`, tổng là `16 + 8 + 4 + 2 + 1 = 31`. Với mọi số nguyên dương `n`, tổng ít nhất là `n` và nhỏ hơn `2n`, nên time là `Θ(n)`.
+
+Ngược lại, nếu vòng trong luôn chạy `n` lần ở mỗi lượt chia đôi, tổng mới là `Θ(n log n)`. Điều quyết định là **tổng công việc qua các lượt**, không phải độ sâu lồng vòng lặp.
+
+### Hai con trỏ không quay lại
+
+Hai vòng lặp lồng nhau vẫn có thể chỉ duyệt mảng tuyến tính:
+
+```javascript
+// values đã tăng dần; trả về số giá trị phân biệt.
+function countDistinctSorted(values) {
+  let groups = 0;
+  let i = 0;
+  while (i < values.length) {
+    const current = values[i];
+    while (i < values.length && values[i] === current) {
+      i++;
+    }
+    groups++;
+  }
+  return groups;
+}
+```
+
+Biến `i` không được đặt lại khi bắt đầu một nhóm mới. Tổng cộng nó chỉ tăng từ 0 đến `n`, nên phần duyệt có time `Θ(n)` và auxiliary space `Θ(1)`. Phân tích này giả định các giá trị so sánh bằng nhau theo cách thông thường, chẳng hạn các số hữu hạn; `NaN` sẽ phá điều kiện tiến của ví dụ này.
+
+Đây cũng là cách suy luận cho nhiều thuật toán two pointers: đếm tổng số lần mỗi con trỏ tiến, thay vì nhân số lượt theo hình thức của code. Chi phí sắp xếp input, nếu cần, phải tính riêng.
+
+## Binary search và chi phí chuẩn bị
+
+Khi mảng đã sắp tăng dần, một phép so sánh ở giữa có thể loại bỏ gần nửa vùng còn lại:
+
+```javascript
+// values tăng dần, chứa các số hữu hạn.
+function binarySearch(values, target) {
+  let left = 0;
+  let right = values.length - 1;
+  while (left <= right) {
+    const mid = left + Math.floor((right - left) / 2);
+    if (values[mid] === target) return mid;
+    if (values[mid] < target) {
+      left = mid + 1;
     } else {
-        right--;
+      right = mid - 1;
     }
+  }
+  return -1;
 }
 ```
 
-Mỗi iteration làm khoảng cách giảm ít nhất một. Tổng số lần di chuyển của hai pointer không vượt quá `n`, nên time là `O(n)`, auxiliary space `O(1)`.
+Sau `k` lượt, số ứng viên còn lại xấp xỉ `n / 2ᵏ`. Để thu hẹp xuống cỡ một phần tử, cần khoảng `log₂ n` lượt. Do đó worst-case time là `Θ(log n)` với `n` đủ lớn, best case là `Θ(1)`, và auxiliary space là `Θ(1)`.
 
----
+Phần `Θ(log n)` này chỉ tính **tìm kiếm trên dữ liệu đã sắp xếp**, với truy cập index hằng số. Nếu mảng chưa có thứ tự và bạn chọn một thuật toán sort `Θ(n log n)` trước, tổng cho một lần tìm là `Θ(n log n)`, không phải `Θ(log n)`.
 
-### 7. Các bẫy time complexity ẩn trong API
+Mặc định, mình chọn linear search cho một lần tìm trên mảng chưa sắp xếp. Nếu có nhiều lần tìm trên dữ liệu ít thay đổi, chi phí sort có thể được dùng chung: với `q` lần tìm, cận trên tổng là `O(n log n + q log n)`, thay vì `O(qn)` khi duyệt lại từng lần. Việc tìm index theo thứ tự ban đầu hoặc cập nhật dữ liệu có thể đòi hỏi một cấu trúc khác; cần chốt yêu cầu trước khi chọn cách tiền xử lý.
 
-#### `contains()` trong loop
+## Đệ quy: đếm cả cây lời gọi
 
-```java
-for (Long userId : userIds) {              // n
-    if (allowedIds.contains(userId)) {      // List: O(m)
-        grant(userId);
-    }
-}
+Một hàm có độ sâu đệ quy `log n` chưa chắc có time `log n`. Độ sâu cho biết số lời gọi nối tiếp trên một nhánh. Time phải tính công việc của **tất cả lời gọi**.
+
+### Chia đôi nhưng xử lý cả hai nửa
+
+Merge sort chia mảng thành hai nửa, sắp xếp cả hai, rồi merge — trộn hai dãy đã sắp thành một dãy có thứ tự. Sơ đồ sau minh họa các bài toán con với `n = 4`; cạnh biểu thị việc chia, không biểu thị các nhánh chạy song song.
+
+```d2 interactive=false title="Merge sort: chia bài toán 4 phần tử thành các bài toán con"
+direction: down
+root: "4 phần tử"
+left_half: "2 phần tử bên trái"
+right_half: "2 phần tử bên phải"
+a: "1 phần tử A"
+b: "1 phần tử B"
+c: "1 phần tử C"
+d: "1 phần tử D"
+root -> left_half: Chia
+root -> right_half: Chia
+left_half -> a
+left_half -> b
+right_half -> c
+right_half -> d
 ```
 
-Nếu `allowedIds` là `List`, worst-case time là `O(n × m)`. Chuyển sang `HashSet` có thể đưa lookup về expected `O(1)`, nhưng cần thêm `O(m)` memory.
+Bước merge diễn ra khi các lời gọi con trả về. Ở tầng hai bài toán kích thước 2, tổng lượng dữ liệu cần merge là 4 phần tử. Ở tầng gốc, merge lại xử lý 4 phần tử. Số bài toán tăng khi đi xuống, nhưng kích thước mỗi bài toán giảm tương ứng.
 
-#### Sort rồi mới scan
-
-```java
-Arrays.sort(values);                       // O(n log n) điển hình
-for (int value : values) {                 // O(n)
-    consume(value);
-}
-```
-
-Tổng là:
+Với `n` là lũy thừa của 2 để dễ tính, ta có công thức truy hồi — chi phí của bài toán lớn viết theo chi phí các bài toán nhỏ:
 
 ```text
-O(n log n) + O(n) = O(n log n)
+T(n) = 2T(n/2) + Θ(n)
+T(1) = Θ(1)
 ```
 
-Loop cuối không xóa chi phí sort phía trước.
+Có `log₂ n` tầng merge, mỗi tầng có tổng công việc `Θ(n)`. Các lá cộng thêm `Θ(n)`, nên tổng time là `Θ(n log n)`. Làm tròn kích thước hai nửa khi `n` không phải lũy thừa của 2 không thay đổi kết luận này.
 
-#### String concatenation trong loop
+So với binary search, điểm khác biệt nằm ở số nhánh cần xử lý: binary search đi tiếp một nửa, merge sort xử lý cả hai nửa. Đừng chỉ thấy “chia đôi” rồi kết luận `O(log n)`.
 
-```java
-String result = "";
-for (String part : parts) {
-    result = result + part;
+### Lặp lại cùng một bài toán con
+
+Fibonacci đệ quy trực tiếp tạo hai lời gọi mới ở phần lớn các node:
+
+```javascript
+// n là số nguyên không âm; ví dụ để phân tích cây lời gọi.
+function fib(n) {
+  if (n < 2) return n;
+  return fib(n - 1) + fib(n - 2);
 }
 ```
 
-`String` immutable. Mỗi lần nối có thể tạo string mới và copy toàn bộ prefix trước đó. Nếu có `n` phần có độ dài tương đương, lượng copy có thể là `Θ(n²)`.
+Để tính `fib(5)`, nhánh `fib(4)` cần `fib(3)`, trong khi nhánh còn lại của gốc cũng gọi `fib(3)`. Những bài toán giống nhau bị tính lại. Khi `n` tăng, lượng công việc không chỉ tăng thêm một lời gọi.
 
-Dùng `StringBuilder`:
+Công thức chi phí là `T(n) = T(n - 1) + T(n - 2) + Θ(1)`. Cận trên dễ dùng là `O(2ⁿ)`; cận chặt là `Θ(φⁿ)`, với `φ = (1 + √5) / 2`, xấp xỉ 1,618. Không nên gọi `Θ(2ⁿ)` là cận chặt của implementation này.
 
-```java
-StringBuilder builder = new StringBuilder();
-for (String part : parts) {
-    builder.append(part);
-}
-return builder.toString();
-```
+Nếu dùng **memoization** — lưu kết quả của mỗi `fib(k)` để dùng lại — chỉ có `n + 1` trạng thái khác nhau. Trong mô hình phép cộng và tra cứu hằng số, time giảm còn `Θ(n)`. Memo và call stack đều có thể cần `Θ(n)` bộ nhớ. Bản lặp chỉ giữ hai giá trị gần nhất giảm bộ nhớ phụ xuống `Θ(1)` trong cùng mô hình đó.
 
-Gọi `L` là tổng số character của output:
+<Callout type="warn" title="Mô hình số học có giới hạn">
+JavaScript `Number` không biểu diễn chính xác mọi số nguyên lớn. Ví dụ Fibonacci ở đây dùng để phân tích lời gọi, không phải implementation cho kết quả chính xác với mọi `n`. Đổi sang `BigInt` giúp giữ tính chính xác, nhưng chi phí phép cộng và bộ nhớ của mỗi số tăng theo số bit; không còn được coi chúng là hằng số.
+</Callout>
 
-- Time thường là amortized `O(L)`.
-- Buffer/output cần `O(L)` memory.
-- Nói theo `L` chính xác hơn `n`, vì `n` strings có thể có độ dài rất khác nhau.
+## Amortized cost khác average case
 
-#### N+1 database queries
+Giả sử một dynamic array có capacity tăng gấp đôi mỗi khi đầy. Phần lớn lần thêm cuối chỉ ghi một phần tử. Nhưng khi hết chỗ, một lần thêm phải cấp vùng lớn hơn và chép lại các phần tử cũ.
 
-```java
-List<Order> orders = orderRepository.findAll();
-for (Order order : orders) {
-    order.getItems().size(); // có thể phát sinh thêm một query cho mỗi order
-}
-```
-
-Số query tăng `O(n)`, nhưng mỗi operation là một database round trip. Ký hiệu linear không phản ánh constant rất lớn của network, query execution và connection-pool wait. Vì vậy hãy kiểm tra query log và execution plan, không chỉ đọc loop.
-
----
-
-### 8. Cách tính space complexity qua ví dụ
-
-#### Ví dụ A — Scan in-place
-
-```java
-static int max(int[] values) {
-    int best = Integer.MIN_VALUE;
-    for (int value : values) {
-        best = Math.max(best, value);
-    }
-    return best;
-}
-```
-
-- Time: `O(n)`.
-- Auxiliary space: `O(1)`.
-- Total space nếu tính cả input: `O(n)`.
-
-Đây là lý do phải nói rõ đang dùng total hay auxiliary space.
-
-#### Ví dụ B — Copy rồi sort
-
-```java
-static int[] sortedCopy(int[] values) {
-    int[] copy = Arrays.copyOf(values, values.length);
-    Arrays.sort(copy);
-    return copy;
-}
-```
-
-Chỉ riêng `copy` đã dùng `O(n)` memory. Nếu tính output riêng, array trả về là `O(n)` output space; auxiliary space của sort còn phụ thuộc implementation.
-
-#### Ví dụ C — Output-sensitive complexity
-
-```java
-static List<Pair> allMatchingPairs(List<Item> items) {
-    List<Pair> result = new ArrayList<>();
-    // Tìm và thêm mọi cặp phù hợp.
-    return result;
-}
-```
-
-Nếu có `k` cặp kết quả, chỉ việc materialize output đã cần:
+Một lần thêm riêng lẻ có thể tốn `Θ(k)` khi đang có `k` phần tử. Tuy nhiên, bắt đầu từ capacity 1, tổng số phần tử phải chép trong `n` lần thêm bị chặn bởi:
 
 ```text
-Output time:  Ω(k)
-Output space: Ω(k)
+1 + 2 + 4 + ... + 2^k < 2n
 ```
 
-Nếu `k` có thể đạt `Θ(n²)`, không thể tuyên bố toàn bộ hàm chỉ dùng `O(n)` total space. Một cách mô tả rõ hơn là `O(work + k)` time và `O(auxiliary + k)` total space.
+Cộng thêm `n` lần ghi phần tử mới, cả chuỗi thao tác có tổng time `Θ(n)`. Vì thế chi phí **amortized** của một lần thêm là `Θ(1)`: lấy tổng chi phí của chuỗi chia cho số thao tác, với bảo đảm cho mọi chuỗi hợp lệ trong mô hình tăng capacity này.
 
-#### Ví dụ D — Queue hoặc stack có peak size thay đổi
+Đây không phải average case. Phân tích trên không cần giả định input ngẫu nhiên hay sự kiện resize hiếm theo xác suất. Nó chỉ dựa vào quy tắc tăng capacity. Một lần thêm vẫn có thể bị chậm do resize, nên bảo đảm amortized không phải bảo đảm latency cho từng thao tác.
 
-BFS trên graph dùng adjacency list:
+Ví dụ này là mô hình dynamic array tăng gấp đôi, không phải cam kết rằng mọi JavaScript engine triển khai `Array.prototype.push` đúng theo quy tắc đó. Khi cần giới hạn latency, hãy kiểm tra implementation và đo trên runtime mục tiêu.
 
-```java
-static void bfs(Graph graph, int start) {
-    Queue<Integer> queue = new ArrayDeque<>();
-    Set<Integer> visited = new HashSet<>();
+## Space complexity và bộ nhớ sống đồng thời
 
-    queue.add(start);
-    visited.add(start);
+Time đếm công việc qua cả quá trình; space đếm lượng bộ nhớ cần tồn tại **đồng thời ở thời điểm cao nhất**. Một hàm có thể cấp phát nhiều lần mà vẫn có peak memory thấp hơn tổng lượng đã cấp phát.
 
-    while (!queue.isEmpty()) {
-        int node = queue.remove();
-        for (int neighbor : graph.neighbors(node)) {
-            if (visited.add(neighbor)) {
-                queue.add(neighbor);
-            }
-        }
-    }
+### Input, output và auxiliary space
+
+Ba phần cần phân biệt là input đã nhận, output phải tạo và auxiliary space — bộ nhớ tạm để chạy thuật toán. Nhiều tài liệu nói “space `O(1)`” nhưng ngầm chỉ tính auxiliary space, không tính input. Hãy ghi rõ quy ước khi kết luận.
+
+Hàm `sum` ở đầu bài chỉ giữ một vài biến, nên auxiliary space là `Θ(1)` trong mô hình số kích thước cố định. Mảng input vẫn chứa `n` phần tử; hàm không làm nó biến mất.
+
+Một hàm tạo prefix sums — mảng tổng từ đầu đến từng vị trí — phải giữ `n` phần tử kết quả:
+
+```javascript
+function prefixSums(values) {
+  const result = new Array(values.length);
+  let total = 0;
+  for (let i = 0; i < values.length; i++) {
+    total += values[i];
+    result[i] = total;
+  }
+  return result;
 }
 ```
 
-- Time: `O(V + E)` vì mỗi vertex được visit một lần và mỗi edge được inspect một số lần constant.
-- Auxiliary space: `O(V)` cho `visited` và queue trong worst case.
-- Space của graph input không được tính vào auxiliary space nếu graph đã tồn tại trước khi gọi hàm.
+Time là `Θ(n)`. Output space là `Θ(n)`, còn auxiliary space ngoài output là `Θ(1)`. Nếu tính toàn bộ bộ nhớ mới do hàm tạo ra, space là `Θ(n)`. Hai cách báo cáo đều có ích khi bạn nói rõ đang tính phần nào.
 
----
+### Call stack và bản sao dữ liệu
 
-### 9. Recursion: time có thể lớn hơn stack space rất nhiều
+Mỗi lời gọi đệ quy chưa hoàn tất thường cần một stack frame để giữ trạng thái. Một hàm đi từ `n` xuống `n - 1`, rồi xuống tiếp đến 0 có thể giữ `Θ(n)` frame cùng lúc, dù mỗi frame chỉ có vài biến.
 
-#### Factorial
+Ngược lại, một cây lời gọi có rất nhiều node chưa chắc cần giữ tất cả node cùng lúc. Fibonacci trực tiếp ở trên có time exponential nhưng độ sâu lớn nhất chỉ là `Θ(n)`. Với cách thực thi depth-first thông thường, auxiliary space cho call stack là `Θ(n)`, không phải `Θ(2ⁿ)`.
 
-```java
-static long factorial(int n) {
-    if (n <= 1) {
-        return 1;
+Với merge sort kiểu mảng thông dụng, dùng chung một buffer cho merge sẽ cần `Θ(n)` buffer và `Θ(log n)` stack. Tổng auxiliary space là `Θ(n)`. Các implementation merge sort khác có thể có chi phí khác, nên luôn gắn kết luận với cách cài đặt.
+
+Một bẫy thường gặp là thêm bản sao dữ liệu mà không tính chi phí. Nếu mỗi bước binary search dùng `slice()` để tạo nửa mảng mới, riêng lượt đầu đã có thể chép khoảng `n/2` phần tử. Trong mô hình sao chép thông thường, tổng lượng chép qua các lượt là `Θ(n)`, không còn time `Θ(log n)` như bản dùng hai index. Các bản sao cũng có thể chiếm `Θ(n)` bộ nhớ phụ.
+
+Mặc định, mình dùng khoảng index cho thuật toán chỉ cần đọc từng vùng của mảng. Cách đó tránh cấp phát không cần thiết. Đừng giả định runtime sẽ tối ưu bỏ các bản sao hoặc các frame đệ quy nếu chưa có bảo đảm cụ thể.
+
+## Một bài toán hoàn chỉnh: phát hiện phần tử trùng
+
+Giả sử input là mảng số hữu hạn, không có `NaN`, và yêu cầu chỉ là trả về có phần tử trùng hay không. Bạn không được thay đổi input.
+
+Cách trực tiếp so sánh mỗi phần tử với các phần tử đứng sau:
+
+```javascript
+function hasDuplicatePairs(values) {
+  for (let i = 0; i < values.length; i++) {
+    for (let j = i + 1; j < values.length; j++) {
+      if (values[i] === values[j]) return true;
     }
-    return n * factorial(n - 1);
+  }
+  return false;
 }
 ```
 
-Recurrence:
+Nếu mảng không có phần tử trùng, hàm phải xét đủ `n(n - 1) / 2` cặp: worst-case time `Θ(n²)`, auxiliary space `Θ(1)`. Nếu hai phần tử đầu đã bằng nhau, hàm có thể dừng ngay. Không nên dùng trường hợp dừng sớm đó để mô tả khả năng xử lý mọi input lớn.
 
-```text
-T(n) = T(n - 1) + O(1)
-```
+Một lựa chọn khác là ghi nhớ các giá trị đã gặp:
 
-Có `n` calls và maximum depth `n`:
-
-- Time: `O(n)`.
-- Auxiliary space: `O(n)` cho call stack.
-
-Không tạo array hay collection không có nghĩa là space `O(1)`.
-
-#### Binary search: iterative và recursive
-
-Bản iterative:
-
-```java
-static int binarySearch(int[] values, int target) {
-    int left = 0;
-    int right = values.length - 1;
-
-    while (left <= right) {
-        int mid = left + (right - left) / 2;
-        if (values[mid] == target) {
-            return mid;
-        }
-        if (values[mid] < target) {
-            left = mid + 1;
-        } else {
-            right = mid - 1;
-        }
-    }
-    return -1;
+```javascript
+function hasDuplicateSet(values) {
+  const seen = new Set();
+  for (const value of values) {
+    if (seen.has(value)) return true;
+    seen.add(value);
+  }
+  return false;
 }
 ```
 
-- Time: `O(log n)`.
-- Auxiliary space: `O(1)`.
+Mỗi lượt kiểm tra `value` đã xuất hiện chưa, rồi mới thêm vào `seen`. Với input `[4, 7, 4]`, hai lượt đầu thêm 4 và 7; lượt thứ ba phát hiện 4 đã có và trả về `true`.
 
-Bản recursive vẫn có time `O(log n)`, nhưng dùng `O(log n)` stack. Hai implementation có cùng time complexity nhưng khác space complexity.
+Trong mô hình hash set có chi phí kỳ vọng `O(1)` cho tra cứu và thêm, cả hàm có expected time `Θ(n)` khi không có phần tử trùng. Đổi lại, nó giữ tối đa `n` giá trị nên worst-case auxiliary space là `Θ(n)`. Kết luận tuyến tính này phụ thuộc vào mô hình hash set; JavaScript `Set` không có cam kết ngôn ngữ rằng mọi thao tác luôn là worst-case `O(1)`.
 
-#### Naive Fibonacci
+| Cách làm | Time khi phải kiểm tra hết | Auxiliary space | Đổi input |
+| --- | --- | --- | --- |
+| So sánh từng cặp | `Θ(n²)` | `Θ(1)` | Không |
+| Dùng hash set | Expected `Θ(n)` theo giả định trên | `Θ(n)` | Không |
+| Sort bản sao rồi xét hai phần tử kề nhau | `Θ(n log n)` nếu dùng sort có cận đó | `Θ(n)` cho bản sao, cộng bộ nhớ của sort | Không |
 
-```java
-static long fibonacci(int n) {
-    if (n <= 1) {
-        return n;
-    }
-    return fibonacci(n - 1) + fibonacci(n - 2);
+Đừng gắn hàng cuối với mọi lời gọi `.sort()` rồi mặc định có cùng bảo đảm time/space; chi phí cụ thể còn phụ thuộc thuật toán sort và comparator. Nếu được phép sửa input, bạn có thể bỏ bản sao, nhưng bộ nhớ làm việc của sort vẫn cần được tính.
+
+Với yêu cầu trên, mình chọn `Set` làm mặc định khi bộ nhớ cho phép. Cách so sánh từng cặp vẫn hợp lý cho input nhỏ hoặc khi không thể dùng thêm bộ nhớ. Nếu dữ liệu đã sắp xếp, chỉ cần duyệt các cặp kề nhau với time `Θ(n)` và auxiliary space `Θ(1)`, không cần dựng thêm `Set`.
+
+## Kiểm chứng bằng bộ đếm thay vì đoán
+
+Đo thời gian bằng đồng hồ có thể bị nhiễu bởi JIT, garbage collection và tải của máy. Để kiểm tra lập luận về số lượt chạy, trước hết hãy đếm đúng thao tác bạn đang phân tích.
+
+Sau khi đặt các hàm `countPairs`, `halvingRounds` và `shrinkingWork` ở trên vào cùng một file JavaScript, bạn có thể chạy đoạn sau bằng Node.js:
+
+```javascript
+for (const n of [8, 16, 32]) {
+  const pairs = countPairs(new Array(n));
+  const rounds = halvingRounds(n);
+  const shrinking = shrinkingWork(n);
+
+  console.assert(pairs === n * (n - 1) / 2);
+  console.assert(rounds === Math.log2(n)); // n là lũy thừa của 2.
+  console.assert(shrinking === 2 * n - 1);
+  console.log({ n, pairs, rounds, shrinking });
 }
 ```
 
-Recurrence:
+Kết quả theo các công thức trên:
 
-```text
-T(n) = T(n - 1) + T(n - 2) + O(1)
-```
+| `n` | `pairs` | `rounds` | `shrinking` |
+| ---: | ---: | ---: | ---: |
+| 8 | 28 | 3 | 15 |
+| 16 | 120 | 4 | 31 |
+| 32 | 496 | 5 | 63 |
 
-- Time tăng exponential; tight bound gần `Θ(φⁿ)`, với `φ ≈ 1,618`.
-- `O(2ⁿ)` là upper bound dễ nhớ nhưng lỏng hơn.
-- Auxiliary space chỉ `O(n)` vì peak call stack phụ thuộc nhánh sâu nhất, không phải tổng số node trong recursion tree.
+Khi `n` tăng gấp đôi, số cặp tiến gần mức tăng gấp bốn, số lượt chia đôi chỉ tăng thêm 1, còn tổng công việc giảm dần tiến gần mức tăng gấp hai. Bộ đếm làm rõ sự khác nhau mà không cần quy đổi sang mili giây.
 
-Memoization lưu kết quả mỗi state:
+Các test hữu hạn giúp phát hiện sai sót trong code và công thức; chúng không chứng minh được cận tiệm cận cho mọi kích thước. Phần chứng minh vẫn dựa vào tổng số lượt chạy và giả định về thao tác. Sau đó, nếu cần chọn implementation cho production, hãy benchmark bằng dữ liệu đại diện và đo cả thời gian lẫn peak memory.
 
-```java
-static long fibonacci(int n, Long[] memo) {
-    if (n <= 1) {
-        return n;
-    }
-    if (memo[n] != null) {
-        return memo[n];
-    }
-    memo[n] = fibonacci(n - 1, memo) + fibonacci(n - 2, memo);
-    return memo[n];
-}
-```
+## Quy trình phân tích để dùng lại
 
-- Time: `O(n)` vì mỗi state chỉ tính một lần.
-- Space: `O(n)` cho memo và `O(n)` stack, tổng vẫn `O(n)`.
+Với một đoạn code mới, bạn có thể làm theo thứ tự này:
 
-Memoization là ví dụ rõ nhất của việc dùng memory để loại repeated work.
+1. **Chốt input và điều kiện ban đầu.** Ghi `n`, `m` là gì, dữ liệu đã có thứ tự chưa và có được thay đổi input không.
+2. **Chọn mô hình chi phí.** Nêu rõ phép so sánh, hash, sao chép hoặc tính toán số lớn có được coi là hằng số không.
+3. **Chọn trường hợp.** Thường bắt đầu với worst case; chỉ kết luận average/expected khi có giả định phù hợp.
+4. **Đếm công việc thực.** Cộng các đoạn nối tiếp, lập tổng cho vòng lặp phụ thuộc nhau, và tính toàn bộ cây lời gọi đệ quy.
+5. **Rút gọn sau khi đã đếm.** Bỏ hệ số và số hạng thấp hơn; dùng `Θ` khi đã có cận chặt.
+6. **Tính space riêng.** Tách input, output, cấu trúc tạm, bản sao và số stack frame sống đồng thời.
+7. **Tính cả workflow.** Đừng bỏ quên sort, dựng index hoặc chuẩn bị dữ liệu trước thao tác chính.
+8. **Kiểm tra bằng ví dụ và bộ đếm.** Dùng input rỗng, một phần tử, không tìm thấy, nhiều phần tử giống nhau và dữ liệu lớn hơn.
 
----
-
-### 10. Amortized, expected và average không giống nhau
-
-#### Amortized complexity
-
-Amortized analysis chia tổng chi phí của một chuỗi operations cho số operations, không cần giả định input ngẫu nhiên.
-
-`ArrayList.add()` thường là amortized `O(1)`:
-
-- Phần lớn lần append chỉ ghi vào slot kế tiếp: `O(1)`.
-- Khi hết capacity, list phải allocate array lớn hơn và copy dữ liệu: một lần resize có thể là `O(n)`.
-- Tổng chi phí của `n` appends vẫn là `O(n)`, nên mỗi append có amortized cost `O(1)`.
-
-Điều đó không có nghĩa mọi lần `add()` đều có constant latency. Request rơi đúng lúc resize có thể chậm hơn và allocate nhiều memory hơn.
-
-#### Expected complexity
-
-Expected complexity thường dựa trên randomization hoặc assumption về phân bố. `HashMap.get()` được coi expected `O(1)` nếu hash phân bố tốt.
-
-#### Average-case complexity
-
-Average-case cần một distribution của input. Ví dụ linear search có average time `Θ(n)` nếu target có xác suất xuất hiện ở các vị trí theo một giả định hợp lý.
-
-| Khái niệm | Trung bình trên cái gì? | Ví dụ |
-| --- | --- | --- |
-| Average case | Distribution của input | Vị trí target trong linear search |
-| Expected | Randomness/hash distribution | Hash table lookup |
-| Amortized | Chuỗi operations | Dynamic array append |
-
----
-
-### 11. Big O, Big Theta và Big Omega — chỉ cần hiểu đủ dùng
-
-| Ký hiệu | Ý nghĩa | Cách dùng thực tế |
-| --- | --- | --- |
-| `O(g(n))` | Upper bound | Chi phí không tăng nhanh hơn bound này sau một ngưỡng |
-| `Ω(g(n))` | Lower bound | Chi phí không thể tăng chậm hơn bound này |
-| `Θ(g(n))` | Tight bound | Upper và lower bound cùng growth rate |
-
-Với `T(n) = 3n + 20`:
-
-```text
-T(n) ∈ O(n)
-T(n) ∈ Ω(n)
-Do đó T(n) ∈ Θ(n)
-```
-
-Về mặt formal, `3n + 20` cũng thuộc `O(n²)`, nhưng đó là bound lỏng. Trong interview, hãy đưa ra tightest useful bound và nói rõ case đang xét.
-
-Big O cũng không đồng nghĩa với worst case. Hai trục này khác nhau:
-
-- `O`, `Ω`, `Θ`: loại bound.
-- Best, average, worst: tập input/case đang phân tích.
-
-Ví dụ linear search có best-case `Θ(1)` và worst-case `Θ(n)`.
-
----
-
-### 12. Time–space trade-off thường gặp
-
-| Kỹ thuật | Time trước → sau | Memory thêm | Điều cần đánh đổi |
-| --- | --- | ---: | --- |
-| `List` scan → `HashSet` lookup | `O(n)` mỗi lookup → expected `O(1)` | `O(n)` | Hash cost, collision, không giữ sorted order |
-| Naive recursion → memoization | Exponential → theo số state | `O(states)` | Cache lifecycle và invalidation |
-| Range scan → prefix sum | `O(n)` mỗi query → `O(1)` | `O(n)` | Preprocessing và update cost |
-| Sort tất cả → heap Top K | `O(n log n)` → `O(n log k)` | `O(k)` | Chỉ phù hợp khi cần `k` phần tử |
-| Repeated DB scan → index | Gần `O(N)` → tree lookup gần `O(log N)` | Disk/RAM | Write amplification và maintenance |
-| Materialize list → stream | Giữ toàn bộ output → xử lý từng phần | Thường giảm peak memory | Backpressure, retry và lifecycle phức tạp hơn |
-
-Cache là phiên bản production của cùng trade-off: dùng memory và chấp nhận bài toán eviction/invalidation để tránh lặp lại I/O đắt đỏ. Bài [Redis hay Memcached](/caching/01-redis-vs-memcached) phân tích sâu hơn quyết định này ở tầng hệ thống.
-
-#### Ví dụ: nhiều membership queries
-
-Có dataset `n` IDs và `q` queries:
-
-```text
-Scan list cho mỗi query:
-Time: O(q × n)
-Extra space: O(1)
-
-Build HashSet một lần:
-Expected time: O(n + q)
-Extra space: O(n)
-
-Sort một lần rồi binary search:
-Time: O(n log n + q log n)
-Extra space: tùy sort/copy strategy
-```
-
-Không có lựa chọn thắng tuyệt đối:
-
-- `q = 1` và `n` nhỏ: scan có thể đơn giản nhất.
-- `q` lớn: preprocessing thường đáng giá.
-- Memory hạn chế: sorted array có thể gọn hơn hash table.
-- Dataset cập nhật liên tục: phải cộng chi phí update/rebuild.
-- Cần worst-case deterministic: tree hoặc sorted structure có thể phù hợp hơn hash.
-
----
-
-### 13. Khi nào complexity đẹp hơn vẫn chưa phải phương án tốt hơn?
-
-#### Constant factor và input range
-
-`O(n)` có thể chậm hơn `O(n log n)` trong vùng input nhỏ nếu mỗi operation của phương án linear rất đắt. Big O dự đoán xu hướng khi input tăng; nó không thay benchmark.
-
-#### Cache locality
-
-Array thường có locality tốt hơn linked structure. `ArrayList` có thể nhanh hơn `LinkedList` trong thực tế dù cả hai có một số operation cùng `O(n)`, vì linked nodes gây pointer chasing và tốn thêm object overhead.
-
-#### Allocation và GC
-
-Hai phương án cùng `O(n)` space theo asymptotic notation có thể dùng số byte thực tế rất khác nhau. `HashSet<Long>` với boxed `Long` có overhead lớn hơn nhiều so với `long[]`.
-
-Để hiểu memory model của JVM sâu hơn, xem [Heap, off-heap và stack trong Java](/java/01-heap-vs-off-heap-vs-stack) — đặc biệt hữu ích khi Big O giống nhau nhưng GC/RSS khác nhau.
-
-#### I/O và network
-
-`O(n)` local reads khác hoàn toàn `O(n)` remote calls. Với xử lý dữ liệu lớn, vị trí đặt computation, batch size và số round trip thường quan trọng hơn việc tối ưu vài phép tính CPU. Bài [merge dữ liệu vào bảng hàng tỷ rows](/java/02-bulk-upsert-billion-rows) cho thấy complexity phải đi cùng index, batching và database I/O.
-
-#### Tail latency
-
-Operation amortized `O(1)` vẫn có rare slow path `O(n)`, như resize dynamic array. Nếu API có p99 SLO nghiêm, cần xem operation đắt có nằm trên request thread hay không.
-
----
-
-### 14. Cách quyết định có nên đổi time lấy memory
-
-Dùng bảng hỏi sau thay vì mặc định chọn Big O nhỏ nhất:
-
-| Câu hỏi | Vì sao quan trọng |
-| --- | --- |
-| `n`, `m`, `q`, `k` tối đa là bao nhiêu? | Biết phương án hiện tại có thật sự chạm giới hạn không |
-| Input tăng theo thời gian thế nào? | Dự đoán khi nào gặp complexity cliff |
-| Memory budget mỗi process/container? | `O(n)` có thể gây OOM hoặc GC pressure |
-| Operation chạy một lần hay lặp lại nhiều lần? | Quyết định preprocessing/cache có đáng không |
-| Yêu cầu p50, p95, p99 là gì? | Average tốt chưa chắc tail tốt |
-| Dữ liệu có skew/adversarial không? | Ảnh hưởng hash, cache hit và worst case |
-| Output lớn nhất là bao nhiêu? | Output có thể chi phối cả time và memory |
-| Có thể stream/paginate không? | Giảm peak memory dù total work không đổi |
-| Độ phức tạp code/vận hành tăng bao nhiêu? | Optimization không nên tạo rủi ro lớn hơn lợi ích |
-
-Một quy trình có kỷ luật:
-
-```text
-1. Đo baseline time và memory.
-2. Xác định input hiện tại, input tối đa và tốc độ tăng.
-3. Phân tích time/space của phương án hiện tại.
-4. Đề xuất phương án thay thế cùng trade-off rõ ràng.
-5. Benchmark trên nhiều kích thước và distribution đại diện.
-6. Đo latency distribution, peak heap/RSS và allocation rate.
-7. Chọn phương án đáp ứng SLO với margin an toàn.
-8. Thêm regression benchmark hoặc guardrail nếu cần.
-```
-
-> [!WARNING]
-> “Input hiện tại nhỏ” chỉ là lý do hợp lệ khi đó là invariant được xác minh. Nếu giới hạn có thể thay đổi, hãy document assumption, validate upper bound và theo dõi metric thay vì dựa vào hy vọng.
-
----
-
-### 15. Checklist phân tích một đoạn code
-
-Khi gặp câu hỏi interview hoặc review PR, đi lần lượt qua checklist này:
-
-1. `n`, `m`, `V`, `E`, `L`, `k` đại diện cho gì?
-2. Đang đếm comparison, allocation, byte copy, query hay network call?
-3. Loop nối tiếp hay lồng nhau?
-4. Bound của inner loop có phụ thuộc outer index không?
-5. Body có `contains`, sort, regex, serialization, DB hoặc HTTP call không?
-6. Đang nói best, worst, average, expected hay amortized?
-7. Có early return làm best case khác worst case không?
-8. Có tạo collection, copy input hoặc buffer không?
-9. Maximum recursion depth là bao nhiêu?
-10. Output tối đa có `k` phần tử hay có thể đạt `Θ(n²)` không?
-11. Peak live memory khác total allocation như thế nào?
-12. Có thể đổi repeated work thành preprocessing/cache không?
-13. Time tốt hơn cần thêm bao nhiêu memory?
-14. Input production có skew, duplicate hoặc adversarial pattern không?
-15. Benchmark đã đo nhiều kích thước input, p95/p99 và memory chưa?
-
-Nếu cần trả lời ngắn trong interview, dùng công thức nói sau:
-
-```text
-Gọi n là ... và m là ...
-Worst/expected time là ... vì ...
-Auxiliary space là ... do ...
-Nếu tính output, cần thêm O(k).
-Có thể đổi sang ... để giảm time từ ... xuống ...,
-đổi lại dùng thêm ... memory.
-Tôi sẽ chọn dựa trên input bound, memory budget và benchmark.
-```
-
----
-
-### Góc nhìn Senior: biến complexity thành guardrail
-
-Senior engineer không dừng ở việc sửa một loop. Khi một service từng gặp complexity cliff, câu hỏi tiếp theo là làm sao ngăn cùng lớp lỗi quay lại:
-
-- Đặt hard limit hoặc pagination cho input không được tăng vô hạn.
-- Thêm metric theo input size, processing time, allocation rate và rejected requests.
-- Benchmark ở `n` hiện tại, `2n`, `5n`, `10n` để nhìn growth trend.
-- Thêm performance test cho hot path dễ bị regression từ `O(n)` thành `O(n²)`.
-- Document complexity và memory assumption ở API có batch/list input.
-- Review cả downstream calls, query count và output size, không chỉ CPU loop.
-
-Khi scale hệ thống, một thuật toán tốt chỉ là một phần của bài toán. [Scale từ 1.000 lên 50.000 concurrent users](/system-design/03-scale-1k-to-50k-users) mở rộng góc nhìn sang queueing, database, cache và bottleneck toàn hệ thống.
-
----
-
-## Bẫy thường gặp
-
-❌ **“Có một vòng `for`, nên time chắc chắn là `O(n)`.”** → Tại sao sai: body có thể gọi `List.contains()`, sort, regex, database hoặc HTTP; nếu body là `O(m)`, tổng có thể là `O(n × m)`.
-✅ Đúng hơn: mở chi phí của operation bên trong rồi mới nhân với số iteration.
-
----
-
-❌ **“Hàm không tạo array hay collection, nên space là `O(1)`.”** → Tại sao sai: recursion depth `n` giữ `n` stack frames đang active và có auxiliary space `O(n)`.
-✅ Đúng hơn: tính collection, copy, buffer, output và maximum call-stack depth.
-
----
-
-❌ **“Tạo object trong mỗi iteration nghĩa là space `O(n)`.”** → Tại sao sai: space thường đo peak live memory; nếu object không bị giữ lại, chỉ một object cần sống tại một thời điểm dù tổng allocation tăng theo `n`.
-✅ Đúng hơn: tách peak live space khỏi total allocation và GC pressure.
-
----
-
-❌ **“HashMap lookup luôn là `O(1)`, nên phương án hash luôn tốt hơn.”** → Tại sao sai: lookup là expected `O(1)` dưới assumption phù hợp, đồng thời hash table tốn `O(n)` memory, có collision, resize và object overhead.
-✅ Đúng hơn: nêu expected time, worst-case concern và memory trade-off; chọn theo workload thật.
-
----
-
-❌ **“Big O nhỏ hơn nghĩa là code chắc chắn chạy nhanh hơn.”** → Tại sao sai: constant factor, cache locality, I/O, allocation và input range có thể khiến phương án có growth tốt hơn vẫn chậm hơn trong phạm vi thực tế.
-✅ Đúng hơn: dùng complexity để dự đoán scale, sau đó benchmark các phương án còn hợp lệ trên dữ liệu đại diện.
-
----
-
-## Câu hỏi follow-up
-
-### 1. Một hàm tạo `n` object tạm nhưng không giữ chúng lại có space complexity là gì?
-
-Nếu tại mỗi thời điểm chỉ có một object tạm sống và kích thước mỗi object bị chặn, peak auxiliary space có thể là `O(1)` theo `n`. Tuy nhiên tổng allocation qua toàn bộ hàm là `O(n)`, nên GC pressure vẫn có thể tăng tuyến tính. Trong production, nên báo cả peak live memory và allocation rate.
-
-### 2. Vì sao naive Fibonacci có exponential time nhưng chỉ `O(n)` space?
-
-Tổng số recursive calls là exponential vì nhiều subproblem bị tính lặp. Nhưng các nhánh không cùng nằm trên stack; chúng chạy lần lượt. Peak stack chỉ phụ thuộc đường đi sâu nhất, có depth `n`, nên auxiliary space là `O(n)`.
-
-### 3. `ArrayList.add()` amortized `O(1)` có đảm bảo p99 tốt không?
-
-Không. Phần lớn append là `O(1)`, nhưng lần resize phải allocate backing array mới và copy các phần tử cũ, có thể là `O(n)`. Amortized cost mô tả cả chuỗi operations, không đảm bảo latency của từng operation. Nếu biết kích thước gần đúng, pre-size list có thể giảm resize và allocation.
-
-### 4. Khi nào nên chấp nhận `O(n²)` time để giữ `O(1)` space?
-
-Khi `n` có upper bound nhỏ và được kiểm soát, code không nằm trên hot path, memory rất hạn chế, hoặc phương án `O(n)` memory tạo overhead/rủi ro không đáng có. Cần xác minh bound bằng validation hoặc business rule; không nên dựa vào câu “hiện tại data còn nhỏ”.
-
-### 5. Binary search có time và space complexity gì?
-
-Với sorted random-access array, cả bản iterative và recursive có time `O(log n)` vì mỗi bước loại một nửa search space. Bản iterative dùng `O(1)` auxiliary space; bản recursive dùng `O(log n)` stack. Nếu data chưa sorted và chỉ tìm một lần, phải cộng chi phí sort `O(n log n)`.
-
-### 6. Output có được tính vào space complexity không?
-
-Tùy convention, vì vậy phải nói rõ. Auxiliary space thường tách input và có thể tách output; total space thì tính cả output. Câu trả lời tốt nêu riêng: “Auxiliary space `O(n)` cho hash map và output space `O(k)` cho `k` kết quả.”
-
----
-
-## Xem thêm
-
-- [Heap, off-heap và stack trong Java](/java/01-heap-vs-off-heap-vs-stack) — hiểu memory thực tế phía sau auxiliary space, recursion stack và GC.
-- [Merge 1 triệu bản ghi vào bảng 1 tỷ rows](/java/02-bulk-upsert-billion-rows) — áp dụng complexity cùng batching, index và database I/O.
-- [Scale từ 1.000 lên 50.000 concurrent users](/system-design/03-scale-1k-to-50k-users) — đặt thuật toán vào bottleneck và constraint của toàn hệ thống.
-- [Redis hay Memcached](/caching/01-redis-vs-memcached) — một ví dụ production về đổi memory lấy latency và giảm repeated work.
+Để luyện tiếp ngay trên bài này, hãy viết bản Fibonacci lặp chỉ giữ hai giá trị gần nhất, rồi giải thích time và auxiliary space trong mô hình số kích thước cố định. Sau đó sửa bài phát hiện phần tử trùng để trả về **mọi giá trị trùng** thay vì một boolean. Yêu cầu output mới sẽ buộc bạn tính lại cả tính đúng lẫn bộ nhớ, chứ không chỉ thay dòng `return`.
