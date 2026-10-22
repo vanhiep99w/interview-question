@@ -1,53 +1,57 @@
 ---
-title: 1 triệu user online upload Excel 1 triệu dòng — thiết kế import thế nào?
+title: "Upload và import file lớn: resume, staging và merge an toàn"
 description: Thiết kế end-to-end cho React upload multipart có resume, pipeline import bất đồng bộ, staging/merge, idempotency và concurrency control.
 ---
 
-## Câu hỏi
+Giả sử người dùng upload một file Excel có một triệu dòng trong khi ứng dụng vẫn phục vụ nhiều người khác. Nếu API giữ kết nối để đọc file rồi cập nhật từng dòng, một lần mất mạng có thể khiến phải làm lại; đồng thời CPU, RAM và database connections của online traffic bị chiếm lâu.
 
-> **Hệ thống có 1 triệu users đang online. Một user upload file Excel chứa 1 triệu records. Hãy thiết kế luồng từ React frontend, backend, database đến infrastructure: upload không đứt giữa chừng, resume được, import không làm nghẽn API, dữ liệu không duplicate và concurrent imports không làm sai dữ liệu.**
+Thiết kế phù hợp tách hai việc: chuyển bytes thành một object hoàn chỉnh, sau đó xử lý dữ liệu bằng job nền có checkpoint. Bài này đi từ React chọn file đến storage, queue, staging và merge. Số một triệu users online chỉ là bối cảnh tải giả định; nó không tự quyết định số API replicas hay workers cần chạy.
 
----
+<Callout type="info" title="Kiến thức nền và thuật ngữ">
+Bạn cần biết HTTP, React và transaction cơ bản. **Multipart upload** chia file thành các phần có thể gửi riêng. **Presigned URL** cấp quyền tạm thời cho một thao tác storage cụ thể. **Checkpoint** ghi bền vững phần việc đã hoàn tất để tiếp tục sau lỗi. **Invariant** là quy tắc dữ liệu phải giữ đúng, chẳng hạn một external ID chỉ xuất hiện một lần trong mỗi tenant.
+</Callout>
 
-## Dành cho level
+## Mục lục
 
-`Senior` `Staff`
+- [Chốt requirement trước khi chọn công nghệ](#chốt-requirement-trước-khi-chọn-công-nghệ)
+- [Hai state machine: upload object và import data](#hai-state-machine-upload-object-và-import-data)
+- [Kiến trúc end-to-end](#kiến-trúc-end-to-end)
+- [Phân loại lỗi upload và lỗi import](#phân-loại-lỗi-upload-và-lỗi-import)
+- [Phân công việc cắt part và quản lý upload state](#phân-công-việc-cắt-part-và-quản-lý-upload-state)
+  - [Sequence: tạo upload rồi upload parts song song](#sequence-tạo-upload-rồi-upload-parts-song-song)
+  - [React: upload part có giới hạn concurrency](#react-upload-part-có-giới-hạn-concurrency)
+- [Database metadata: lưu manifest, không lưu binary file](#database-metadata-lưu-manifest-không-lưu-binary-file)
+  - [Idempotency không phải một unique key duy nhất](#idempotency-không-phải-một-unique-key-duy-nhất)
+- [Resume sau refresh hoặc mất mạng](#resume-sau-refresh-hoặc-mất-mạng)
+  - [Part 2 xong nhưng part 1 lỗi](#part-2-xong-nhưng-part-1-lỗi)
+- [Complete upload: ngăn double complete và lost enqueue](#complete-upload-ngăn-double-complete-và-lost-enqueue)
+- [React UX: upload progress khác processing progress](#react-ux-upload-progress-khác-processing-progress)
+- [Worker import pipeline: stream → staging → validate → merge](#worker-import-pipeline-stream--staging--validate--merge)
+  - [Giữ mức dùng RAM có giới hạn khi parse file](#giữ-mức-dùng-ram-có-giới-hạn-khi-parse-file)
+  - [Staging table tách file parsing khỏi business write](#staging-table-tách-file-parsing-khỏi-business-write)
+- [Atomicity: cả file hay từng batch là quyết định Product](#atomicity-cả-file-hay-từng-batch-là-quyết-định-product)
+  - [Strict mode không có nghĩa giữ một transaction 1 triệu rows](#strict-mode-không-có-nghĩa-giữ-một-transaction-1-triệu-rows)
+  - [Partial mode: checkpoint theo batch](#partial-mode-checkpoint-theo-batch)
+- [Concurrency: idempotency, optimistic lock và pessimistic lock giải bài toán khác nhau](#concurrency-idempotency-optimistic-lock-và-pessimistic-lock-giải-bài-toán-khác-nhau)
+  - [Mặc định: database constraint là hàng rào cuối](#mặc-định-database-constraint-là-hàng-rào-cuối)
+  - [Optimistic rule cho record bị user và import cùng sửa](#optimistic-rule-cho-record-bị-user-và-import-cùng-sửa)
+  - [Pessimistic lock chỉ cho critical section ngắn](#pessimistic-lock-chỉ-cho-critical-section-ngắn)
+  - [Tránh deadlock lúc merge](#tránh-deadlock-lúc-merge)
+- [Scale và isolation cho 1 triệu users online](#scale-và-isolation-cho-1-triệu-users-online)
+  - [Tách resource pools](#tách-resource-pools)
+  - [Worker autoscaling theo queue age, không chỉ CPU](#worker-autoscaling-theo-queue-age-không-chỉ-cpu)
+- [Security và data governance](#security-và-data-governance)
+- [Observability và operation runbook](#observability-và-operation-runbook)
+- [CI/CD và test plan: test failure window, không chỉ happy path](#cicd-và-test-plan-test-failure-window-không-chỉ-happy-path)
+- [Quản trị import như một capability dùng chung](#quản-trị-import-như-một-capability-dùng-chung)
+- [Trả kết quả và phục hồi theo đúng boundary](#trả-kết-quả-và-phục-hồi-theo-đúng-boundary)
+- [Bài liên quan](#bài-liên-quan)
 
-Ở mức Senior, interviewer kỳ vọng bạn tách đúng hai workload: request phục vụ user online và một batch import nặng. Bạn cần giải thích được vì sao React không parse/gửi 1 triệu dòng JSON qua API, vì sao file đi thẳng vào object storage, và vì sao import phải chạy qua queue + worker thay vì giữ HTTP request mở. Câu trả lời phải có upload state, retry/resume, idempotency, transaction boundary và cách merge dữ liệu an toàn.
+## Chốt requirement trước khi chọn công nghệ
 
-Ở mức Staff, câu trả lời cần thêm product contract, capacity isolation giữa tenant, data-retention/security, operational SLO, giới hạn chi phí, chiến lược recovery và cách rollout pipeline không làm hỏng production traffic.
+Để bảo vệ online traffic, trước tiên cần biết workload nào đang chiếm tài nguyên. Số người online và số dòng trong file chưa mô tả kích thước file, tốc độ request hay số job chạy đồng thời. Thiết kế dưới đây công khai các giả định để bạn điều chỉnh theo dữ liệu thực tế.
 
-Điểm cộng: nói rõ **atomicity của cả file là một business decision**, không phải mặc định kỹ thuật; đồng thời phân biệt idempotency của request, multipart upload, worker message và row dữ liệu đích.
-
----
-
-## Cốt lõi cần nhớ
-
-**React chỉ điều phối upload, không phải nơi xử lý 1 triệu records.** Browser cắt logic `File` thành part, upload trực tiếp tới object storage bằng presigned URL, rồi hiển thị tiến độ của một import job.
-
-**File upload và data import là hai state machine khác nhau.** Upload xong chỉ tạo một object hoàn chỉnh; worker bất đồng bộ mới parse, validate, staging và merge vào database.
-
-**Retry an toàn cần nhiều lớp idempotency.** `Idempotency-Key` bảo vệ tạo import; `(import_id, part_number)` bảo vệ part; unique business key/conditional upsert bảo vệ dữ liệu đích; worker phải chịu được queue redelivery.
-
-**Không giữ transaction hay database lock trong lúc upload hoặc parse Excel.** Đưa file vào staging, xử lý theo batch ngắn, và chỉ lock đúng invariant cần bảo vệ.
-
----
-
-## Câu trả lời mẫu
-
-> “Tôi sẽ tách bài toán thành online traffic và bulk import. React không gửi file Excel một triệu dòng vào API rồi chờ xử lý, vì request sẽ dài, app server thành bottleneck và browser dễ treo nếu parse toàn bộ file. Khi user chọn file, frontend gọi API tạo `import job` với idempotency key. Backend lưu metadata, khởi tạo multipart upload trên object storage và trả về `importId`, `partSize` cùng presigned URL theo batch. Browser dùng `File.slice()` để lấy từng vùng byte, upload 3–5 parts song song trực tiếp lên storage, lưu ETag của part và có thể resume sau refresh bằng cách hỏi backend những part nào đã xác nhận. Khi đủ parts, backend tự gọi Complete Multipart Upload; chỉ lúc đó object hoàn chỉnh mới tồn tại và job được đưa vào queue.
->
-> Worker đọc file theo stream, không nạp một triệu rows vào RAM. Nó load dữ liệu vào staging table, validate và deduplicate, rồi merge theo batch ngắn với unique constraint và upsert có điều kiện. Tôi hỏi Product trước: cần all-or-nothing hay chấp nhận import một phần. Nếu cần all-or-nothing, dữ liệu chỉ được public sau validation và một commit/swap hợp lý; nếu chấp nhận partial success, mỗi batch có checkpoint và file lỗi theo dòng. Tôi dùng idempotency key cho create request, manifest part với `(import_id, part_number)` cho upload, và business key ở bảng đích để worker retry không tạo duplicate. API phục vụ user online vẫn stateless và autoscale riêng; object storage hấp thụ bandwidth, queue hấp thụ spike, worker autoscale theo lag. Tôi theo dõi queue age, import duration, error rows, DB lock wait và chi phí incomplete multipart uploads; đồng thời có lifecycle abort cho upload dang dở.”
-
----
-
-## Phân tích chi tiết
-
-### 1. Chốt requirement trước khi chọn công nghệ
-
-Câu “1 triệu users online, upload Excel 1 triệu records” thiếu vài thông tin quyết định thiết kế. Không cần chờ đủ mọi số mới bắt đầu, nhưng cần nêu rõ assumption để interviewer thấy bạn không chọn architecture theo cảm tính.
-
-| Câu hỏi cần chốt | Vì sao quan trọng | Baseline trong bài |
+| Yêu cầu cần xác nhận | Vì sao quan trọng | Baseline trong bài |
 | --- | --- | --- |
 | 1 triệu users là concurrent WebSocket connections, active sessions hay requests/second? | 1 triệu kết nối không đồng nghĩa 1 triệu API requests đồng thời | API traffic và import worker được scale/capacity độc lập |
 | File lớn bao nhiêu MB/GB? Excel hay CSV? | Quyết định multipart, part size, memory và parser | Multipart từ khoảng 100 MB; khuyến khích CSV cho batch lớn |
@@ -61,7 +65,7 @@ Câu “1 triệu users online, upload Excel 1 triệu records” thiếu vài t
 1 triệu users online không làm một file import “nhanh hơn” hay “chậm hơn” trực tiếp. Nó yêu cầu **isolation**: bulk import không được chiếm CPU, connection pool, bandwidth hay database lock làm request bình thường của 1 triệu users bị ảnh hưởng.
 </Callout>
 
-### 2. Hai state machine: upload object và import data
+## Hai state machine: upload object và import data
 
 Một lỗi hay gặp là gọi toàn bộ flow là “upload”. Thực tế có hai quá trình độc lập:
 
@@ -90,7 +94,7 @@ upload.UPLOADED -> import.QUEUED
 - `COMPLETED` mới có nghĩa business data đã được import.
 - User có thể đóng browser sau `UPLOADED`; worker vẫn tiếp tục vì trạng thái nằm ở backend, không nằm trong tab React.
 
-### 3. Kiến trúc end-to-end
+## Kiến trúc end-to-end
 
 ```d2 title="3. Kiến trúc end-to-end"
 direction: right
@@ -128,7 +132,7 @@ R -> API: "poll or SSE"
 | Worker | Stream parse, validate, staging, merge, checkpoint, error report | Giữ transaction mở khi đọc file hoặc gọi external service |
 | PostgreSQL | Metadata, idempotency, state transition, staging và source of truth | Lưu binary Excel lớn bằng BLOB như default |
 
-### 4. Triage nhanh: lỗi đang ở upload hay import?
+## Phân loại lỗi upload và lỗi import
 
 Trước khi debug sâu, cần xác định user đang mắc ở chặng nào.
 
@@ -169,7 +173,7 @@ J -> L: "Có"
 | Rerun tạo row trùng | Không có unique business key/idempotent write | duplicate key và `processed_job` state | Unique constraint + upsert/checkpoint |
 | Resume báo xong part nhưng complete fail | DB manifest và storage không khớp | ETag/part number từ DB và `ListParts` | Reconcile, chỉ complete bằng manifest đã xác nhận |
 
-### 5. Multipart upload: ai cắt part, ai giữ state?
+## Phân công việc cắt part và quản lý upload state
 
 Browser cắt **logic** file bằng `File.slice(start, end)`. Điều này không tạo ra 10 file mới trên ổ đĩa; nó tạo `Blob` đại diện cho một range byte của file gốc.
 
@@ -193,7 +197,7 @@ partSize = roundUpToMiB(partSize)
 
 Dùng `9,500` thay vì sát `10,000` để còn margin; giới hạn chính xác và part size cần được kiểm tra theo provider đang dùng. Với file nhỏ, single PUT đơn giản hơn multipart.
 
-#### Sequence: tạo upload rồi upload parts song song
+### Sequence: tạo upload rồi upload parts song song
 
 ```d2 title="Sequence: tạo upload rồi upload parts song song"
 shape: sequence_diagram
@@ -238,7 +242,7 @@ Một presigned URL chỉ ký cho một operation cụ thể, gồm `uploadId` v
 Với direct upload từ browser, bucket CORS phải cho phép `PUT` từ origin hợp lệ và expose header `ETag`; nếu không `fetch()` upload thành công nhưng JavaScript không đọc được ETag để confirm part. Không dùng CORS wildcard cho bucket production có dữ liệu nhạy cảm.
 </Callout>
 
-#### React: upload part có giới hạn concurrency
+### React: upload part có giới hạn concurrency
 
 Đây là ví dụ minh họa; production cần thêm progress, cancellation và error mapping.
 
@@ -308,7 +312,7 @@ async function uploadMissingParts(
 
 Không dùng `Promise.all(parts.map(upload))` cho hàng nghìn parts: browser mở quá nhiều request, tốn memory và có thể làm network các tab khác kém đi. Concurrency limit là một policy cần tune theo part size, client network và upload SLO; `4` chỉ là số minh họa.
 
-### 6. Database metadata: lưu manifest, không lưu binary file
+## Database metadata: lưu manifest, không lưu binary file
 
 Object storage là nơi chứa binary. PostgreSQL giữ metadata, ownership, state transition, idempotency và manifest ETag cần để complete/resume.
 
@@ -376,7 +380,7 @@ DO UPDATE SET
 
 `uploaded_bytes` có thể là cache phục vụ UI, nhưng **không được** dùng giá trị FE báo làm điều kiện complete. Backend phải kiểm tra đủ các part number dự kiến và ETag trước khi gọi storage complete.
 
-#### Idempotency không phải một unique key duy nhất
+### Idempotency không phải một unique key duy nhất
 
 | Boundary | Duplicate thực tế | Cách xử lý |
 | --- | --- | --- |
@@ -386,9 +390,9 @@ DO UPDATE SET
 | Queue message | Worker crash sau DB commit trước ack | Job checkpoint + idempotent merge |
 | Business row | Cùng record có mặt trong file/re-run | unique business key + upsert/version rule |
 
-Đây là lý do câu “em dùng idempotent” chưa đủ trong interview. Hãy luôn nói **idempotent ở boundary nào, key nào, và duplicate được xử lý ra sao**.
+Mỗi boundary có một loại duplicate và một identity khác nhau. Ví dụ, retry callback của part không phải retry business row: part dùng `(import_id, part_number)`, còn row cần business key của tenant. Thiết kế idempotency phải ghi rõ cả key lẫn effect được bảo vệ.
 
-### 7. Resume sau refresh hoặc mất mạng
+## Resume sau refresh hoặc mất mạng
 
 Server không thể tự đọc lại local file của user. Sau refresh, React có thể nhớ `importId`, file name, size, part size và fingerprint trong IndexedDB/local storage, nhưng browser thường yêu cầu user chọn lại file để có `File` object mới.
 
@@ -442,7 +446,7 @@ file name + byte size + lastModified + hash vài MiB đầu/cuối
 
 Hash toàn file chặt chẽ hơn nhưng tốn CPU/I/O trên browser. Nếu import có compliance/security cao, yêu cầu full checksum hoặc server-side checksum verification thay vì chỉ dựa vào fingerprint UX.
 
-#### Part 2 xong nhưng part 1 lỗi
+### Part 2 xong nhưng part 1 lỗi
 
 Multipart không yêu cầu thứ tự upload. Trạng thái hợp lệ là:
 
@@ -456,7 +460,7 @@ import upload_status: UPLOADING
 
 React retry riêng part 1. Không gọi complete cho đến khi backend có đủ part `1..totalParts`. Nếu user cancel hoặc retry vượt ngân sách, backend gọi `AbortMultipartUpload`; object storage xoá parts tạm. Nếu bỏ quên incomplete uploads, provider vẫn tính phí storage cho các part đã upload, nên cần cả cancel API lẫn lifecycle cleanup theo thời hạn.
 
-### 8. Complete upload: ngăn double complete và lost enqueue
+## Complete upload: ngăn double complete và lost enqueue
 
 `POST /imports/{id}/complete` phải idempotent và serialized. Một implementation ý tưởng:
 
@@ -514,7 +518,7 @@ G -> H: "cannot recover"
 Nếu DB đổi sang `UPLOADED` rồi process chết trước khi enqueue, file hoàn chỉnh nhưng không worker nào import. Ghi outbox event cùng transaction với state `UPLOADED`; relay có thể publish lại an toàn vì consumer idempotent. Xem thêm [CQRS với Outbox, at-least-once và projection idempotent](/system-design/04-cqrs) cho failure window này.
 </Callout>
 
-### 9. React UX: upload progress khác processing progress
+## React UX: upload progress khác processing progress
 
 UI nên hiển thị hai thanh progress khác nhau:
 
@@ -525,10 +529,15 @@ Upload file:       72%  (72 MiB / 100 MiB)     ← bytes/parts đã confirm
 
 Không dùng percent import như một lời hứa quá chính xác nếu phase validation/merge có cost khác parse. Tối thiểu hiển thị phase rõ ràng:
 
-```text
-Uploading → Verifying upload → Waiting in queue → Reading file
-→ Validating rows → Importing valid rows → Completed / Completed with errors
-```
+| Giai đoạn UI | Ý nghĩa và dữ liệu tiến độ |
+| --- | --- |
+| Uploading | Bytes/parts đã được xác nhận |
+| Verifying upload | Backend đối soát manifest với storage |
+| Waiting in queue | Object hoàn chỉnh, job chờ được nhận |
+| Reading file | Worker parse và đưa vào staging |
+| Validating rows | Kiểm tra tập dữ liệu và tạo error report |
+| Importing valid rows | Merge có checkpoint theo contract |
+| Completed / Completed with errors | Trạng thái kết thúc và kết quả đã đối soát |
 
 React Query polling là đủ để bắt đầu; SSE/WebSocket phù hợp khi muốn update mượt hơn. Dù dùng transport nào, status API phải là source of truth để refresh/reconnect không mất state.
 
@@ -545,7 +554,7 @@ const { data: job } = useQuery({
 
 Nếu cần preview, chỉ parse header hoặc vài chục rows đầu trong Web Worker. Không đưa 1 triệu rows vào React state hay render bảng lỗi 1 triệu dòng. Error list cần pagination/filter phía server và virtualized rendering ở client.
 
-### 10. Worker import pipeline: stream → staging → validate → merge
+## Worker import pipeline: stream → staging → validate → merge
 
 Sau khi upload hoàn chỉnh, worker nhận `importId`, tải object qua stream và xử lý độc lập với web request.
 
@@ -574,7 +583,7 @@ H -> J
 I -> K
 ```
 
-#### Vì sao không parse toàn file trong app memory?
+### Giữ mức dùng RAM có giới hạn khi parse file
 
 Một Excel `.xlsx` là ZIP chứa XML. File 100 MB có thể phình RAM nhiều lần khi parser materialize workbook/cell strings. Nếu worker đọc cả file thành object graph, chỉ vài concurrent imports có thể OOM. Cần:
 
@@ -584,9 +593,9 @@ Một Excel `.xlsx` là ZIP chứa XML. File 100 MB có thể phình RAM nhiều
 - time limit, file-size limit, sheet/row/column limit chống zip bomb và malformed file;
 - cân nhắc yêu cầu CSV cho bulk import lớn: dễ stream, dễ `COPY`, ít memory hơn Excel.
 
-`Excel` là format tiện cho người dùng, không phải format ingest hiệu năng tối ưu. Senior answer nên nói trade-off này thay vì hứa parser nào cũng stream hoàn hảo.
+`Excel` thuận tiện cho người dùng nhưng không phải parser nào cũng giữ mức dùng RAM cố định. Chọn parser dựa trên file thật, định dạng XLSX, shared strings và giới hạn tài nguyên. Nếu sản phẩm cho phép CSV, pipeline streaming và bulk load thường dễ kiểm soát hơn.
 
-#### Staging table tách file parsing khỏi business write
+### Staging table tách file parsing khỏi business write
 
 Ví dụ input import customer:
 
@@ -633,9 +642,9 @@ WHERE s.import_id = duplicates.import_id
 
 Validation regex chỉ minh họa; email/business validation thật cần contract rõ hơn. Điều quan trọng là lỗi theo row có thể xuất report, còn business tables chưa bị thay đổi trong lúc file còn đang được đọc.
 
-### 11. Atomicity: cả file hay từng batch là quyết định Product
+## Atomicity: cả file hay từng batch là quyết định Product
 
-Đây là câu cần hỏi interviewer, không tự quyết.
+Chốt contract này với Product trước khi thiết kế transaction boundary. Nếu user được hứa cả file xuất hiện cùng lúc, việc commit từng batch vào dữ liệu đang phục vụ không đáp ứng lời hứa đó dù không có row lỗi.
 
 | Contract | Ý nghĩa user thấy | Cách làm | Trade-off |
 | --- | --- | --- | --- |
@@ -643,7 +652,7 @@ Validation regex chỉ minh họa; email/business validation thật cần contra
 | Partial success | Row hợp lệ xuất hiện, row lỗi có report | Merge valid rows theo batch; giữ checkpoint/error rows | User phải hiểu file được xử lý một phần |
 | Replace snapshot | File là state hoàn chỉnh của một partition/tenant | Build shadow data, validate, atomic swap/pointer switch | Phức tạp nhưng có read consistency mạnh |
 
-#### Strict mode không có nghĩa giữ một transaction 1 triệu rows
+### Strict mode không có nghĩa giữ một transaction 1 triệu rows
 
 Một transaction rất dài cho cả parse + merge dễ làm WAL, lock duration và rollback cost tăng mạnh. Các lựa chọn tốt hơn:
 
@@ -653,7 +662,7 @@ Một transaction rất dài cho cả parse + merge dễ làm WAL, lock duration
 
 Mục tiêu business là “reader không thấy dữ liệu nửa file”, không bắt buộc cách làm phải là một transaction khổng lồ.
 
-#### Partial mode: checkpoint theo batch
+### Partial mode: checkpoint theo batch
 
 Với partial success, mỗi merge batch cần transaction ngắn và checkpoint durable:
 
@@ -697,9 +706,9 @@ WHERE import_id = :import_id
 
 Mỗi retry message sẽ thấy `merged_at`/unique constraint và không chạy effect hai lần. [Merge 1 triệu bản ghi vào bảng 1 tỷ rows](/java/02-bulk-upsert-billion-rows) phân tích sâu hơn staging, batching, index và lock contention.
 
-### 12. Concurrency: idempotency, optimistic lock và pessimistic lock giải bài toán khác nhau
+## Concurrency: idempotency, optimistic lock và pessimistic lock giải bài toán khác nhau
 
-Ba khái niệm hay bị trộn vào một câu trả lời:
+Ba cơ chế dưới đây bảo vệ ba loại lỗi khác nhau. Một pipeline có thể cần dùng cả ba, nhưng không dùng một cơ chế để thay thế tất cả:
 
 | Khái niệm | Nó ngăn điều gì? | Ví dụ trong import |
 | --- | --- | --- |
@@ -707,7 +716,7 @@ Ba khái niệm hay bị trộn vào một câu trả lời:
 | Optimistic concurrency | Không ghi đè state đã thay đổi từ lúc đọc | Import có `source_version` cũ không overwrite người vừa sửa customer |
 | Pessimistic lock | Serialize access vào resource đang tranh chấp | Claim đúng một import job hoặc update quota hot row ngắn |
 
-#### Mặc định: database constraint là hàng rào cuối
+### Mặc định: database constraint là hàng rào cuối
 
 ```sql
 CREATE UNIQUE INDEX uq_customers_tenant_external_id
@@ -716,7 +725,7 @@ ON customers (tenant_id, external_id);
 
 Application check “record này chưa tồn tại” không đủ: hai workers có thể cùng check trước khi insert. Unique constraint và `ON CONFLICT` mới bảo vệ được giữa nhiều pods/processes/scripts.
 
-#### Optimistic rule cho record bị user và import cùng sửa
+### Optimistic rule cho record bị user và import cùng sửa
 
 Nếu file có `source_version`/`updated_at` từ hệ thống nguồn, import chỉ update nếu input không cũ hơn row hiện tại. Đây là policy phải được Product đồng ý: “file thắng”, “UI thắng”, “last write wins” hay “report conflict” là các semantics khác nhau.
 
@@ -733,7 +742,7 @@ WHERE tenant_id = :tenant_id
 
 Affected rows `0` nghĩa là stale/conflict; worker có thể re-read rồi apply policy, hoặc ghi row conflict vào error report. Không retry mù nếu retry có thể ghi đè chỉnh sửa mới của user.
 
-#### Pessimistic lock chỉ cho critical section ngắn
+### Pessimistic lock chỉ cho critical section ngắn
 
 Dùng `SELECT ... FOR UPDATE` để claim một job hoặc cập nhật quota theo tenant là hợp lý nếu transaction chỉ đọc/kiểm tra/ghi DB trong vài milliseconds. Không lock `import_jobs` trong 30 phút worker parse file, và không lock tất cả customer rows của một file.
 
@@ -756,15 +765,15 @@ RETURNING j.*;
 
 `SKIP LOCKED` phù hợp nhiều worker claim **những job khác nhau**. Nó không phù hợp nếu API cần đọc chính xác một resource cụ thể rồi âm thầm “skip” vì đang lock. Xem [Optimistic Lock vs Pessimistic Lock](/database/03-optimistic-vs-pessimistic-locking) để đi sâu về lost update, retry và deadlock.
 
-#### Tránh deadlock lúc merge
+### Tránh deadlock lúc merge
 
 Nếu nhiều workers có thể update cùng business records, lock theo thứ tự ổn định như `(tenant_id, external_id)` và chia range không overlap. Đừng “tăng threads cho nhanh” trên cùng key space: throughput có thể giảm vì lock wait, retry và deadlock.
 
-### 13. Scale và isolation cho 1 triệu users online
+## Scale và isolation cho 1 triệu users online
 
 Không có một con số “1M users cần Kafka”. Cần capacity theo requests/second, WebSocket connection count, object upload bandwidth, import arrival rate, file distribution, parse throughput và database write budget.
 
-#### Tách resource pools
+### Tách resource pools
 
 ```d2 title="Tách resource pools"
 direction: down
@@ -807,7 +816,7 @@ Worker -> RDB
 - SSE/WebSocket gateway scale theo connection, tách khỏi REST API nếu realtime volume lớn.
 - direct-to-storage upload để app servers không trở thành bandwidth proxy.
 
-#### Worker autoscaling theo queue age, không chỉ CPU
+### Worker autoscaling theo queue age, không chỉ CPU
 
 CPU 20% có thể vẫn là incident nếu worker đang chờ database lock và queue age tăng. Metrics tốt hơn:
 
@@ -823,7 +832,7 @@ DB lock wait, transaction duration, I/O, connection pool pending
 
 Autoscale theo queue depth/oldest age có guardrail max replicas để không tự tạo DB write storm. Worker concurrency phải được load-test với production-like data; 100 workers không luôn nhanh hơn 10 workers nếu primary DB là bottleneck.
 
-### 14. Security và data governance
+## Security và data governance
 
 Upload endpoint là bề mặt tấn công, không chỉ là UX.
 
@@ -839,7 +848,7 @@ Upload endpoint là bề mặt tấn công, không chỉ là UX.
 
 Không log raw row data, presigned URLs, ETags kèm PII hay full error payload tùy tiện. `importId`, `tenantId`, correlation ID và aggregate counts thường đủ để trace. Raw file/error report download cần authorization như dữ liệu business bình thường.
 
-### 15. Observability và operation runbook
+## Observability và operation runbook
 
 Mỗi request/job nên mang correlation:
 
@@ -880,7 +889,7 @@ Một operational flow khi import bị kẹt:
 7. Không chạy lại file từ đầu trước khi biết idempotency/checkpoint semantics.
 ```
 
-### 16. CI/CD và test plan: test failure window, không chỉ happy path
+## CI/CD và test plan: test failure window, không chỉ happy path
 
 | Layer | Case cần test |
 | --- | --- |
@@ -896,13 +905,9 @@ Một operational flow khi import bị kẹt:
 
 Canary deploy workers với concurrency thấp, feature flag import template/version mới, và migration database backward-compatible. Không rollout parser hay merge policy mới cho toàn bộ tenant nếu chưa chạy shadow/canary file representative.
 
-### 17. Góc nhìn Staff — biến bulk import thành platform, không thành “cron job khó debug”
+## Quản trị import như một capability dùng chung
 
-<Callout type="info" title="Góc nhìn Staff">
-Senior chứng minh một import đúng và recover được. Staff phải bảo đảm mười tenant lớn import đồng thời không biến capability này thành incident chung, không làm chi phí storage/DB tăng không kiểm soát, và Support có công cụ giải thích rõ trạng thái dữ liệu cho khách hàng.
-</Callout>
-
-Một câu trả lời Staff nên thêm các điểm sau:
+Khi nhiều tenant dùng import cùng lúc, correctness của từng job chỉ là một phần. Nền tảng còn phải phân phối tài nguyên công bằng, giữ chi phí trong giới hạn và cho Support đủ bằng chứng giải thích kết quả với khách hàng.
 
 **Product contract theo loại import.** Import master data nhỏ, replace snapshot hàng ngày và migration một lần có consistency/retention/retry policy khác nhau. Không ép mọi use case qua một `status=COMPLETED` mơ hồ.
 
@@ -916,82 +921,17 @@ Một câu trả lời Staff nên thêm các điểm sau:
 
 **SLO và capacity planning.** Đặt SLO riêng cho control plane (create/presign), upload, queue admission và import completion. Capacity plan từ dữ liệu file-size/rows distribution và worst-case retry, không lấy average 1M users làm một con số mơ hồ.
 
----
+## Trả kết quả và phục hồi theo đúng boundary
 
-## Bẫy thường gặp
+Nếu 30% trong một triệu rows lỗi, không trả 300.000 lỗi trong một HTTP response. Job status nên chứa summary, các error codes phổ biến và link tải report có authorization. API xem lỗi cần pagination; report cần giới hạn dung lượng, retention và bảo vệ dữ liệu như file gốc.
 
-❌ **“React đọc Excel rồi gửi từng record JSON lên API.”** → Tại sao sai: browser dễ treo, request cực lớn, app server bị biến thành file proxy/parser và retry phải bắt đầu lại hoặc khó dedupe.
-✅ Đúng hơn: React chỉ validate nhẹ và điều phối multipart direct-to-storage; worker backend stream/parse/import bất đồng bộ.
+Giả sử user đóng tab sau khi tất cả parts đã tới storage nhưng trước khi gọi complete. Việc đó chưa tạo một object hoàn chỉnh. Backend reconciler có thể đối soát parts rồi complete theo policy hoặc để user resume; không chỉ tin `uploaded_bytes` do browser báo. Nếu job hết hạn, abort multipart upload để tránh giữ parts vô thời hạn.
 
----
+Nếu complete đã thành công nhưng API crash trước khi enqueue, trạng thái object và job phải được đối soát. Transaction chuyển job sang `UPLOADED` cần ghi outbox để relay gửi lại; worker vẫn phải chịu duplicate. Không có một idempotency key duy nhất bao trọn storage, database và queue.
 
-❌ **“Multipart là backend tự cắt file.”** → Tại sao sai: nếu file nằm ở browser, backend không có bytes để cắt trừ khi client upload toàn bộ qua backend trước; làm vậy mất lợi ích direct upload.
-✅ Đúng hơn: backend tính `partSize`, tạo `uploadId`/presigned URLs; FE dùng `File.slice()` upload từng byte range; backend lưu manifest ETag và gọi complete.
+Cuối cùng, polling hay SSE/WebSocket chỉ là cách đưa tiến độ tới browser. Sau reconnect, client phải đọc lại durable job status; một event realtime bị bỏ lỡ không được làm UI kết luận nhầm rằng import chưa từng hoàn tất.
 
----
-
-❌ **“Part 1 fail thì restart từ đầu vì parts phải theo thứ tự.”** → Tại sao sai: multipart cho phép part upload độc lập, part 2 thành công vẫn dùng được; restart lãng phí bandwidth và UX kém.
-✅ Đúng hơn: lưu/đối soát completed parts, retry riêng part lỗi, chỉ complete khi đủ manifest; abort khi cancel/expiry.
-
----
-
-❌ **“Lưu progress và ETag trong local storage là đã resume được.”** → Tại sao sai: local storage có thể bị xóa/stale và không phản ánh part đã tới storage nhưng callback chưa về backend; browser cũng không tự giữ `File` sau reload một cách tin cậy.
-✅ Đúng hơn: backend/DB là workflow source of truth, reconcile với storage khi cần; FE chỉ lưu `importId`/fingerprint để hướng dẫn user chọn lại đúng file.
-
----
-
-❌ **“Bọc parse + merge 1 triệu rows trong một transaction để atomic.”** → Tại sao sai: transaction dài giữ connection/locks/WAL quá lâu, rollback đắt và có thể làm online traffic nghẽn.
-✅ Đúng hơn: staging + validation trước; dùng shadow version/partition swap hoặc merge batch có checkpoint tùy contract all-or-nothing/partial success.
-
----
-
-❌ **“Dùng Kafka/queue là automatically exactly-once.”** → Tại sao sai: worker có thể commit DB rồi crash trước ack, queue sẽ redeliver; manual replay và timeout cũng tạo duplicate.
-✅ Đúng hơn: coi queue là at-least-once, thiết kế idempotent job/row write bằng stable key, constraint, checkpoint và outbox.
-
----
-
-❌ **“Concurrent import thì `synchronized` service method là đủ.”** → Tại sao sai: `synchronized` chỉ có hiệu lực trong một JVM; nhiều pod, worker, admin script vẫn chạy song song.
-✅ Đúng hơn: bảo vệ invariant ở database bằng unique/conditional write/transaction; dùng distributed coordination hoặc queue-by-key chỉ khi cần và hiểu failure semantics.
-
----
-
-## Câu hỏi follow-up
-
-### 1. Presigned URL có phải một URL dùng cho toàn bộ file không?
-
-Không. Với multipart upload, mỗi `UploadPart` thường được ký riêng với `uploadId` và `partNumber`, nên mỗi part có presigned URL riêng. Backend có thể trả toàn bộ URLs với file nhỏ hoặc trả theo batch/on-demand với file lớn. URL có TTL ngắn; khi hết hạn, FE xin URL mới cho part chưa hoàn tất mà không cần tạo import mới.
-
-### 2. Nếu user đóng browser sau khi upload đủ parts nhưng trước khi gọi complete thì sao?
-
-Upload vẫn là `UPLOADING`; object hoàn chỉnh chưa tồn tại. Có thể cho user resume và bấm hoàn tất, hoặc backend có scheduled reconciler kiểm tra jobs đủ manifest/parts rồi complete theo policy an toàn. Không auto-complete chỉ dựa vào byte count FE báo. Nếu job hết hạn, abort multipart upload để giải phóng part storage.
-
-### 3. Có nên upload file qua backend để virus scan không?
-
-Tùy risk/compliance. Direct-to-storage vẫn có thể an toàn nếu object ban đầu vào quarantine prefix/bucket, worker scan/validate trước khi job được queue/import, và IAM không cho object chưa scan đi vào business flow. Proxy file qua backend chỉ để scan thường tăng bandwidth/cost và tạo bottleneck; chỉ chọn nếu policy hoặc scanner architecture thật sự yêu cầu inline inspection.
-
-### 4. Nếu file có 1 triệu rows nhưng 30% lỗi thì trả lỗi về React thế nào?
-
-Không trả 300,000 lỗi trong HTTP response hay render tất cả trên browser. Lưu error rows/code/reason vào bảng/report object, trả summary (`valid`, `invalid`, top error codes) qua job status, cung cấp paginated error API và file CSV/XLSX lỗi để user tải. Giới hạn error report để tránh chính report trở thành file khổng lồ không dùng được.
-
-### 5. Khi nào dùng optimistic và khi nào dùng pessimistic locking trong import?
-
-Dùng optimistic/conditional update khi conflict hiếm và có thể phát hiện file input stale so với record hiện tại. Dùng pessimistic lock cho critical section DB ngắn, ví dụ nhiều worker claim cùng một queued job hoặc update quota hot row. Không dùng pessimistic lock để “giữ file độc quyền” trong lúc upload/parse vì nó kéo dài transaction và block dây chuyền.
-
-### 6. Worker có cần xử lý Excel trực tiếp không?
-
-Không bắt buộc. Nếu Product kiểm soát template, có thể convert/khuyến khích CSV để stream và bulk load đơn giản hơn. Nếu phải nhận Excel, dùng parser có giới hạn memory/time/sheet/cell và test với file xấu. Không tin extension hay `Content-Type` do browser gửi là validation bảo mật đủ.
-
-### 7. Làm sao đảm bảo job `UPLOADED` luôn được enqueue dù API crash?
-
-Trong transaction chuyển job sang `UPLOADED`, đồng thời insert một outbox row `ImportUploaded`. Relay publish outbox sang queue và đánh dấu đã publish. Relay có thể publish duplicate khi crash, vì vậy worker vẫn cần idempotency. Reconciliation tìm `UPLOADED` thiếu outbox/queue checkpoint để repair.
-
-### 8. Thay vì polling status, có nên dùng WebSocket không?
-
-Có thể dùng SSE/WebSocket để UX realtime hơn, nhưng không thay thế status API durable. Connection có thể rớt, user có thể refresh và event có thể bị miss; client luôn cần fetch trạng thái hiện tại theo `importId` khi reconnect. Với rất nhiều users, realtime gateway phải scale theo connection và tách resource pool khỏi API/worker.
-
----
-
-## Xem thêm
+## Bài liên quan
 
 - [Merge 1 triệu bản ghi vào bảng 1 tỷ rows](/java/02-bulk-upsert-billion-rows) — staging table, batch merge, index và checkpoint cho phase dữ liệu đích.
 - [Optimistic Lock vs Pessimistic Lock: chọn thế nào?](/database/03-optimistic-vs-pessimistic-locking) — chọn concurrency primitive theo invariant thay vì dùng lock theo phản xạ.

@@ -52,13 +52,14 @@ test('D2 controls zoom, expand, switch theme and preserve source drawer links', 
   expect(errors).toEqual([]);
 });
 
-test('failover diagram exposes before/after scenarios', async ({ page }) => {
-  await page.goto('/system-design/01-distributed-system-terms/');
-  const diagram = page.locator('.d2-interactive').filter({ has: page.locator('figcaption', { hasText: 'Failover: promote replica' }) });
-  await expect(diagram.locator('.d2-viewer')).toBeVisible();
-  await diagram.getByRole('tab', { name: 'Sau failover' }).click();
-  await expect(diagram.getByRole('tab', { name: 'Sau failover' })).toHaveAttribute('aria-selected', 'true');
-  await expect(diagram.getByRole('tabpanel')).toContainText('Primary B');
+test('deleted glossary is not served or linked from remaining lessons', async ({ request }) => {
+  const removed = '/system-design/01-distributed-system-terms/';
+  expect((await request.get(removed)).status()).toBe(404);
+  for (const route of ['/system-design/02-consistent-hashing/', '/behavioral/01-production-server-down/']) {
+    const response = await request.get(route);
+    expect(response.ok()).toBeTruthy();
+    expect(await response.text()).not.toContain('href="' + removed);
+  }
 });
 
 test('HTTP transcript, terminal commands, real source diff and waterfall are readable', async ({ page, context }) => {

@@ -1,64 +1,101 @@
 ---
-title: "CQRS là gì, khi nào nên dùng và triển khai an toàn như thế nào?"
+title: "CQRS: tách mô hình đọc và ghi, giữ đúng dữ liệu"
 description: "Từ tách command/query trong một database đến read model riêng với Outbox, Kafka, eventual consistency, idempotency và projection rebuild."
 ---
 
-# CQRS là gì, khi nào nên dùng và triển khai an toàn như thế nào?
+Một màn hình quản trị cần tìm đơn theo nhiều điều kiện, còn thao tác đặt đơn phải giữ đúng tồn kho và trạng thái thanh toán. Khi cả hai dùng chung một entity và cùng cách truy cập dữ liệu, tối ưu một phía có thể làm phía kia khó thay đổi hơn.
 
-## Câu hỏi
+CQRS tách trách nhiệm xử lý thay đổi và đọc dữ liệu. Bài này đi từ tách code trong cùng database đến projection bất đồng bộ, rồi giải thích những chi phí xuất hiện khi dữ liệu phải đi qua nhiều chặng. Mình ưu tiên mức đơn giản nhất giải quyết được nhu cầu thực tế, không bắt đầu bằng hai database hay Kafka.
 
-> CQRS là gì? Nó khác CRUD, Event Sourcing và event-driven architecture như thế nào? Khi nào nên dùng, và nếu tách write model/read model sang hai data store thì xử lý consistency, duplicate event, read-your-write và rebuild projection ra sao?
+<Callout type="info" title="Kiến thức nền và phạm vi">
+Bạn cần hiểu transaction và API cơ bản. **Invariant** là quy tắc nghiệp vụ phải luôn đúng, chẳng hạn tồn kho không âm. **Projection** là dữ liệu được dựng lại theo shape của query; nó không mặc nhiên là nguồn đúng để quyết định write. Những số liệu trong tình huống sau là giả định, không phải kết quả đo production.
+</Callout>
 
----
+## Mục lục
 
-## Dành cho level
+- [Một model phải phục vụ hai mục tiêu khác nhau](#một-model-phải-phục-vụ-hai-mục-tiêu-khác-nhau)
+- [CQRS ở tầng bản chất](#cqrs-ở-tầng-bản-chất)
+- [Phân biệt CQRS với topology và các pattern liên quan](#phân-biệt-cqrs-với-topology-và-các-pattern-liên-quan)
+  - [CQRS không bắt buộc hai databases](#cqrs-không-bắt-buộc-hai-databases)
+  - [CQRS không bắt buộc microservices](#cqrs-không-bắt-buộc-microservices)
+  - [CQRS không bắt buộc asynchronous command](#cqrs-không-bắt-buộc-asynchronous-command)
+  - [CQRS không đồng nghĩa Event Sourcing](#cqrs-không-đồng-nghĩa-event-sourcing)
+  - [CQRS không đồng nghĩa event-driven architecture](#cqrs-không-đồng-nghĩa-event-driven-architecture)
+- [Ba mức triển khai: tăng complexity theo pain](#ba-mức-triển-khai-tăng-complexity-theo-pain)
+  - [Mức 1 — Tách code path, cùng model/cùng database](#mức-1--tách-code-path-cùng-modelcùng-database)
+  - [Mức 2 — Tách write model/read model, vẫn cùng database](#mức-2--tách-write-modelread-model-vẫn-cùng-database)
+  - [Mức 3 — Tách data stores và cập nhật projection bất đồng bộ](#mức-3--tách-data-stores-và-cập-nhật-projection-bất-đồng-bộ)
+- [Thiết kế write side: command, aggregate và invariant](#thiết-kế-write-side-command-aggregate-và-invariant)
+  - [Đặt invariant ở write boundary](#đặt-invariant-ở-write-boundary)
+- [Thiết kế read side: projection theo access pattern](#thiết-kế-read-side-projection-theo-access-pattern)
+- [Dual-write và Transactional Outbox](#dual-write-và-transactional-outbox)
+  - [Transactional Outbox](#transactional-outbox)
+  - [Chọn batch size và polling interval bằng đo lường](#chọn-batch-size-và-polling-interval-bằng-đo-lường)
+- [At-least-once delivery và idempotent consumer](#at-least-once-delivery-và-idempotent-consumer)
+  - [Cách 1 — Inbox/processed events table](#cách-1--inboxprocessed-events-table)
+  - [Cách 2 — Version guard](#cách-2--version-guard)
+  - [Idempotency của command khác idempotency của event](#idempotency-của-command-khác-idempotency-của-event)
+- [Ordering: giữ theo aggregate, không đòi global order](#ordering-giữ-theo-aggregate-không-đòi-global-order)
+- [Eventual consistency: biến thành product behavior rõ ràng](#eventual-consistency-biến-thành-product-behavior-rõ-ràng)
+  - [Chiến lược 1 — Command response đủ để update UI tạm thời](#chiến-lược-1--command-response-đủ-để-update-ui-tạm-thời)
+  - [Chiến lược 2 — Trạng thái `202 Accepted` + operation resource](#chiến-lược-2--trạng-thái-202-accepted--operation-resource)
+  - [Chiến lược 3 — Read-your-write token/version](#chiến-lược-3--read-your-write-tokenversion)
+  - [Chiến lược 4 — Query critical data từ write store](#chiến-lược-4--query-critical-data-từ-write-store)
+  - [Chiến lược 5 — Sticky/session overlay](#chiến-lược-5--stickysession-overlay)
+- [Event contract và schema evolution](#event-contract-và-schema-evolution)
+  - [Chọn payload đầy đủ hoặc event tham chiếu](#chọn-payload-đầy-đủ-hoặc-event-tham-chiếu)
+- [Projection rebuild và backfill](#projection-rebuild-và-backfill)
+  - [Blue-green projection](#blue-green-projection)
+  - [Tránh mất event giữa snapshot và live stream](#tránh-mất-event-giữa-snapshot-và-live-stream)
+  - [Validation trước switch](#validation-trước-switch)
+- [Failure modes và runbook](#failure-modes-và-runbook)
+  - [Broker down](#broker-down)
+  - [Projector bug ghi dữ liệu sai](#projector-bug-ghi-dữ-liệu-sai)
+  - [Poison event](#poison-event)
+  - [Read store down](#read-store-down)
+  - [Event bị duplicate/out-of-order](#event-bị-duplicateout-of-order)
+  - [Outbox phình lớn](#outbox-phình-lớn)
+- [Observability: đo freshness chứ không chỉ đo uptime](#observability-đo-freshness-chứ-không-chỉ-đo-uptime)
+- [Security và data governance](#security-và-data-governance)
+- [Testing strategy](#testing-strategy)
+  - [Unit test command invariant](#unit-test-command-invariant)
+  - [Command idempotency integration test](#command-idempotency-integration-test)
+  - [Projector idempotency test](#projector-idempotency-test)
+  - [Contract test event schema](#contract-test-event-schema)
+  - [Failure injection](#failure-injection)
+  - [Rebuild drill](#rebuild-drill)
+- [Migration từ CRUD sang CQRS không big-bang](#migration-từ-crud-sang-cqrs-không-big-bang)
+  - [Bước 0 — Đo pain](#bước-0--đo-pain)
+  - [Bước 1 — Logical separation trong monolith](#bước-1--logical-separation-trong-monolith)
+  - [Bước 2 — Tối ưu query model cùng database](#bước-2--tối-ưu-query-model-cùng-database)
+  - [Bước 3 — Chọn một bounded context/query có ROI cao](#bước-3--chọn-một-bounded-contextquery-có-roi-cao)
+  - [Bước 4 — Thêm outbox và shadow projection](#bước-4--thêm-outbox-và-shadow-projection)
+  - [Bước 5 — Canary query traffic](#bước-5--canary-query-traffic)
+  - [Bước 6 — Operationalize rồi mới mở rộng](#bước-6--operationalize-rồi-mới-mở-rộng)
+- [Decision framework: khi nào nên và không nên dùng](#decision-framework-khi-nào-nên-và-không-nên-dùng)
+  - [Tín hiệu nên cân nhắc](#tín-hiệu-nên-cân-nhắc)
+  - [Tín hiệu không nên dùng mức tách store](#tín-hiệu-không-nên-dùng-mức-tách-store)
+  - [Những giải pháp đơn giản hơn cần thử trước](#những-giải-pháp-đơn-giản-hơn-cần-thử-trước)
+- [So sánh CRUD và CQRS theo trade-off](#so-sánh-crud-và-cqrs-theo-trade-off)
+- [Review checklist trước production](#review-checklist-trước-production)
+- [Bài liên quan](#bài-liên-quan)
 
-<Tabs items={["Mid", "Senior", "Staff"]}>
-
-<Tab value="Mid">
-
-Interviewer expect bạn nói được **command thay đổi state, query chỉ đọc**, và CQRS có thể bắt đầu đơn giản trong cùng application/cùng database. Bạn cần tránh nhầm rằng dùng CQRS bắt buộc phải có Kafka, microservices, hai database hoặc Event Sourcing.
-
-</Tab>
-
-<Tab value="Senior">
-
-Interviewer expect bạn chọn CQRS từ production pain cụ thể: read/write model khác nhau, read traffic áp đảo, query join nặng hoặc domain write có invariant phức tạp. Bạn phải giải thích được Outbox, at-least-once delivery, idempotent projector, ordering theo aggregate, eventual consistency, cách cho user thấy trạng thái vừa ghi và cách monitor projection lag.
-
-</Tab>
-
-<Tab value="Staff">
-
-Interviewer expect bạn thiết kế adoption/migration theo từng mức, ownership giữa team, schema/event versioning, replay/backfill, blue-green projection, disaster recovery và cost vận hành. Quan trọng hơn, bạn phải biết **khi nào không dùng CQRS** và đặt exit criteria nếu complexity lớn hơn giá trị nó tạo ra.
-
-</Tab>
-
-</Tabs>
-
----
-
-## Cốt lõi cần nhớ
-
-- **CQRS là tách responsibility của write và read, không đồng nghĩa với tách infrastructure.** Mức đơn giản có command/query handlers và models riêng nhưng dùng cùng database; chỉ tách data store khi số liệu chứng minh cần independent scaling hoặc read shape khác hẳn write shape.
-- Khi dùng hai data store, hệ thống đổi từ một transaction dễ hiểu sang pipeline bất đồng bộ: **write DB commit → outbox → broker → projector → read store**. Bạn phải thiết kế eventual consistency, duplicate, ordering, retry, DLQ, reconciliation và rebuild ngay từ đầu.
-- CQRS đáng dùng khi domain/write invariants phức tạp hoặc read/write workload bất đối xứng rõ ràng. Với CRUD đơn giản, team nhỏ và yêu cầu strong read-after-write, CQRS thường là over-engineering.
-
----
-
-## Câu trả lời mẫu
-
-> Tôi không bắt đầu CQRS bằng Kafka hay hai database, mà bắt đầu bằng việc chứng minh read và write đang có hai nhu cầu thực sự khác nhau. Ở write side, tôi model command theo business intent như `PlaceOrder`, validate invariant và commit transaction vào PostgreSQL; ở read side, tôi trả DTO đúng shape màn hình, không kéo cả domain aggregate chỉ để render danh sách. Nếu cùng database đã đủ, tôi dừng ở đó vì đó vẫn là CQRS ở mức logical separation. Chỉ khi query join nặng, read traffic lớn hoặc cần scale/read schema độc lập, tôi tạo projection riêng và publish change qua Transactional Outbox để tránh dual-write giữa database với Kafka. Consumer phải idempotent vì delivery thực tế là at-least-once, event được partition theo aggregate ID để giữ ordering, còn projection lag phải có metric và SLO. Với flow người dùng vừa ghi xong, tôi trả command result hoặc operation ID, hiển thị `processing`, hay tạm đọc source of truth thay vì giả vờ read store luôn strong consistent. Tôi từng thấy team áp CQRS cho CRUD admin rồi phải vận hành broker, replay và reconciliation không tạo giá trị, nên tiêu chí quan trọng của tôi là production pain phải lớn hơn operational complexity.
-
----
-
-## Phân tích chi tiết
-
-### 1. Production scenario: một model bắt đầu phục vụ hai mục tiêu mâu thuẫn
+## Một model phải phục vụ hai mục tiêu khác nhau
 
 Giả sử hệ thống e-commerce ban đầu có một Spring Boot service và PostgreSQL:
 
-```txt
-React -> Order API -> JPA entities -> PostgreSQL
+```d2 title="Một entity dùng chung cho read và write" interactive=false
+direction: right
+ui: React {icon: ../../diagrams/assets/react.svg}
+api: "Order API"
+entity: "JPA entity"
+db: PostgreSQL {
+  shape: cylinder
+  icon: ../../diagrams/assets/postgresql.svg
+}
+ui -> api
+api -> entity
+entity -> db
 ```
 
 `Order` entity được dùng cho tất cả:
@@ -69,60 +106,32 @@ React -> Order API -> JPA entities -> PostgreSQL
 - `GET /admin/orders`: dashboard có customer name, payment status, shipment SLA.
 - `GET /analytics/orders`: tổng hợp theo ngày, region, campaign.
 
-Lúc nhỏ, CRUD là lựa chọn tốt: ít code, transaction dễ hiểu, debug một database. Sau đó production xuất hiện pain:
+CRUD — tạo, đọc, sửa và xóa dữ liệu qua một model chung — thường là điểm bắt đầu hợp lý. Giả sử về sau màn hình admin phải join tám bảng, trong khi số lượt đọc lớn hơn số lượt ghi nhiều lần. Thêm index giúp query nhưng cũng làm mỗi write phải cập nhật thêm cấu trúc dữ liệu. Đây là write amplification: một thay đổi nghiệp vụ tạo ra nhiều thao tác lưu trữ hơn.
 
-```txt
-Read : write = 50 : 1
-Admin query join 8 bảng, p95 = 2.4s
-Index phục vụ dashboard làm write amplification tăng
-JPA entity expose field không nên trả cho customer
-Một thay đổi UI kéo theo sửa domain entity
-Read replica vẫn phải chạy query join nặng
-Team scale read nhưng phải scale cả write service
-```
+Hai phía bắt đầu có ưu tiên khác nhau:
 
-Write model muốn:
+| Write side | Read side |
+| --- | --- |
+| Giữ constraint và invariant | Trả đúng shape cho từng màn hình |
+| Commit thay đổi trong boundary rõ | Hạn chế join/tổng hợp lặp lại |
+| Kiểm soát concurrent updates | Index hoặc denormalize theo access pattern |
+| Xác nhận state đã ghi đúng | Chấp nhận dữ liệu cũ chỉ khi contract cho phép |
 
-```txt
-Normalized data
-Constraints
-Transaction boundary rõ
-Domain invariants
-Ít index để write ổn định
-```
-
-Read model muốn:
-
-```txt
-Denormalized shape đúng màn hình
-Không join hoặc join tối thiểu
-Nhiều index/search field
-Scale replicas độc lập
-Có thể chấp nhận stale vài giây
-```
+Tách model có thể giảm coupling giữa hai ưu tiên. Nhưng nếu chỉ thiếu một index, sửa query thường rẻ hơn dựng cả pipeline projection. Hãy bắt đầu bằng nguyên nhân cụ thể của query chậm.
 
 CQRS trở nên đáng cân nhắc vì **hai workload có mục tiêu khác nhau**, không phải vì pattern đang phổ biến.
 
 ---
 
-### 2. CQRS ở tầng bản chất
+## CQRS ở tầng bản chất
 
 CQRS viết tắt của **Command Query Responsibility Segregation**: tách model/flow xử lý thao tác làm thay đổi state khỏi model/flow chỉ đọc state.
 
-```txt
-Command
-- diễn tả business intent
-- có thể thay đổi state
-- validate authorization + business invariant
-- có thể fail vì conflict/rule
-- thường không trả về một read graph lớn
+Command diễn tả một ý định thay đổi, chẳng hạn `CancelOrder`. Handler phải kiểm tra quyền, trạng thái hiện tại và điều kiện hủy trước khi ghi. Query như `GetOrderDetails` chỉ trả dữ liệu, không thực hiện mutation nghiệp vụ.
 
-Query
-- không thay đổi business state
-- tối ưu để trả DTO/view
-- không chứa domain mutation
-- có thể cache/replicate/denormalize
-```
+Command có thể trả `orderId`, version hoặc kết quả thao tác. Việc tách trách nhiệm không bắt buộc command trả rỗng. Ngược lại, query không nên âm thầm chuyển trạng thái đơn chỉ vì người dùng mở trang chi tiết.
+
+Khi đọc code bên dưới, **DTO** là object dùng để chuyển dữ liệu qua API. **Aggregate** là nhóm dữ liệu có một boundary để giữ invariant khi thay đổi; nó không nhất thiết trùng một bảng hay toàn bộ graph JPA entities.
 
 Ví dụ tên command tốt:
 
@@ -170,9 +179,9 @@ Không cần hydrate đầy đủ `Order`, `OrderItem`, `Payment`, `Shipment` ag
 
 ---
 
-### 3. CQRS không phải những gì?
+## Phân biệt CQRS với topology và các pattern liên quan
 
-#### CQRS không bắt buộc hai databases
+### CQRS không bắt buộc hai databases
 
 Logical separation đủ để gọi là CQRS:
 
@@ -196,15 +205,15 @@ db.shape: cylinder
 
 Hai side có model/code path khác nhau nhưng cùng data store. Đây thường là bước đầu an toàn nhất.
 
-#### CQRS không bắt buộc microservices
+### CQRS không bắt buộc microservices
 
 Một modular monolith có package/module command và query riêng vẫn áp dụng CQRS tốt. Tách network service quá sớm thêm timeout, deployment, tracing và data ownership complexity mà không chắc có lợi.
 
-#### CQRS không bắt buộc asynchronous command
+### CQRS không bắt buộc asynchronous command
 
 Command có thể xử lý synchronous và trả `201 Created` sau khi write DB commit. Khi business process dài, command có thể trả `202 Accepted` cùng operation ID rồi xử lý async. CQRS không ép mọi command qua queue.
 
-#### CQRS không đồng nghĩa Event Sourcing
+### CQRS không đồng nghĩa Event Sourcing
 
 - **CQRS**: tách read responsibility và write responsibility.
 - **Event Sourcing**: lưu lịch sử event làm source of truth thay vì chỉ lưu current state.
@@ -218,15 +227,15 @@ Event Sourcing không có read model phức tạp   có thể, dù thường k�
 CRUD + domain events                          ✅
 ```
 
-#### CQRS không đồng nghĩa event-driven architecture
+### CQRS không đồng nghĩa event-driven architecture
 
 CQRS cùng database có thể hoàn toàn synchronous, không broker. Event-driven thường xuất hiện khi tách data stores vì cần cập nhật projection, nhưng đó là quyết định triển khai, không phải định nghĩa CQRS.
 
 ---
 
-### 4. Ba mức triển khai: tăng complexity theo pain
+## Ba mức triển khai: tăng complexity theo pain
 
-#### Mức 1 — Tách code path, cùng model/cùng database
+### Mức 1 — Tách code path, cùng model/cùng database
 
 ```d2 title="Mức 1 — Tách code path, cùng model/cùng database"
 direction: right
@@ -254,7 +263,7 @@ Bạn tách controller/handler nhưng vẫn có thể dùng chung schema. Lợi 
 
 Đây là mức phù hợp để cải thiện codebase mà chưa trả operational cost của messaging.
 
-#### Mức 2 — Tách write model/read model, vẫn cùng database
+### Mức 2 — Tách write model/read model, vẫn cùng database
 
 ```d2 title="Hai model trong cùng PostgreSQL"
 direction: right
@@ -295,7 +304,7 @@ LIMIT :limit;
 
 Mức này tránh domain model bị biến thành read DTO và giữ strong consistency của một database. Nếu performance đạt SLO, không cần đi xa hơn.
 
-#### Mức 3 — Tách data stores và cập nhật projection bất đồng bộ
+### Mức 3 — Tách data stores và cập nhật projection bất đồng bộ
 
 ```d2 title="Mức 3 — Tách data stores và cập nhật projection bất đồng bộ"
 direction: right
@@ -329,7 +338,7 @@ Mức 3 tạo independent scaling và read shape tối ưu, nhưng từ đây re
 
 ---
 
-### 5. Thiết kế write side: command, aggregate và invariant
+## Thiết kế write side: command, aggregate và invariant
 
 Giả sử command đặt hàng:
 
@@ -414,7 +423,7 @@ CREATE TABLE processed_commands (
 
 Chỉ check bằng `SELECT` trong application là chưa đủ vì hai request concurrent có thể cùng thấy “chưa tồn tại”. Unique constraint là hàng rào cuối; handler phải map conflict thành kết quả idempotent phù hợp.
 
-#### Invariant nằm ở đâu?
+### Đặt invariant ở write boundary
 
 Ví dụ:
 
@@ -429,7 +438,7 @@ Write side phải bảo vệ invariant trong transaction/aggregate và database 
 
 ---
 
-### 6. Thiết kế read side: projection theo access pattern
+## Thiết kế read side: projection theo access pattern
 
 Read model không phải bản copy 1:1 của write tables. Nó là representation tối ưu cho một hoặc nhiều query cụ thể.
 
@@ -490,11 +499,11 @@ Rebuild strategy
 Ownership và retention rõ
 ```
 
-Nếu không có sáu thứ này, “read model nhanh” dễ trở thành một database bí ẩn không ai dám sửa.
+Nếu thiếu các cơ chế này, read model có thể nhanh lúc đầu nhưng khó phát hiện lệch và khó phục hồi. Hãy chốt cách dựng lại dữ liệu trước khi đưa projection vào đường đọc chính.
 
 ---
 
-### 7. Dual-write problem: vì sao không save DB rồi publish Kafka trực tiếp?
+## Dual-write và Transactional Outbox
 
 Naive flow:
 
@@ -527,7 +536,7 @@ Case C:
 
 Không nên “fix” bằng try/catch đơn giản. Đây là distributed consistency problem.
 
-#### Transactional Outbox
+### Transactional Outbox
 
 Lưu business row và event row trong cùng local DB transaction:
 
@@ -581,7 +590,7 @@ Relay riêng đọc unpublished rows rồi gửi broker. Có hai hướng phổ 
 
 Outbox đóng failure window giữa business commit và event creation, nhưng không tạo exactly-once end-to-end miễn phí. Relay có thể publish xong rồi crash trước khi mark row; do đó consumer vẫn phải idempotent.
 
-#### Batch size và polling interval chọn thế nào?
+### Chọn batch size và polling interval bằng đo lường
 
 Không có magic number. Ví dụ bắt đầu `100–500` rows/batch và polling `100–500 ms` có thể hợp với workload vừa, nhưng phải đo:
 
@@ -599,7 +608,7 @@ Batch quá nhỏ tăng round trips; quá lớn giữ lock lâu và tạo burst. 
 
 ---
 
-### 8. At-least-once delivery và idempotent consumer
+## At-least-once delivery và idempotent consumer
 
 Trong distributed messaging, duplicate là bình thường:
 
@@ -612,7 +621,7 @@ Kafka redelivers event
 
 Consumer cần xử lý cùng event nhiều lần mà final state không sai.
 
-#### Cách 1 — Inbox/processed events table
+### Cách 1 — Inbox/processed events table
 
 ```sql
 CREATE TABLE projection_processed_events (
@@ -642,7 +651,7 @@ public void on(OrderPlacedV1 event) {
 
 `tryInsert` phải dựa trên unique constraint/`INSERT ... ON CONFLICT DO NOTHING`, không phải check-then-insert không atomic.
 
-#### Cách 2 — Version guard
+### Cách 2 — Version guard
 
 Nếu event của mỗi aggregate có monotonic version:
 
@@ -659,21 +668,18 @@ WHERE order_id = :orderId
 
 Version guard bỏ qua duplicate/older event, nhưng phải định nghĩa behavior khi nhận version `7` trước version `6`. Có thể buffer/retry, fetch source snapshot, hoặc thiết kế event đủ state để last-write projection an toàn. Không nên giả định “Kafka luôn đúng thứ tự” trên mọi key/topic/repartition path.
 
-#### Idempotency của command khác idempotency của event
+### Idempotency của command khác idempotency của event
 
-```txt
-Command idempotency
-→ client retry POST không tạo business action hai lần
-
-Event idempotency
-→ broker redelivery không apply projection/effect hai lần
-```
+| Boundary | Duplicate cần xử lý | Effect cần bảo vệ |
+| --- | --- | --- |
+| Command | Client retry cùng yêu cầu `POST` | Không tạo hành động nghiệp vụ lần hai |
+| Event | Broker gửi lại hoặc operator replay | Không apply cùng projection/effect lần hai |
 
 Cả hai đều cần. Một `Idempotency-Key` ở API không tự bảo vệ consumer, và dedupe event không ngăn client tạo hai command ID khác nhau cho cùng ý định.
 
 ---
 
-### 9. Ordering: giữ theo aggregate, không đòi global order
+## Ordering: giữ theo aggregate, không đòi global order
 
 Với order `ord-123`:
 
@@ -723,7 +729,7 @@ Event nên có ít nhất:
 
 ---
 
-### 10. Eventual consistency: biến thành product behavior rõ ràng
+## Eventual consistency: biến thành product behavior rõ ràng
 
 Khi write store và read store tách nhau:
 
@@ -747,7 +753,7 @@ Flow nào bắt buộc strong read-after-write?
 Khi lag vượt SLO thì degrade/fallback ra sao?
 ```
 
-#### Chiến lược 1 — Command response đủ để update UI tạm thời
+### Chiến lược 1 — Command response đủ để update UI tạm thời
 
 `POST /orders` trả:
 
@@ -761,7 +767,7 @@ Khi lag vượt SLO thì degrade/fallback ra sao?
 
 Frontend optimistic-insert item vào danh sách và reconcile sau. Phù hợp khi command hoàn tất nhanh và response có đủ identity/state tối thiểu.
 
-#### Chiến lược 2 — Trạng thái `202 Accepted` + operation resource
+### Chiến lược 2 — Trạng thái `202 Accepted` + operation resource
 
 ```http
 HTTP/1.1 202 Accepted
@@ -772,7 +778,7 @@ Location: /operations/op-789
 
 Client poll hoặc nhận WebSocket/SSE notification đến khi operation hoàn tất. Phù hợp cho workflow dài, nhưng cần operation retention, timeout và failure semantics.
 
-#### Chiến lược 3 — Read-your-write token/version
+### Chiến lược 3 — Read-your-write token/version
 
 Command trả `writeVersion`. Query gửi minimum version:
 
@@ -783,17 +789,17 @@ X-Minimum-Version: 3
 
 Query service chỉ trả projection khi version ≥ 3; nếu chưa, nó có thể wait ngắn, trả `202`, hoặc fallback source. Đây là contract mạnh nhưng làm query path phức tạp, cần timeout rõ.
 
-#### Chiến lược 4 — Query critical data từ write store
+### Chiến lược 4 — Query critical data từ write store
 
 Sau một số command nhạy cảm, đọc trực tiếp source of truth trong một khoảng/context cụ thể. Ví dụ payment result hoặc inventory reservation không nên quyết định dựa trên stale projection. Đừng biến fallback thành mặc định cho mọi read, nếu không bạn trả complexity CQRS mà không nhận benefit.
 
-#### Chiến lược 5 — Sticky/session overlay
+### Chiến lược 5 — Sticky/session overlay
 
 Lưu command result gần client/BFF trong thời gian ngắn để merge với projection. Cách này cải thiện UX nhưng có edge case multi-device và cần cleanup. Chỉ dùng khi semantics đơn giản và test được.
 
 ---
 
-### 11. Event contract và schema evolution
+## Event contract và schema evolution
 
 Event đã publish là contract giữa producer và consumers. Đổi field tùy tiện có thể làm projector cũ chết.
 
@@ -827,7 +833,7 @@ Thêm `salesChannel` có thể là additive V2. Consumer cũ dùng default khi t
 
 Không publish trực tiếp JPA entity serialized. Entity thay đổi theo persistence/domain refactor, có lazy relation và field nhạy cảm; event contract cần DTO riêng, immutable và có version.
 
-#### Fat event hay thin event?
+### Chọn payload đầy đủ hoặc event tham chiếu
 
 - **Thin event** chỉ có ID, projector gọi lại source: payload nhỏ nhưng tạo coupling, N+1 calls và source phải giữ historical semantics.
 - **Fat event** mang data cần cho projection: projector độc lập/replay tốt hơn nhưng payload lớn, duplicate/PII và versioning phức tạp hơn.
@@ -836,7 +842,7 @@ Thường dùng event chứa fact cùng dữ liệu ổn định cần thiết �
 
 ---
 
-### 12. Projection rebuild và backfill
+## Projection rebuild và backfill
 
 Read model là derived data thì phải có khả năng rebuild. “Có Kafka” không tự động nghĩa là replay được mãi; topic có retention hữu hạn, event schema cũ có thể không còn handler, và external data có thể đã đổi.
 
@@ -847,19 +853,11 @@ Các nguồn rebuild:
 3. Gọi bulk snapshot API có version/watermark.
 4. Kết hợp snapshot định kỳ + events mới.
 
-#### Blue-green projection
+### Blue-green projection
 
 Không truncate read table đang phục vụ traffic rồi rebuild tại chỗ:
 
-```txt
-Current: customer_order_view_v1 -> serving
-Build:   customer_order_view_v2 -> backfill/replay
-Validate: count/checksum/sample/business totals/lag
-Switch alias/view/query config atomically sang v2
-Keep v1 một thời gian để rollback
-```
-
-Flow:
+Giữ `customer_order_view_v1` phục vụ request trong khi dựng `v2` từ snapshot và event. Chỉ đổi query sang `v2` sau khi đã kiểm tra count, business totals, dữ liệu mẫu và độ trễ bắt kịp. Sơ đồ sau cho thấy bước kiểm chứng nằm trước cutover, không phải sau khi người dùng bắt đầu thấy dữ liệu mới:
 
 ```d2 title="Blue-green projection"
 direction: right
@@ -878,7 +876,7 @@ C -> SW: "Yes"
 SW -> Q
 ```
 
-#### Tránh mất event giữa snapshot và live stream
+### Tránh mất event giữa snapshot và live stream
 
 Cần watermark rõ, ví dụ database LSN, outbox sequence hoặc aggregate version:
 
@@ -892,7 +890,7 @@ Cần watermark rõ, ví dụ database LSN, outbox sequence hoặc aggregate ver
 
 Nếu không có consistent watermark, event xảy ra trong lúc export có thể bị mất hoặc apply hai lần. Idempotency xử lý duplicate, nhưng mất event cần protocol đúng để tránh.
 
-#### Validation trước switch
+### Validation trước switch
 
 Không chỉ so row count:
 
@@ -909,35 +907,35 @@ Business reconciliation với source
 
 ---
 
-### 13. Failure modes và runbook
+## Failure modes và runbook
 
-#### Broker down
+### Broker down
 
 Write API vẫn có thể commit business transaction và outbox row nếu DB khỏe. Outbox backlog tăng; read model stale. Cần outbox retention/capacity, backlog alert và policy xem write có tiếp tục bao lâu trước khi degraded mode.
 
-#### Projector bug ghi dữ liệu sai
+### Projector bug ghi dữ liệu sai
 
 Pause consumer, giữ events, deploy fix, rebuild projection mới hoặc replay từ safe offset. Không sửa tay hàng triệu rows nếu không có audit và reproducible logic; manual patch dễ bị event tiếp theo overwrite.
 
-#### Poison event
+### Poison event
 
 Một event schema/data lỗi khiến consumer retry vô hạn và chặn partition. Retry có backoff và giới hạn, sau đó đưa vào DLQ/quarantine cùng error context; nhưng chuyển DLQ có thể phá ordering, nên runbook phải biết các event sau có được xử lý hay phải pause aggregate/partition.
 
-#### Read store down
+### Read store down
 
 Query API có thể fail fast, trả degraded cached response hoặc fallback cho một số critical query. Không tự động route mọi query sang write DB vì có thể tạo thundering herd làm source of truth sập theo. Fallback phải có rate limit/circuit breaker và được capacity-test.
 
-#### Event bị duplicate/out-of-order
+### Event bị duplicate/out-of-order
 
 Idempotency + aggregate version guard. Nếu gap version, metric `projection_version_gap_total` và route event vào retry/quarantine; không silent apply rồi hy vọng đúng.
 
-#### Outbox phình lớn
+### Outbox phình lớn
 
 Archive/delete published rows theo retention sau khi chắc rằng audit/replay source không phụ thuộc table này. Index partial cho unpublished rows, partition theo thời gian nếu volume lớn, và monitor vacuum/storage. Cleanup job cũng phải batch để tránh lock/I/O spike.
 
 ---
 
-### 14. Observability: đo freshness chứ không chỉ đo uptime
+## Observability: đo freshness chứ không chỉ đo uptime
 
 Một CQRS pipeline có thể “tất cả service đều green” nhưng data stale 30 phút. Metric quan trọng:
 
@@ -997,7 +995,7 @@ Nhờ đó có thể đi từ HTTP command → DB/outbox → Kafka → projector
 
 ---
 
-### 15. Security và data governance
+## Security và data governance
 
 CQRS nhân bản dữ liệu, nên security không đơn giản hơn tự động.
 
@@ -1026,9 +1024,9 @@ Multi-tenant read model phải chứa `tenant_id` và enforce filter/index. Mộ
 
 ---
 
-### 16. Testing strategy
+## Testing strategy
 
-#### Unit test command invariant
+### Unit test command invariant
 
 ```java
 @Test
@@ -1040,19 +1038,19 @@ void shippedOrderCannotBeCancelled() {
 }
 ```
 
-#### Command idempotency integration test
+### Command idempotency integration test
 
 Gửi cùng `commandId` concurrent nhiều lần; assert chỉ có một order, một aggregate version/event logical, và các response cùng business result. Test này phải chạy với database constraint thật, không chỉ mock repository.
 
-#### Projector idempotency test
+### Projector idempotency test
 
 Apply cùng event 2–10 lần; final projection giống apply một lần. Apply event cũ sau event mới; version không lùi.
 
-#### Contract test event schema
+### Contract test event schema
 
 Producer event phải compatible với registered schema/fixtures của consumer. Test cả missing optional field, unknown field và old version, không chỉ happy current version.
 
-#### Failure injection
+### Failure injection
 
 ```txt
 - Crash relay sau broker ACK nhưng trước mark published
@@ -1065,15 +1063,15 @@ Producer event phải compatible với registered schema/fixtures của consumer
 
 Nếu architecture hứa chịu được at-least-once nhưng chưa từng test crash window, lời hứa đó chưa được kiểm chứng.
 
-#### Rebuild drill
+### Rebuild drill
 
 Định kỳ rebuild một projection staging/canary từ snapshot/event history và đo thời gian. Nếu 2 TB projection mất 5 ngày để rebuild nhưng RTO yêu cầu 4 giờ, architecture chưa đạt yêu cầu dù runbook viết đẹp.
 
 ---
 
-### 17. Migration từ CRUD sang CQRS không big-bang
+## Migration từ CRUD sang CQRS không big-bang
 
-#### Bước 0 — Đo pain
+### Bước 0 — Đo pain
 
 ```txt
 Query nào vi phạm SLO?
@@ -1086,19 +1084,19 @@ Freshness requirement?
 
 Nếu chỉ một query chậm, index/materialized view/cache có thể đủ.
 
-#### Bước 1 — Logical separation trong monolith
+### Bước 1 — Logical separation trong monolith
 
 Tạo command/query DTO/handlers riêng. Không tách DB, không Kafka. Mục tiêu là boundaries rõ và tests tốt.
 
-#### Bước 2 — Tối ưu query model cùng database
+### Bước 2 — Tối ưu query model cùng database
 
 Dùng SQL DTO, view/materialized view hoặc read replica. Đo lại SLO và write impact. Dừng nếu đã đủ.
 
-#### Bước 3 — Chọn một bounded context/query có ROI cao
+### Bước 3 — Chọn một bounded context/query có ROI cao
 
 Ví dụ admin order search, không migrate toàn hệ thống. Xác định source, event contract, projection owner, freshness SLO và fallback.
 
-#### Bước 4 — Thêm outbox và shadow projection
+### Bước 4 — Thêm outbox và shadow projection
 
 Build read store song song nhưng chưa serve user. So kết quả với query cũ bằng shadow read/sampling.
 
@@ -1111,19 +1109,19 @@ old -> metrics
 new -> metrics
 ```
 
-#### Bước 5 — Canary query traffic
+### Bước 5 — Canary query traffic
 
 Route 1%, 10%, 50%, 100%; theo dõi correctness, latency, lag, cost. Có feature flag để rollback về query cũ, nhưng capacity của old path phải còn đủ trong migration window.
 
-#### Bước 6 — Operationalize rồi mới mở rộng
+### Bước 6 — Operationalize rồi mới mở rộng
 
 Hoàn thiện dashboard, on-call runbook, replay tool, DLQ handling, schema governance. Chỉ migrate bounded context tiếp theo nếu lợi ích đã được đo.
 
 ---
 
-### 18. Decision framework: khi nào nên và không nên dùng
+## Decision framework: khi nào nên và không nên dùng
 
-#### Tín hiệu nên cân nhắc
+### Tín hiệu nên cân nhắc
 
 - Read và write có model rất khác nhau.
 - Read volume/scale lớn hơn write nhiều và cần scale độc lập.
@@ -1133,7 +1131,7 @@ Hoàn thiện dashboard, on-call runbook, replay tool, DLQ handling, schema gove
 - Eventual consistency được product chấp nhận cho read path.
 - Team có năng lực vận hành broker, replay, reconciliation và observability.
 
-#### Tín hiệu không nên dùng mức tách store
+### Tín hiệu không nên dùng mức tách store
 
 - CRUD admin đơn giản, traffic nhỏ.
 - Một model/database đáp ứng latency/cost.
@@ -1143,22 +1141,22 @@ Hoàn thiện dashboard, on-call runbook, replay tool, DLQ handling, schema gove
 - Không có cách rebuild/reconcile derived data.
 - Chỉ áp dụng vì “microservices best practice”.
 
-#### Những giải pháp đơn giản hơn cần thử trước
+### Những giải pháp đơn giản hơn cần thử trước
 
-```txt
-Slow query          -> EXPLAIN, index, query rewrite
-Read nhiều          -> read replica, cache
-Shape UI khác entity-> dedicated DTO/query SQL
-Aggregation         -> materialized view/warehouse
-Full-text search    -> search index như một projection cục bộ
-Team coupling       -> modular monolith/bounded context
-```
+| Vấn đề | Biện pháp ít phức tạp hơn cần thử |
+| --- | --- |
+| Slow query | EXPLAIN, index, query rewrite |
+| Nhiều read giống nhau | Cache hoặc replica nếu consistency cho phép |
+| UI cần shape khác entity | DTO và query SQL riêng |
+| Tổng hợp nặng | Materialized view hoặc analytical pipeline |
+| Full-text search | Search index cho đúng phạm vi cần tìm |
+| Module/team phụ thuộc chéo | Làm rõ boundary trong modular monolith |
 
 CQRS không phải binary. Có thể dùng cho một bounded context hoặc vài queries, không cần áp dụng toàn bộ platform.
 
 ---
 
-### 19. So sánh CRUD và CQRS theo trade-off
+## So sánh CRUD và CQRS theo trade-off
 
 | Khía cạnh | CRUD truyền thống | CQRS logical, cùng DB | CQRS tách stores |
 |---|---|---|---|
@@ -1174,7 +1172,7 @@ Architecture tốt không phải architecture nhiều box nhất. Nó là mức 
 
 ---
 
-### 20. Review checklist trước production
+## Review checklist trước production
 
 ```txt
 Business & UX
@@ -1209,118 +1207,7 @@ Operations
 [ ] Rebuild RTO đã drill
 ```
 
----
+## Bài liên quan
 
-## Bẫy thường gặp
-
-❌ **"CQRS nghĩa là phải có hai microservices, hai database và Kafka."**
-→ Tại sao sai: Đó chỉ là một implementation mức cao. CQRS có thể là command/query handlers và models riêng trong cùng monolith/cùng database.
-✅ Đúng hơn: Bắt đầu logical separation, chỉ tách infrastructure khi workload và SLO chứng minh lợi ích.
-
----
-
-❌ **"CQRS và Event Sourcing là một."**
-→ Tại sao sai: CQRS tách read/write responsibility; Event Sourcing lưu event history làm source of truth. Chúng thường đi cùng nhưng độc lập.
-✅ Đúng hơn: Nói rõ source of truth là current-state database hay event store, rồi giải thích read model được tạo thế nào.
-
----
-
-❌ **"Save database xong publish Kafka là đủ, lỗi thì retry."**
-→ Tại sao sai: Crash giữa hai thao tác tạo missing event; publish trước commit có thể tạo phantom event; retry tạo duplicate.
-✅ Đúng hơn: Dùng Transactional Outbox/CDC cho atomic business write + event creation, và idempotent consumer cho redelivery.
-
----
-
-❌ **"Kafka exactly-once nên consumer không cần idempotency."**
-→ Tại sao sai: Exactly-once có scope/điều kiện cụ thể và không tự làm transaction với mọi external read database. App crash, replay, operator reset offset hoặc side effect ngoài Kafka vẫn tạo duplicate risk.
-✅ Đúng hơn: Thiết kế event ID, unique constraint/inbox và version guard; coi duplicate là normal failure mode.
-
----
-
-❌ **"Read model là source để validate write vì query nhanh hơn."**
-→ Tại sao sai: Read model có thể stale. Dùng nó để quyết định inventory/payment/authorization có thể phá invariant.
-✅ Đúng hơn: Critical invariant đọc/lock/validate ở write side hoặc một consistency boundary được định nghĩa rõ.
-
----
-
-❌ **"Eventual consistency nghĩa là dữ liệu rồi sẽ đúng, không cần SLO."**
-→ Tại sao sai: “Eventually” có thể là 200 ms hoặc 2 ngày nếu projector kẹt. User và on-call cần biết mức stale chấp nhận được.
-✅ Đúng hơn: Đặt end-to-end freshness SLO, đo oldest event age, thiết kế UX/fallback và alert khi vi phạm.
-
----
-
-❌ **"Có event log nên rebuild projection lúc nào cũng dễ."**
-→ Tại sao sai: Retention có thể thiếu, schema cũ không còn compatible, replay quá chậm, PII/reference data đã đổi hoặc không có watermark nhất quán.
-✅ Đúng hơn: Thiết kế snapshot/watermark/blue-green rebuild, version handlers và chạy rebuild drill định kỳ.
-
----
-
-❌ **"Denormalize read model thì mọi query đều nhanh."**
-→ Tại sao sai: Mỗi projection tối ưu cho access pattern cụ thể; query mới có thể cần index/projection khác. Duplicate data còn tăng storage, sync và privacy cost.
-✅ Đúng hơn: Thiết kế projection từ query/SLO thật, giới hạn responsibility và theo dõi cost/correctness.
-
----
-
-❌ **"Áp CQRS toàn hệ thống để architecture đồng nhất."**
-→ Tại sao sai: Bounded context đơn giản phải gánh complexity không cần thiết, làm onboarding/debug/deploy chậm hơn.
-✅ Đúng hơn: Dùng CQRS có chọn lọc ở nơi read/write asymmetry hoặc domain complexity đủ lớn; phần còn lại giữ CRUD.
-
----
-
-## Câu hỏi follow-up
-
-### 1. Command có được trả dữ liệu không?
-
-CQRS không cấm command trả bất kỳ dữ liệu nào. Command thường trả identity, version, status hoặc operation ID cần để client tiếp tục flow, thay vì trả một read graph lớn như query. Trả `orderId` sau `PlaceOrder` là hợp lý; gọi read model ngầm rồi trả dashboard đầy đủ làm boundary mờ và có thể bị projection lag.
-
-### 2. Làm sao đảm bảo read-your-write?
-
-Chọn theo business flow: trả command result để frontend optimistic update, dùng operation status, truyền minimum aggregate version, wait ngắn cho projection hoặc fallback source ở critical path. Không có chiến lược miễn phí; wait/fallback tăng coupling và load, còn optimistic UI cần reconcile lỗi. Hãy ghi rõ timeout và behavior khi projection không catch up.
-
-### 3. Có cần một database technology khác cho read side không?
-
-Không. PostgreSQL denormalized table/schema có thể đủ và dễ vận hành hơn; cùng technology vẫn có thể là store/instance riêng. Chỉ chọn OpenSearch, Redis, DynamoDB hoặc database khác khi access pattern và số liệu chứng minh lợi ích lớn hơn polyglot persistence cost.
-
-### 4. Outbox có bảo đảm exactly-once không?
-
-Outbox bảo đảm event record được tạo nếu và chỉ nếu local business transaction commit, nhưng relay vẫn có thể publish cùng row nhiều lần. End-to-end thường là at-least-once, nên consumer phải idempotent. “Exactly-once business effect” đạt được bằng combination của unique business key, event ID, transaction và idempotent side effects, không chỉ một broker setting.
-
-### 5. Nếu event đến sai thứ tự thì làm gì?
-
-Partition theo aggregate ID và giữ processing tuần tự là lớp đầu. Event có `aggregateVersion`; projector bỏ duplicate/older version và phát hiện gap. Với gap, retry/buffer hoặc fetch snapshot tùy SLO, nhưng không silent apply nếu event delta phụ thuộc state trước.
-
-### 6. Khi nào dùng Event Sourcing cùng CQRS?
-
-Cân nhắc khi lịch sử/intent là source of truth có giá trị cao, cần temporal query/audit/replay, domain có behavior phức tạp hoặc cần tạo nhiều projection từ lịch sử. Không dùng chỉ vì đã có Kafka; event store cần concurrency, snapshot, upcasting/versioning, retention và tooling riêng. Với phần lớn CRUD/business system, state-based write DB + outbox đơn giản hơn.
-
-### 7. Xử lý transaction qua nhiều aggregates/services thế nào?
-
-CQRS không tự giải quyết distributed transaction. Giữ invariant strong trong một aggregate/local transaction nếu có thể; workflow qua services thường dùng Saga/process manager, idempotent commands, timeout và compensating action. Đừng mở rộng aggregate chỉ để có một transaction khổng lồ hoặc giả vờ eventual consistency phù hợp với mọi invariant.
-
-### 8. Read model có nên dùng cache không?
-
-Có thể, nhưng read model bản thân đã là derived/denormalized data nên thêm cache tạo thêm một lớp stale/invalidation. Chỉ cache query có traffic/latency cần thiết, định nghĩa TTL và cache key theo tenant/user/version. Trước tiên đo read store và index; không thêm Redis theo phản xạ.
-
-### 9. Reconciliation job hoạt động ra sao?
-
-Job so source of truth với projection theo partition/time bucket hoặc sample, dùng aggregate ID/version, count, checksum và business totals để phát hiện lệch. Khi phát hiện mismatch, có thể enqueue rebuild cho aggregate/partition thay vì sửa tay. Job phải rate-limit để không làm write DB quá tải và metric hóa số mismatch cùng tuổi của mismatch.
-
-### 10. Làm sao rollback release có event schema mới?
-
-Ưu tiên backward/forward-compatible additive change để producer mới và cũ cùng chạy trong deployment window. Consumer nên hiểu cả old/new version trước khi producer bắt đầu phát version mới; đây là expand-and-contract. Nếu breaking change bắt buộc, dùng event type/version mới và dual-publish hoặc migration plan rõ, không đổi semantics cũ trong im lặng.
-
-### 11. Có nên cho query gọi write database khi projection lag cao?
-
-Chỉ với query critical, giới hạn traffic và đã capacity-test. Fallback toàn bộ có thể biến read incident thành write database incident, làm command path cũng sập. Thường tốt hơn là trả trạng thái degraded/stale có timestamp, circuit breaker fallback và ưu tiên khôi phục projector.
-
-### 12. CQRS có giúp scale team không?
-
-Có thể nếu boundaries và ownership khớp bounded context, nhưng cũng có thể tăng coordination qua event contracts và data ownership. Tách read/write team không nên khiến không ai chịu trách nhiệm end-to-end freshness. Mỗi flow cần owner từ command đến projection/query, schema review và on-call rõ ràng.
-
----
-
-## Xem thêm
-
-- [Cluster, Sharding, Replication, Primary/Replica là gì?](/system-design/01-distributed-system-terms) — nền tảng về replication lag, partition, failover và consistency.
 - [Scale từ 1,000 lên 50,000 users](/system-design/03-scale-1k-to-50k-users) — cách đo bottleneck trước khi tách thêm infrastructure.
 - [SQL vs NoSQL: chọn database như thế nào?](/database/01-sql-vs-nosql) — chọn write/read store theo invariant và access pattern.

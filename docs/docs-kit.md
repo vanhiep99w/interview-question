@@ -49,8 +49,8 @@ SVG và mở source qua disclosure.
   hay tự chứng minh các nhánh chạy song song.
 - State machine dùng node và cạnh có nhãn; state cùng tên trong hai container
   là hai node khác nhau, cần chỉ rõ path.
-- `mode=tabs` + `scenarios` cho các tình huống độc lập; ví dụ failover trong
-  `content/docs/system-design/01-distributed-system-terms.mdx`.
+- `mode=tabs` + `scenarios` cho các tình huống độc lập. Chỉ dùng khi bài cần
+  đối chiếu các phương án; không thêm điều khiển tương tác cho mọi sơ đồ nhỏ.
 - `mode=steps` + `steps` khi các bước kế thừa nhau. Không tự autoplay.
 - Fence `layout=elk|dagre|tala` hoặc frontmatter `d2Layout` để đổi layout.
 - Không dùng D2 để giả vờ có trục thời gian tỷ lệ; dùng Span Waterfall khi có timing.

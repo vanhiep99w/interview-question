@@ -14,6 +14,8 @@
     "predev": "npm run source:build",
     "prebuild": "npm run source:build",
     "test:source": "playwright test",
+    "test:docs": "node scripts/check-content.mjs",
+    "test:bulk-doc": "node scripts/test-bulk-upsert-doc.mjs",
     "examples:webpack:build": "node scripts/capture-webpack-output.mjs",
     "examples:federation:test": "node scripts/test-module-federation.mjs",
     "examples:labs:test": "node scripts/test-source-labs.mjs"

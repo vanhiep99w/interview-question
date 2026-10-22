@@ -1,390 +1,211 @@
 ---
-title: "Page 60ms ở Singapore nhưng 6s ở Mỹ — xử lý như thế nào?"
-description: "Debug và fix geo-latency: CDN cache miss, TCP RTT nhân hệ số, serial API chain, multi-region origin — hệ thống tư duy từ symptom đến root cause đến giải pháp."
+title: "Chẩn đoán độ trễ theo vùng: từ waterfall đến kiến trúc dữ liệu"
+description: "Phân biệt DNS, TCP, TLS, TTFB và rendering; kiểm tra CDN, request nối tiếp và multi-region mà không suy đoán nguyên nhân từ vị trí địa lý."
 ---
 
-# Page 60ms ở Singapore nhưng 6s ở Mỹ
+Giả sử cùng một trang mở trong khoảng 60 ms ở Singapore nhưng mất 6 giây với người dùng tại Mỹ. Hai số này chưa đủ để kết luận thiếu CDN hay database quá chậm. Thậm chí chúng có thể đang đo hai thứ khác nhau: thời gian API trả byte đầu tiên và thời gian trang render xong.
 
-## Câu hỏi
+Cách xử lý là tạo phép đo có thể so sánh, xác định phần chờ nằm ở đâu rồi mới chọn giải pháp. Bài này dùng tình huống giả định trên để giải thích quy trình; không có phép đo production nào được ngầm coi là đã thực hiện.
 
-> **Bạn nhận được báo cáo: một trang web load trong 60ms ở Singapore nhưng mất 6 giây ở Mỹ. Bạn sẽ debug và xử lý vấn đề này như thế nào?**
+## Mục lục
 
----
+- [Định nghĩa thứ đang chậm](#định-nghĩa-thứ-đang-chậm)
+  - [Latency của request khác thời gian trang dùng được](#latency-của-request-khác-thời-gian-trang-dùng-được)
+  - [RTT là chi phí của một lượt đi và về](#rtt-là-chi-phí-của-một-lượt-đi-và-về)
+- [Thu thập waterfall từ đúng vị trí](#thu-thập-waterfall-từ-đúng-vị-trí)
+- [Đọc CDN bằng cache policy và bằng chứng thực tế](#đọc-cdn-bằng-cache-policy-và-bằng-chứng-thực-tế)
+  - [Có CDN không đồng nghĩa response đã cache](#có-cdn-không-đồng-nghĩa-response-đã-cache)
+  - [Chỉ cache khi cache key biểu diễn đủ các biến thể](#chỉ-cache-khi-cache-key-biểu-diễn-đủ-các-biến-thể)
+- [Request nối tiếp khuếch đại RTT](#request-nối-tiếp-khuếch-đại-rtt)
+- [Connection reuse, HTTP và TLS](#connection-reuse-http-và-tls)
+- [Multi-region phải đưa cả dữ liệu vào thiết kế](#multi-region-phải-đưa-cả-dữ-liệu-vào-thiết-kế)
+  - [Replica lag và read-your-write](#replica-lag-và-read-your-write)
+  - [Routing, failover và chi phí](#routing-failover-và-chi-phí)
+- [Xác nhận cải thiện và ngăn tái diễn](#xác-nhận-cải-thiện-và-ngăn-tái-diễn)
+- [Tài liệu tham khảo và bài liên quan](#tài-liệu-tham-khảo-và-bài-liên-quan)
 
-## Dành cho level
+## Định nghĩa thứ đang chậm
 
-<Tabs items={["Mid", "Senior", "Staff"]}>
+### Latency của request khác thời gian trang dùng được
 
-<Tab value="Mid">
+**TTFB**, time to first byte, là thời gian từ khi client bắt đầu request đến khi nhận byte đầu tiên. Nó gồm các phần chờ trước khi có response, không chỉ thời gian server chạy handler.
 
-Interviewer expect bạn biết **nguyên nhân đầu tiên cần kiểm tra là CDN và vị trí server**. Nói được "server đặt ở Singapore, user Mỹ phải request xuyên đại dương" là đủ baseline.
+Trang có TTFB thấp vẫn có thể dùng được rất muộn vì tải JavaScript lớn, main thread bận hoặc phải gọi thêm API. Ngược lại, API chậm không nhất thiết khiến mọi nội dung trên trang đều xuất hiện muộn nếu giao diện có thể render từng phần.
 
-Điểm cộng: biết dùng `traceroute`, check `X-Cache` header, hoặc biết RTT Singapore→US ~150ms ảnh hưởng như thế nào.
+Trước khi debug, ghi rõ URL, method, tài khoản/tenant demo, thiết bị, browser, network và metric đang so sánh. Tách cold connection khỏi reused connection; tách browser cache lạnh khỏi cache ấm. Một lần refresh từ laptop khác vùng không phải benchmark có kiểm soát.
 
-</Tab>
+### RTT là chi phí của một lượt đi và về
 
-<Tab value="Senior">
+**RTT**, round-trip time, đo thời gian một thông điệp đi tới phía kia rồi phản hồi quay lại. Nếu giả định RTT tới origin là 150 ms, mỗi lượt trao đổi nối tiếp qua đường đó phải trả thêm chi phí mạng. Con số 150 ms chỉ là giả định minh họa, không phải hằng số cho tuyến Singapore–Mỹ.
 
-Interviewer expect bạn có **hệ thống tư duy debug**: không đoán mò nguyên nhân mà đi từ data — đo waterfall, check CDN cache hit ratio theo region, phân tích từng phase (DNS, TCP, TLS, TTFB, Transfer). Sau đó đề xuất fix đúng root cause.
+Khoảng cách giải thích một phần latency. Nó không tự giải thích chênh lệch 60 ms thành 6 giây: còn có connection setup, loss, retransmission, queue, dependency chậm và công việc phía browser. Cần đo từng phần thay vì gán toàn bộ cho tốc độ ánh sáng.
 
-Điểm cộng: biết **CDN cache miss là bẫy phổ biến nhất** — CDN đã bật nhưng content không được cache → mọi request vẫn origin pull từ Singapore. Biết cách fix từng layer: cache header, multi-region origin, edge function.
+## Thu thập waterfall từ đúng vị trí
 
-</Tab>
+Waterfall là danh sách các request theo thời điểm bắt đầu và kết thúc. Trong DevTools Network hoặc WebPageTest, kiểm tra HTML đầu tiên, assets và các API xuất hiện sau khi JavaScript chạy.
 
-<Tab value="Staff">
-
-Interviewer expect bạn **thiết kế chiến lược geo-distribution toàn diện**: khi nào multi-region active-active, khi nào active-passive, trade-off data consistency với latency, cost của thêm region, và cách monitor SLA per-region liên tục.
-
-Điểm cộng: từng thiết kế hoặc vận hành hệ thống đa region, biết Route 53 Latency Routing + Health Check + Failover, hoặc đã xử lý incident geo-latency thực tế.
-
-</Tab>
-
-</Tabs>
-
----
-
-## Cốt lõi cần nhớ
-
-**Chênh lệch 100x (60ms vs 6s) gần như không bao giờ là 1 nguyên nhân đơn lẻ.** RTT Singapore→US ~150ms chỉ giải thích được 150–300ms overhead. 6 giây có nghĩa là nhiều round-trip bị nhân lên: TLS handshake, serial API calls, database queries — mỗi cái cộng thêm 1–2 RTT × 150ms.
-
-**CDN bật chưa đủ — phải đảm bảo content thực sự được cache.** Nhiều team bật CloudFront rồi nghĩ xong, nhưng nếu `Cache-Control: no-cache` hoặc response có `Set-Cookie` → CDN không cache → mọi request đều origin pull từ Singapore. Check `X-Cache: Miss` là bước đầu tiên.
-
-**Giải pháp lâu dài là multi-region origin, không chỉ CDN.** CDN tốt cho static content. Dynamic content (API response cá nhân hoá, authenticated data) không cache được → phải có origin server gần user: deploy thêm region US-East + Route 53 Latency-Based Routing.
-
----
-
-## Câu trả lời mẫu
-
-> "Tôi sẽ không đoán nguyên nhân mà bắt đầu bằng đo lường. Đầu tiên, tôi chạy waterfall analysis từ một máy ở US — dùng WebPageTest hoặc Chrome DevTools — để xem latency nằm ở phase nào: DNS lookup, TCP connect, TLS handshake, Time To First Byte, hay content transfer. Nếu TTFB đã là 5 giây thì vấn đề ở backend, không phải frontend. Tiếp theo tôi check header `X-Cache` từ CDN — nếu thấy `Miss` thì content không được serve từ edge, mọi request đang hit origin ở Singapore. Nguyên nhân phổ biến nhất của CDN miss là `Cache-Control: no-cache` hoặc response có cookie. Nếu CDN cache đúng nhưng vẫn chậm, tôi nhìn vào số lượng serial request: trang có chain N API calls không? Mỗi call thêm 1 RTT × 150ms = 150ms × N. Với 10 serial calls là 1.5 giây chỉ vì mạng. Fix ngay bằng cách song song hoá hoặc aggregate ở BFF layer. Giải pháp dài hạn là deploy origin server thêm ở US-East và dùng Route 53 Latency Routing để user Mỹ tự động hit region gần nhất."
-
----
-
-## Phân tích chi tiết
-
-### Bước 1: Đo — không đoán
-
-```d2 title="Bước 1: Đo — không đoán"
-direction: right
-A: "Báo cáo: US chậm 6s"
-B: "Đo waterfall\ntừ US location"
-C: "TTFB > 5s?" {shape: diamond}
-D: "Vấn đề backend\nhoặc network"
-E: "Vấn đề frontend\nassets, JS, render"
-F: "Check CDN\nX-Cache header"
-G: "Cache Hit?" {shape: diamond}
-H: "Fix CDN caching"
-I: "Vấn đề khác:\nserial calls, DB, origin size"
-A -> B
-B -> C
-C -> D: "Có"
-C -> E: "Không"
-D -> F
-F -> G
-G -> H: "Miss"
-G -> I: "Hit nhưng vẫn chậm"
+```d2 title="Khoanh vùng chậm trước khi chọn cách sửa" interactive=false
+direction: down
+report: "Trang chậm tại một vùng"
+measure: "Đo request và browser waterfall"
+first: "Chờ byte đầu lâu?" {shape: diamond}
+network: "DNS, connection, CDN, origin trace"
+render: "Assets, API phụ thuộc, JavaScript, render"
+report -> measure -> first
+first -> network: Có
+first -> render: Không
 ```
 
-**Tools để đo từ US location:**
-- [WebPageTest](https://webpagetest.org) — chọn location "Virginia, USA", xem waterfall từng resource
-- Chrome DevTools → Network tab → chạy từ VPN US hoặc cloud instance US-East
-- `curl -w "@curl-format.txt" -o /dev/null -s https://your-domain.com` từ EC2 us-east-1
+Sơ đồ là nhánh điều tra ban đầu, không phải kết luận rằng TTFB cao luôn do backend. Service Worker, proxy, browser queue và connection setup cũng có thể nằm trên đường đi trước byte đầu.
+
+Với `curl`, chạy cùng URL từ hai máy thử ở hai vùng. Command sau chỉ đọc tài nguyên demo; thay URL bằng endpoint bạn được phép kiểm tra:
 
 ```bash
-# curl timing breakdown
-cat curl-format.txt
-time_namelookup:    %{time_namelookup}s\n
-time_connect:       %{time_connect}s\n
-time_appconnect:    %{time_appconnect}s\n   # TLS done
-time_pretransfer:   %{time_pretransfer}s\n
-time_starttransfer: %{time_starttransfer}s\n # TTFB
-time_total:         %{time_total}s\n
+curl --silent --show-error --output /dev/null \
+  --write-out 'dns=%{time_namelookup}\ntcp=%{time_connect}\ntls=%{time_appconnect}\nfirst_byte=%{time_starttransfer}\ntotal=%{time_total}\nhttp=%{http_version}\nremote_ip=%{remote_ip}\n' \
+  https://www.example.com/
 ```
 
----
+Các giá trị timing trên là **mốc tích lũy tính từ lúc bắt đầu**, không phải các duration để cộng trực tiếp. Với một HTTPS request mới không redirect hay proxy đặc biệt, có thể đọc gần đúng:
 
-### Bước 2: Phân tích từng phase latency
+| Khoảng cần xem | Hiệu hai mốc |
+| --- | --- |
+| DNS | `time_namelookup` |
+| TCP sau DNS | `time_connect - time_namelookup` |
+| TLS sau TCP | `time_appconnect - time_connect` |
+| Chờ request/response sau TLS | `time_starttransfer - time_appconnect` |
+| Nhận phần response còn lại | `time_total - time_starttransfer` |
 
-Singapore → US round-trip time (RTT) baseline ~**150ms**.
+Khoảng sau TLS vẫn có thể gồm gửi request, network, server queue và xử lý. Không đặt tên nó là “server processing time” nếu chưa có trace phía origin. `curl` cũng không chạy JavaScript, nên không thay thế phép đo render từ browser.
 
-| Phase | Singapore | US (không có CDN) | Lý do chênh |
-|-------|-----------|-------------------|-------------|
-| DNS lookup | 5ms | 5ms | DNS thường có edge resolver |
-| TCP connect | 1ms | 150ms | 1 RTT xuyên đại dương |
-| TLS handshake (1.2) | 2ms | 300ms | **2 RTT** × 150ms |
-| TLS handshake (1.3) | 1ms | 150ms | 1 RTT (0-RTT resumption) |
-| TTFB (server xử lý) | 20ms | 20ms | Server time không đổi |
-| Transfer | 30ms | 30ms | Nếu nhỏ |
-| **Tổng** | **~60ms** | **~650ms+** | Chưa tính serial calls |
+## Đọc CDN bằng cache policy và bằng chứng thực tế
 
-> Vậy 650ms vẫn chưa đủ giải thích 6 giây. Phải có **nhân tố nhân lên** — serial API calls là suspect chính.
+### Có CDN không đồng nghĩa response đã cache
 
----
+CDN có thể terminate TLS ở edge nhưng vẫn phải lấy response từ origin ở xa. Khi điều tra, lấy response headers, CDN cache status, cache key và request trace qua origin. Một cache miss đơn lẻ là bình thường; miss liên tục với cùng tài nguyên mới đáng điều tra.
 
-### Nguyên nhân 1: CDN không cache (phổ biến nhất)
+Phân biệt các directive sau:
 
-CDN đã bật nhưng `X-Cache: Miss` → mọi request origin pull từ Singapore.
+| Directive | Ý nghĩa thực dụng |
+| --- | --- |
+| `no-store` | Yêu cầu cache không lưu response |
+| `no-cache` | Có thể lưu, nhưng phải validate trước khi tái sử dụng theo quy tắc HTTP |
+| `private` | Không cho shared cache lưu; browser cache vẫn có thể có vai trò |
+| `s-maxage=60` | Freshness lifetime cho shared cache, khi policy của CDN cho phép |
+| `immutable` | Nội dung không thay đổi trong freshness lifetime; phù hợp asset có content hash |
 
-**Nguyên nhân CDN miss:**
+Không coi `Set-Cookie` là một quy tắc cấm cache giống nhau ở mọi CDN. Hành vi phụ thuộc sản phẩm và policy. Một cấu hình cache sai còn có thể phát lại header hay dữ liệu riêng tư cho người dùng khác.
+
+### Chỉ cache khi cache key biểu diễn đủ các biến thể
+
+Với JavaScript có hash trong tên file, có thể dùng policy dài hạn:
 
 ```http
-# Response có các header này → CDN từ chối cache
-Cache-Control: no-cache, no-store
-Set-Cookie: session=abc123   ← CloudFront mặc định không cache response có Set-Cookie
-Vary: Cookie, Authorization  ← quá nhiều variation → cache không hiệu quả
-```
-
-**Fix:**
-
-```http
-# Static assets (JS, CSS, images)
 Cache-Control: public, max-age=31536000, immutable
+```
 
-# API response có thể cache (không personalised)
+Với API công khai trả cùng dữ liệu cho mọi người, có thể cân nhắc:
+
+```http
 Cache-Control: public, s-maxage=60, stale-while-revalidate=30
+```
 
-# Dynamic nhưng authenticated → không cache trên CDN
+Đây là hai response riêng, không phải hai dòng cấu hình để gắn chung mọi endpoint. Với dữ liệu đăng nhập nhạy cảm, policy có thể là:
+
+```http
 Cache-Control: private, no-store
 ```
 
-```yaml
-# CloudFront cache policy — tách cookie ra khỏi cache key
-CachePolicy:
-  Name: "api-cache-policy"
-  DefaultTTL: 60
-  CookiesConfig:
-    CookieBehavior: none   # không đưa cookie vào cache key
-  HeadersConfig:
-    HeaderBehavior: whitelist
-    Headers:
-      - Accept-Language    # chỉ vary theo những header cần thiết
-```
+Không loại cookie hay `Authorization` khỏi cache key chỉ để tăng hit rate. Trước tiên phải chứng minh response không phụ thuộc identity. Hãy thử hai tài khoản demo, hai tenant và hai ngôn ngữ; cache không được trả nhầm biến thể ngay cả khi hit rate rất cao.
 
----
+`Vary` mô tả header ảnh hưởng biến thể, nhưng CDN có thể dùng cache-key configuration riêng. Kiểm tra cả HTTP headers và cấu hình sản phẩm đang dùng; đừng suy ra cấu hình chỉ từ một dòng `Vary`.
 
-### Nguyên nhân 2: Serial API calls — latency nhân hệ số
+## Request nối tiếp khuếch đại RTT
 
-```
-User (US) → Server (Singapore) → 3rd API call 1 → 3rd API call 2 → 3rd API call 3
-           ←──────────────────── 150ms ──────────── 150ms ─────── 150ms ──────────
-Total: 150ms RTT × 3 hops = 450ms chỉ do mạng, chưa tính processing
-```
+Giả sử browser gọi `/profile`, chờ xong mới gọi `/orders`, rồi mới gọi `/notifications`. Nếu ba request độc lập nhưng bị viết nối tiếp, critical path — chuỗi công việc quyết định thời điểm hoàn tất — phải chờ cả ba.
 
-**Ví dụ thực tế — Spring Boot service:**
+Ví dụ dưới đây chỉ cho thấy khác biệt về dependency, không bảo đảm một mức tăng tốc cụ thể:
 
-```java
-// BAD: serial calls — mỗi call chờ call trước
-@GetMapping("/dashboard")
-public DashboardResponse getDashboard(@RequestHeader("userId") Long userId) {
-    UserProfile profile = userService.getProfile(userId);         // 150ms
-    List<Order> orders = orderService.getRecentOrders(userId);    // 150ms
-    AccountBalance balance = paymentService.getBalance(userId);   // 150ms
-    List<Notification> notifs = notifService.getUnread(userId);   // 150ms
-    // Total: 600ms chỉ từ serial calls
-    return DashboardResponse.of(profile, orders, balance, notifs);
-}
+```javascript
+// Chỉ chạy song song khi ba lời gọi không phụ thuộc dữ liệu của nhau.
+const [profile, orders, notifications] = await Promise.all([
+  fetch('/api/profile').then(checkResponse),
+  fetch('/api/orders').then(checkResponse),
+  fetch('/api/notifications').then(checkResponse),
+]);
 
-// GOOD: parallel với CompletableFuture
-@GetMapping("/dashboard")
-public DashboardResponse getDashboard(@RequestHeader("userId") Long userId) {
-    CompletableFuture<UserProfile> profileF =
-        CompletableFuture.supplyAsync(() -> userService.getProfile(userId));
-    CompletableFuture<List<Order>> ordersF =
-        CompletableFuture.supplyAsync(() -> orderService.getRecentOrders(userId));
-    CompletableFuture<AccountBalance> balanceF =
-        CompletableFuture.supplyAsync(() -> paymentService.getBalance(userId));
-    CompletableFuture<List<Notification>> notifsF =
-        CompletableFuture.supplyAsync(() -> notifService.getUnread(userId));
-
-    CompletableFuture.allOf(profileF, ordersF, balanceF, notifsF).join();
-    // Total: ~150ms (chạy song song, bottleneck là call chậm nhất)
-    return DashboardResponse.of(
-        profileF.join(), ordersF.join(), balanceF.join(), notifsF.join());
+function checkResponse(response) {
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  return response.json();
 }
 ```
 
----
+Chạy song song chuyển thời gian chờ từ gần tổng các request sang gần request chậm nhất, cộng các overhead. Nhưng nó tăng concurrency và có thể gây tải đột biến xuống backend. Cần giới hạn fan-out, deadline và hành vi partial failure; `Promise.all` không tự hủy request còn lại khi một request reject.
 
-### Nguyên nhân 3: TLS handshake overhead × nhiều connection
+Nếu service tại Singapore gọi dependency cũng tại Singapore, request của user Mỹ không khiến từng backend call tự có RTT Singapore–Mỹ. Chỉ những cạnh thật sự vượt tuyến xa mới trả chi phí đó. Dùng distributed trace để đặt dependency đúng vị trí địa lý trước khi tính thời gian.
 
-HTTP/1.1: mỗi resource mở TCP connection mới → mỗi connection = 1 TCP + 1–2 TLS RTT.
+## Connection reuse, HTTP và TLS
 
-```
-Resource 1: TCP(150ms) + TLS(300ms) + Transfer = 470ms
-Resource 2: TCP(150ms) + TLS(300ms) + Transfer = 470ms
-Resource 3: TCP(150ms) + TLS(300ms) + Transfer = 470ms
-→ 3 resources song song: ~470ms; nối tiếp: ~1.4s
-```
+HTTP/1.1 có keep-alive; không phải mỗi resource đều mở TCP connection mới. HTTP/2 multiplex nhiều request trên connection, còn HTTP/3 dùng QUIC để thay đổi cách quản lý transport và loss. Hiệu quả phụ thuộc số origin, connection reuse, packet loss và cách browser schedule request.
 
-**Fix:** HTTP/2 hoặc HTTP/3 multiplexing — nhiều request share 1 connection.
+Với TCP connection mới, full TLS 1.3 thường cần một RTT ở TLS layer, chưa kể TCP setup. Resumption có thể giảm công việc handshake nhưng không đồng nghĩa 0-RTT tự bật. TLS 1.3 early data có replay risk và không phù hợp để bật vô điều kiện cho mutation.
 
-```nginx
-# Nginx — bật HTTP/2
-server {
-    listen 443 ssl http2;
-    ssl_protocols TLSv1.3;          # 1-RTT handshake
-    ssl_session_cache shared:SSL:10m;  # session reuse → 0-RTT resumption
-    ssl_session_timeout 1d;
-}
-```
+Trước khi thêm protocol hoặc đổi Nginx, đo số connection mới, negotiated HTTP/TLS version và thời gian connection setup. Giảm domain sharding, tránh redirect không cần thiết và giữ connection reuse thường dễ thử hơn thay kiến trúc dữ liệu.
 
----
+Mình ưu tiên bỏ các vòng đi-về không cần thiết trước khi triển khai thêm region. Nếu origin xử lý mất 5 giây do lock wait, thay HTTP/1.1 bằng HTTP/3 không giải quyết được nguyên nhân chính.
 
-### Giải pháp dài hạn: Multi-Region Origin
+## Multi-region phải đưa cả dữ liệu vào thiết kế
 
-Đây là fix triệt để cho dynamic content không cache được.
+Đặt application server tại Mỹ không đủ nếu mọi query của server đó vẫn chạy tới database primary ở Singapore. Bạn chỉ chuyển nơi thực hiện lời gọi, chưa loại bỏ dependency xuyên vùng.
 
-```d2 title="Multi-region origin và read replica"
-direction: down
-dns: "Route 53\nLatency-based routing"
-sg: "EKS ap-southeast-1\nSingapore — khoảng 60 ms cho SG users"
-us: "EKS us-east-1\nVirginia — khoảng 60 ms cho US users"
-primary: "RDS ap-southeast-1\nPrimary" {shape: cylinder}
-replica: "RDS us-east-1\nRead Replica" {shape: cylinder}
-dns -> sg
-dns -> us
-sg -> primary
-us -> replica
-primary -> replica: "Replication"
+Sơ đồ dưới đây tách read chấp nhận dữ liệu cũ khỏi write cần về primary. Nó không hứa mọi request tại Mỹ sẽ có latency tương đương request tại Singapore.
+
+```d2 title="Đưa read gần người dùng nhưng giữ write boundary rõ" interactive=false
+direction: right
+user: "Client tại Mỹ"
+app: "Application tại Mỹ"
+replica: "Read replica tại Mỹ" {shape: cylinder}
+primary: "Primary tại Singapore" {shape: cylinder}
+user -> app
+app -> replica: "Read chấp nhận lag"
+app -> primary: "Write và read cần state mới nhất"
+primary -> replica: "Replication bất đồng bộ"
 ```
 
-```hcl
-# Terraform — Route 53 Latency Routing
-resource "aws_route53_record" "api_sg" {
-  zone_id        = var.zone_id
-  name           = "api.example.com"
-  type           = "A"
-  set_identifier = "singapore"
+### Replica lag và read-your-write
 
-  latency_routing_policy {
-    region = "ap-southeast-1"
-  }
+**Replication lag** là độ trễ để bản sao bắt kịp thay đổi ở nguồn. Nếu user sửa địa chỉ rồi lập tức đọc từ replica chưa bắt kịp, họ có thể thấy địa chỉ cũ.
 
-  alias {
-    name    = aws_lb.alb_sg.dns_name
-    zone_id = aws_lb.alb_sg.zone_id
-    evaluate_target_health = true
-  }
-}
+Các lựa chọn gồm đọc primary cho flow đó, trả kết quả vừa commit ngay trong command response, hoặc dùng version để biết replica đã đủ mới. Chọn theo yêu cầu nghiệp vụ; không gọi mọi dữ liệu profile hay catalog là “stale vài giây cũng được” nếu chưa có product contract.
 
-resource "aws_route53_record" "api_us" {
-  zone_id        = var.zone_id
-  name           = "api.example.com"
-  type           = "A"
-  set_identifier = "us-east"
+### Routing, failover và chi phí
 
-  latency_routing_policy {
-    region = "us-east-1"
-  }
+Latency routing cần health check và kế hoạch khi một region mất. DNS còn có cache/TTL, nên thay record không làm toàn bộ client chuyển ngay lập tức. Failover application và failover database cũng không phải một thao tác duy nhất.
 
-  alias {
-    name    = aws_lb.alb_us.dns_name
-    zone_id = aws_lb.alb_us.zone_id
-    evaluate_target_health = true
-  }
-}
-```
+Cross-region replicas thêm replication bandwidth, chi phí vận hành và bài toán recovery. Nếu dữ liệu cần multi-writer, phải giải quyết ownership, conflict và invariant; không chỉ thêm một database thứ hai. Chọn multi-region khi yêu cầu latency, availability hoặc data residency biện minh được cho chi phí đó.
 
----
+## Xác nhận cải thiện và ngăn tái diễn
 
-### Checklist debug geo-latency
+Sau mỗi thay đổi, chạy lại cùng nhóm phép đo: cold/warm cache, fresh/reused connection, tài khoản demo và vùng truy cập. So percentile thay vì chỉ một request nhanh nhất. Đo cả lỗi, throughput và chi phí, không tối ưu latency bằng cách trả dữ liệu sai hoặc bỏ bớt công việc mà không thông báo.
 
-```
-□ 1. Đo waterfall từ US location (WebPageTest / curl timing)
-□ 2. Check TTFB: > 500ms → vấn đề backend/network, không phải frontend
-□ 3. Check X-Cache header: "Miss" → fix CDN cache
-□ 4. Check Cache-Control response header: no-cache? Set-Cookie?
-□ 5. Đếm số serial network calls trong 1 request: N calls × 150ms?
-□ 6. Check HTTP version: HTTP/1.1 với nhiều resources → upgrade HTTP/2
-□ 7. Check TLS version: TLS 1.2 → 2 RTTs; upgrade TLS 1.3 → 1 RTT
-□ 8. Check DNS TTL: thấp quá → nhiều DNS lookup tốn thêm latency
-□ 9. Check origin location: server chỉ ở Singapore? → cần multi-region
-□ 10. Check static asset CDN: JS/CSS/images đi qua CloudFront chưa?
-```
+Kết hợp hai nguồn quan sát:
 
----
+- **Synthetic monitoring**: request/browser test được chạy chủ động từ các location đã chọn. Nó phát hiện endpoint hoặc flow bị hỏng ngay cả khi vùng đó ít traffic.
+- **Real User Monitoring**: phép đo từ browser người dùng thật, được lấy mẫu và bảo vệ dữ liệu riêng tư. Nó cho thấy khác biệt theo thiết bị, network, browser và geography.
 
-### CloudWatch metrics để monitor per-region
+Label region của server không phải location của người dùng. ALB target latency cũng không đo DNS, TLS từ browser hay render. Dashboard cần phân biệt các góc nhìn này để không bỏ sót vấn đề tại một vùng.
 
-```bash
-# CloudFront cache hit ratio theo region
-aws cloudwatch get-metric-statistics \
-  --namespace AWS/CloudFront \
-  --metric-name CacheHitRate \
-  --dimensions Name=DistributionId,Value=EXDISTID \
-  --start-time 2026-04-08T00:00:00Z \
-  --end-time 2026-04-08T23:59:59Z \
-  --period 3600 \
-  --statistics Average
+Trước khi đề xuất thêm region, hãy lưu một waterfall, một trace tương ứng và cache evidence cho request chậm. Sau đó viết rõ phần thời gian nào thay đổi sẽ loại bỏ được. Đây là tiêu chí để chọn giải pháp, không phải số lượng thành phần trong sơ đồ.
 
-# ALB target response time per AZ (proxy cho per-region)
-aws cloudwatch get-metric-statistics \
-  --namespace AWS/ApplicationELB \
-  --metric-name TargetResponseTime \
-  --dimensions Name=LoadBalancer,Value=... \
-  --statistics p95 p99
-```
+## Tài liệu tham khảo và bài liên quan
 
-```yaml
-# Prometheus alert — latency cao theo region
-- alert: HighLatencyUSRegion
-  expr: |
-    histogram_quantile(0.95,
-      rate(http_request_duration_seconds_bucket{region="us-east-1"}[5m])
-    ) > 2
-  for: 5m
-  annotations:
-    summary: "p95 latency US-East = {{ $value }}s — kiểm tra CDN cache hit ratio"
-    runbook: "https://wiki/runbooks/geo-latency-debug"
-```
+- [curl write-out variables](https://curl.se/docs/manpage.html#-w).
+- [MDN Cache-Control](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Cache-Control).
+- [WebPageTest](https://www.webpagetest.org/).
+- [TLS 1.3: RFC 8446](https://www.rfc-editor.org/rfc/rfc8446).
 
----
-
-## Bẫy thường gặp
-
-❌ **"Bật CDN là xong"**
-→ Tại sao sai: CDN chỉ giúp nếu content thực sự được cache. `Cache-Control: no-cache` hoặc `Set-Cookie` → CloudFront vẫn origin pull từ Singapore cho mỗi request.
-✅ Đúng hơn: Verify cache hit ratio theo region sau khi bật CDN. `X-Cache: Miss` = chưa xong.
-
----
-
-❌ **"Tăng server spec để fix latency"**
-→ Tại sao sai: Latency địa lý là do tốc độ ánh sáng, không phải server power. Server mạnh hơn giảm processing time (vài ms) nhưng không giải quyết 150ms RTT xuyên đại dương.
-✅ Đúng hơn: Đưa server gần user — multi-region origin hoặc edge compute.
-
----
-
-❌ **"Chỉ test bằng Postman từ máy local"**
-→ Tại sao sai: Postman từ Singapore sẽ thấy nhanh vì server cùng region. Không reproduce được vấn đề user Mỹ gặp.
-✅ Đúng hơn: Test từ đúng location có vấn đề — WebPageTest chọn location US, EC2 us-east-1, hoặc VPN.
-
----
-
-❌ **"Vấn đề là database chậm"**
-→ Tại sao sai: Database query chạy trong cùng datacenter Singapore — không bị ảnh hưởng bởi RTT US. DB chậm sẽ ảnh hưởng cả SG lẫn US.
-✅ Đúng hơn: Nếu TTFB từ US cao nhưng SG bình thường, trace network latency trước — CDN miss hoặc serial calls là suspect chính.
-
----
-
-## Câu hỏi follow-up
-
-### 1. Nếu content là dynamic và authenticated (không cache được), làm sao giảm latency?
-
-Ba hướng: (1) Multi-region origin + Route 53 Latency Routing — user Mỹ hit server Mỹ, latency giảm từ 6s về ~60ms; (2) Edge compute — Lambda@Edge hoặc Cloudflare Workers xử lý một phần logic tại edge gần user (auth check, personalization nhẹ); (3) Pre-fetch — dùng `<link rel="prefetch">` hoặc service worker dự đoán request tiếp theo và fetch trước khi user cần.
-
-### 2. Nếu thêm region US-East thì data consistency xử lý như thế nào?
-
-Tùy loại data: read-heavy data (profile, catalog) → RDS Read Replica tại US-East, chấp nhận replication lag vài giây; write operations → vẫn route về Singapore primary. Data cần strong consistency (payment, inventory) → không cache, luôn về primary, chấp nhận latency cao hơn cho consistency. Đây là trade-off CAP theorem trong thực tế — không có giải pháp nào giải quyết tất cả.
-
-### 3. Làm sao phát hiện sớm vấn đề này trước khi user báo cáo?
-
-Synthetic monitoring: CloudWatch Synthetics hoặc Datadog Synthetic Tests chạy canary từ nhiều location (US-East, EU-West, AP-Southeast) mỗi 1 phút. Alert khi p95 latency từ bất kỳ region nào vượt ngưỡng. Quan trọng: đừng chỉ monitor từ Singapore nơi server đặt — bạn sẽ không bao giờ thấy vấn đề mà user ở US đang gặp.
-
-### 4. HTTP/3 có giải quyết được không?
-
-Phần nào. HTTP/3 dùng QUIC (UDP) thay TCP, giảm handshake còn 0-RTT cho connection cũ và 1-RTT cho connection mới — tốt hơn TLS 1.2/TCP. Nhưng vẫn không vượt qua được 150ms RTT vật lý — tốc độ ánh sáng là hard limit. HTTP/3 giúp nhiều nhất trong môi trường packet loss cao (mobile, WiFi kém). Trong case Singapore→US, multi-region origin vẫn là fix chính.
-
----
-
-## Xem thêm
-
-- [Merge 1 triệu bản ghi vào bảng 1 tỷ rows](../java/02-bulk-upsert-billion-rows)
+<Cards>
+  <Card title="TLS handshake và trust boundary" href="/security/02-ssl-tls" />
+  <Card title="CORS và đường đi của request" href="/web/01-cors" />
+  <Card title="Scale dựa trên phép đo" href="/system-design/03-scale-1k-to-50k-users" />
+</Cards>

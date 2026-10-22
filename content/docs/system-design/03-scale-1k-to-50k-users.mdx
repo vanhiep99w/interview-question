@@ -1,497 +1,241 @@
 ---
-title: "Hệ thống đang phục vụ 1,000 users, scale lên 50,000 — thay đổi gì?"
-description: "Chiến lược scale từ 1K lên 50K users: load balancer, stateless, read replica, caching, async processing — từng bước giải quyết bottleneck thực tế."
+title: "Scale từ 1.000 lên 50.000 users: tìm và gỡ bottleneck"
+description: "Chuyển số user thành workload, đo capacity, thiết kế stateless app, connection budget, cache, read replica, queue và rollout theo SLO."
 ---
 
-# Scale từ 1,000 lên 50,000 users
+Giả sử sản phẩm sắp tăng từ 1.000 lên 50.000 users. Chưa thể kết luận phải thêm 50 lần số server: 50.000 tài khoản ít hoạt động tạo workload khác hoàn toàn 50.000 người cùng xem livestream hay cập nhật vị trí.
 
-## Câu hỏi
+Việc đầu tiên là chuyển dự báo người dùng thành request, kết nối, dữ liệu và tác vụ cụ thể. Sau đó bạn mới quyết định cần app replica, database mạnh hơn, cache hay queue. Bài này đưa ra một quy trình đo và lựa chọn; các số minh họa không phải sizing production đã kiểm chứng.
 
-> **Hệ thống của bạn đang phục vụ 1,000 users. Bây giờ cần scale lên 50,000 users. Bạn thay đổi gì?**
+## Mục lục
 
----
+- [Chuyển user count thành workload](#chuyển-user-count-thành-workload)
+  - [Tài khoản, active users và concurrency là ba số khác nhau](#tài-khoản-active-users-và-concurrency-là-ba-số-khác-nhau)
+  - [Ước lượng theo endpoint và thời điểm cao tải](#ước-lượng-theo-endpoint-và-thời-điểm-cao-tải)
+- [Đặt SLO và tìm bottleneck thật](#đặt-slo-và-tìm-bottleneck-thật)
+- [Tối ưu trong một node trước khi đổi topology](#tối-ưu-trong-một-node-trước-khi-đổi-topology)
+- [Scale-out application bằng trạng thái có ownership rõ](#scale-out-application-bằng-trạng-thái-có-ownership-rõ)
+  - [Stateless không có nghĩa không tồn tại state](#stateless-không-có-nghĩa-không-tồn-tại-state)
+  - [Autoscaling cần thời gian và giới hạn downstream](#autoscaling-cần-thời-gian-và-giới-hạn-downstream)
+- [Database connection budget và query optimization](#database-connection-budget-và-query-optimization)
+  - [Tính tổng pool trên mọi process](#tính-tổng-pool-trên-mọi-process)
+  - [Tìm query gây tổng chi phí lớn](#tìm-query-gây-tổng-chi-phí-lớn)
+- [Read replica chỉ giải quyết phần đọc có thể tách](#read-replica-chỉ-giải-quyết-phần-đọc-có-thể-tách)
+- [Cache giảm phần đọc lặp lại, không xóa bài toán correctness](#cache-giảm-phần-đọc-lặp-lại-không-xóa-bài-toán-correctness)
+- [Queue tách thời điểm xử lý, không tạo capacity miễn phí](#queue-tách-thời-điểm-xử-lý-không-tạo-capacity-miễn-phí)
+- [Sharding và microservices cần lý do riêng](#sharding-và-microservices-cần-lý-do-riêng)
+- [Rollout theo giả thuyết và đo lại](#rollout-theo-giả-thuyết-và-đo-lại)
+- [Tài liệu tham khảo và bài liên quan](#tài-liệu-tham-khảo-và-bài-liên-quan)
 
-## Dành cho level
+## Chuyển user count thành workload
 
-<Tabs items={["Mid", "Senior", "Staff"]}>
+### Tài khoản, active users và concurrency là ba số khác nhau
 
-<Tab value="Mid">
+**Active user** là người có hoạt động trong một cửa sổ thời gian đã định nghĩa. **Concurrency** là lượng công việc đang tồn tại đồng thời, chẳng hạn request đang xử lý hoặc WebSocket đang mở. Đừng dùng chúng thay cho requests per second — số request mỗi giây.
 
-Interviewer expect bạn biết **không thể để 1 server xử lý mọi thứ nữa** — cần load balancer, tách database riêng, và biết khái niệm horizontal scaling. Nói được "thêm server phía sau load balancer" và "tách database sang instance riêng" là đủ baseline.
+Ví dụ giả định có 50.000 người đang dùng ứng dụng, mỗi người tạo trung bình một request trong 20 giây:
 
-Điểm cộng: biết stateless server là gì và tại sao session phải lưu vào Redis.
+```text
+Throughput trung bình = 50.000 / 20 = 2.500 requests/giây
+```
 
-</Tab>
+Nếu request mất trung bình 200 ms trong trạng thái ổn định, Little's Law cho ước lượng:
 
-<Tab value="Senior">
+```text
+Requests đang xử lý ≈ throughput × thời gian trung bình
+                    ≈ 2.500 × 0,2 = 500
+```
 
-Interviewer expect bạn có **hệ thống tư duy từ bottleneck**: không vội thêm infra mà đo trước — xem CPU, memory, DB connections, query latency. Sau đó đề xuất giải pháp đúng tầng: app tier, database tier, caching tier. Biết khi nào cần read replica, khi nào cần cache, trade-off của từng bước.
+500 không phải số database connections cần mở. Request có thể dùng CPU, chờ cache, chờ database hoặc chờ dịch vụ khác trong những khoảng khác nhau. Cũng không nhân RPS với p99 để thay cho quan hệ dựa trên thời gian trung bình này.
 
-Điểm cộng: nói được "50K users không cần sharding — đó là premature optimization" và giải thích tại sao.
+### Ước lượng theo endpoint và thời điểm cao tải
 
-</Tab>
+Một request xem catalog có thể nhẹ hơn một request tạo báo cáo hàng nghìn lần. Hãy tách workload thay vì dùng một con số RPS tổng.
 
-<Tab value="Staff">
+| Nhóm | Dữ liệu cần lấy | Bottleneck có thể gặp |
+| --- | --- | --- |
+| Đọc catalog | RPS, kích thước response, mức stale chấp nhận được | Database read, cache, network |
+| Checkout | Write rate, conflict rate, dependency latency | Lock, transaction, payment |
+| Search | Query shape, cardinality, index | CPU, scan, search backend |
+| Upload/import | File size, concurrent jobs, rows | Bandwidth, parser, database write |
+| Realtime | Connections, subscriptions, events/giây | File descriptors, fan-out, outbound buffers |
 
-Interviewer expect bạn **thiết kế scaling roadmap cho team**: không chỉ biết làm gì mà còn biết thứ tự ưu tiên, cost/benefit từng bước, và cách tránh over-engineering. Biết khi nào monolith vẫn đúng, khi nào mới cần tách service. Thiết kế monitoring để phát hiện bottleneck tiếp theo trước khi user bị ảnh hưởng.
+Bổ sung peak-to-average, burst duration, tăng trưởng dataset và retry amplification. Retry amplification là phần tải tăng thêm do các lần thử lại; nó thường rõ nhất khi hệ thống đang lỗi, tức đúng lúc capacity thiếu nhất.
 
-Điểm cộng: dẫn chứng thực tế — Instagram scale 30 triệu users với 3 engineers trên PostgreSQL monolith, không sharding.
+## Đặt SLO và tìm bottleneck thật
 
-</Tab>
+**SLO**, service level objective, là mục tiêu đo được cho chất lượng dịch vụ. Ví dụ giả định: 99% request đọc sản phẩm hoàn tất trong 500 ms và tỷ lệ lỗi dưới một ngưỡng đã thống nhất. Endpoint xuất báo cáo chạy nền cần SLO khác checkout.
 
-</Tabs>
+Quan sát latency, traffic, errors và saturation. **Saturation** mô tả mức tài nguyên đang hết chỗ hoặc phải xếp hàng: thread pool đầy, connection pool chờ lâu, disk queue tăng. CPU thấp không chứng minh hệ thống còn dư capacity nếu mọi request đang chờ database lock.
 
----
-
-## Cốt lõi cần nhớ
-
-**50x users không có nghĩa là 50x infrastructure.** Phần lớn hệ thống ở mức 1K users chưa dùng hết capacity — một PostgreSQL instance xử lý thoải mái 5,000–10,000 QPS. Bước đầu tiên luôn là **đo bottleneck thật**, không phải thêm infra theo cảm tính.
-
-**Scale theo đúng thứ tự: vertical → horizontal app → database read replica → caching → async processing.** Mỗi bước giải quyết một tầng bottleneck cụ thể. Nhảy bước (ví dụ sharding ở 50K users) là dấu hiệu over-engineering.
-
-**Stateless là tiền đề cho mọi horizontal scaling.** Nếu server còn lưu session trong memory, thêm bao nhiêu server cũng vô nghĩa — user sẽ bị logout random khi request đến server khác.
-
----
-
-## Câu trả lời mẫu
-
-> "Trước hết tôi sẽ không thêm infra theo phản xạ mà bắt đầu bằng đo lường — xem bottleneck hiện tại ở đâu: CPU, memory, database connection pool, hay slow queries. Ở mức 1K users, nhiều khả năng hệ thống chưa dùng hết capacity, nên bước đầu tiên có thể chỉ đơn giản là vertical scaling — nâng spec server lên, thêm RAM, SSD nhanh hơn. Khi traffic thật sự quá tải cho 1 server, tôi chuyển sang horizontal scaling cho app tier: triển khai stateless server phía sau load balancer, chuyển session sang Redis. Tiếp theo nhìn database — ở 50K users thường read nhiều hơn write, nên tôi thêm read replica và route read traffic sang đó. Song song, tôi bật caching layer với Redis cho hot data — user profile, product listing, config — nhắm cache hit rate trên 90% để giảm 10x load cho database. Cuối cùng, những task nặng như gửi email, generate report, process image tôi đẩy sang message queue với Kafka hoặc Sidekiq, không để user chờ. Toàn bộ quá trình này tôi sẽ không đụng đến sharding hay microservices — ở 50K users đó là premature optimization. Instagram từng scale đến 30 triệu users mà vẫn trên PostgreSQL monolith với 3 engineers."
-
----
-
-## Phân tích chi tiết
-
-### Scaling Roadmap: 1K → 50K users
-
-```d2 title="Scaling Roadmap: 1K → 50K users"
+```d2 title="Scale theo tài nguyên gây chờ" interactive=false
 direction: down
-A: "1K users\n1 server làm tất cả"
-B: "Bottleneck ở đâu?" {shape: diamond}
-C: "Bước 1: Vertical Scaling\nNâng spec server"
-D: "Bước 2: Horizontal App\nLB + Stateless servers"
-E: "Bước 3: DB Optimization\nIndex + Read Replica"
-F: "Bước 4: Caching Layer\nRedis cho hot data"
-G: "Bước 5: Async Processing\nKafka/Queue cho heavy tasks"
-H: "50K users\nStable & monitored"
-A -> B
-B -> C: "CPU/Memory"
-B -> D: "App overload"
-B -> E: "DB slow queries"
-C -> D
-D -> E
-E -> F
-F -> G
-G -> H
+measure: "Load test và production metrics"
+find: "Tài nguyên nào gây chờ?" {shape: diamond}
+app: "CPU / app concurrency"
+db: "Database query / lock / I/O"
+network: "Payload / network / geography"
+external: "Dependency / background work"
+measure -> find
+find -> app
+find -> db
+find -> network
+find -> external
 ```
 
----
+Mỗi nhánh dẫn tới một nhóm biện pháp khác nhau. Thêm app replicas không làm một query đang thiếu index nhanh hơn; thậm chí còn tạo thêm concurrent queries xuống database.
 
-### Bước 1: Vertical Scaling — giải pháp đầu tiên, rẻ nhất
+Load test phải có dữ liệu đại diện, cache lạnh/ấm và burst đủ dài để thấy pool/queue tăng. Chỉ thử trên môi trường bạn được phép tạo tải. `EXPLAIN ANALYZE` thực thi query, còn load test có thể gây write thật; không dùng production làm môi trường thử ngẫu hứng.
 
-Ở 1K users, server hiện tại thường dư capacity. Trước khi thay đổi architecture, **nâng spec trước**.
+## Tối ưu trong một node trước khi đổi topology
 
-| Trước | Sau | Chi phí tăng |
-|-------|-----|-------------|
-| 2 vCPU, 4GB RAM | 8 vCPU, 32GB RAM | ~$100/tháng → ~$400/tháng |
-| gp2 SSD | gp3 SSD (3000 IOPS) | +$20/tháng |
-| db.t3.medium | db.r6g.xlarge | ~$200/tháng → ~$600/tháng |
+Vertical scaling là tăng CPU, RAM hoặc I/O capacity của node. Nó có thể mua thời gian nhanh nếu workload thật sự bị giới hạn bởi tài nguyên đó. Nhưng thêm RAM không sửa được query sai, lock giữ quá lâu hay một external API chậm.
 
-```bash
-# Check current resource usage trước khi quyết định
-kubectl top pods -n production
-kubectl top nodes
+Trước scale-out, kiểm tra những chi phí tránh được: N+1 queries, index không phù hợp, response dư field, gọi dependency nối tiếp và transaction bao cả HTTP call. N+1 là tình huống một query lấy danh sách rồi lại chạy thêm query cho từng item.
 
-# Database connection usage
-aws cloudwatch get-metric-statistics \
-  --namespace AWS/RDS \
-  --metric-name DatabaseConnections \
-  --dimensions Name=DBInstanceIdentifier,Value=prod-db \
-  --statistics Maximum Average \
-  --period 3600 \
-  --start-time 2026-04-07T00:00:00Z \
-  --end-time 2026-04-08T00:00:00Z
-```
+Mình ưu tiên tối ưu query hoặc transaction có bằng chứng gây nghẽn trước thay đổi kiến trúc. Nhưng không đợi tối ưu mọi thứ mới thêm node: yêu cầu availability có thể cần nhiều replicas ngay cả khi một node đủ throughput.
 
-> **Rule of thumb:** Nếu CPU < 50%, memory < 60%, DB connections < 50% max → chưa cần horizontal scaling. Vertical scaling mua thời gian rất tốt.
+Vertical scaling có giới hạn phần cứng, chi phí và có thể cần restart/failover. Ghi rõ capacity sau thay đổi cùng kế hoạch khi một node không còn đủ, thay vì coi nâng máy là hướng vô hạn.
 
----
+## Scale-out application bằng trạng thái có ownership rõ
 
-### Bước 2: Horizontal Scaling cho App Tier
+### Stateless không có nghĩa không tồn tại state
 
-Khi 1 server không đủ, thêm server phía sau load balancer. **Điều kiện tiên quyết: app phải stateless.**
+App stateless nghĩa là một request không bắt buộc quay lại đúng instance giữ state riêng của request trước. State bền vững vẫn tồn tại, nhưng nằm ở nơi các instance truy cập được và có hợp đồng rõ.
 
-```d2 title="Stateless app pods sau load balancer"
-direction: down
-alb: "AWS ALB\nRound-robin / least connections"
-p1: "App Pod 1\nStateless"
-p2: "App Pod 2\nStateless"
-p3: "App Pod 3\nStateless"
-redis: "Redis\nSession + cache"
-redis.icon: ../../diagrams/assets/redis.svg
-alb -> p1
-alb -> p2
-alb -> p3
-p1 -> redis
-p2 -> redis
-p3 -> redis
-```
-
-**Chuyển session sang Redis:**
-
-```java
-// Spring Boot — application.yml
-spring:
-  session:
-    store-type: redis
-    timeout: 30m
-  data:
-    redis:
-      host: prod-redis.xxxxx.cache.amazonaws.com
-      port: 6379
-
-// Trước: session lưu local — user bị logout khi request đến server khác
-// Sau: bất kỳ server nào cũng đọc được session từ Redis
-```
-
-**Kubernetes HPA — auto scale theo CPU:**
-
-```yaml
-apiVersion: autoscaling/v2
-kind: HorizontalPodAutoscaler
-metadata:
-  name: api-hpa
-spec:
-  scaleTargetRef:
-    apiVersion: apps/v1
-    kind: Deployment
-    name: api-deployment
-  minReplicas: 3
-  maxReplicas: 10
-  metrics:
-    - type: Resource
-      resource:
-        name: cpu
-        target:
-          type: Utilization
-          averageUtilization: 60
-    - type: Resource
-      resource:
-        name: memory
-        target:
-          type: Utilization
-          averageUtilization: 70
-```
-
----
-
-### Bước 3: Database — Read Replica + Query Optimization
-
-Ở 50K users, database thường là bottleneck đầu tiên. **80-90% traffic là read** → thêm read replica.
-
-```d2 title="Tách đường đọc và ghi"
-direction: down
-app: "App Servers"
-primary: "RDS Primary\ndb.r6g.xl" {shape: cylinder}
-replica: "RDS Read Replica\ndb.r6g.xl" {shape: cylinder}
-app -> primary: "Write queries"
-app -> replica: "Read queries"
-primary -> replica: "Replication"
-```
-
-**Spring Boot — route read/write:**
-
-```java
-@Configuration
-public class DataSourceConfig {
-
-    @Bean
-    @Primary
-    public DataSource routingDataSource(
-            @Qualifier("primaryDS") DataSource primary,
-            @Qualifier("replicaDS") DataSource replica) {
-
-        var routing = new AbstractRoutingDataSource() {
-            @Override
-            protected Object determineCurrentLookupKey() {
-                return TransactionSynchronizationManager
-                    .isCurrentTransactionReadOnly() ? "replica" : "primary";
-            }
-        };
-        routing.setTargetDataSources(Map.of(
-            "primary", primary,
-            "replica", replica
-        ));
-        routing.setDefaultTargetDataSource(primary);
-        return routing;
-    }
+```d2 title="Application replicas dùng state chung" interactive=false
+direction: right
+lb: "Load balancer"
+a: "App A"
+b: "App B"
+session: "Shared session store"
+db: PostgreSQL {
+  shape: cylinder
+  icon: ../../diagrams/assets/postgresql.svg
 }
-
-// Service layer — đánh dấu read-only
-@Service
-public class ProductService {
-
-    @Transactional(readOnly = true)  // → route sang replica
-    public List<Product> findPopular(int limit) {
-        return productRepository.findTopByOrderBySoldDesc(limit);
-    }
-
-    @Transactional  // → route sang primary
-    public Product create(CreateProductRequest req) {
-        return productRepository.save(Product.from(req));
-    }
-}
+lb -> a
+lb -> b
+a -> session
+b -> session
+a -> db
+b -> db
 ```
 
-**Trước khi thêm replica — optimize query trước:**
+Session có thể ở shared store hoặc được thiết kế theo token phù hợp. Redis không phải lựa chọn bắt buộc cho mọi ứng dụng. Local file, in-memory job và WebSocket connection state cũng cần được xem xét khi app replicas tăng.
 
-```sql
--- Tìm slow queries
-SELECT query, calls, mean_exec_time, total_exec_time
-FROM pg_stat_statements
-ORDER BY mean_exec_time DESC
-LIMIT 20;
+Sticky session là một cơ chế routing, không phải durability. Nó có thể phù hợp trong một số workload nhưng cần hiểu tác động khi node chết, autoscale hoặc phân phối user không đều. Nếu mất node đồng nghĩa mất workflow, affinity chưa giải quyết được bài toán.
 
--- Thêm index cho query phổ biến
-CREATE INDEX CONCURRENTLY idx_orders_user_created
-ON orders(user_id, created_at DESC);
+### Autoscaling cần thời gian và giới hạn downstream
 
--- Kiểm tra index có được dùng không
-EXPLAIN ANALYZE
-SELECT * FROM orders WHERE user_id = 123 ORDER BY created_at DESC LIMIT 10;
+Autoscaler phản ứng sau khi metric thay đổi; node mới còn cần schedule, khởi động và warm-up. Nó không hấp thụ burst tức thời vô hạn. Cần headroom, readiness check và giới hạn request đang xử lý.
+
+CPU là metric hợp lý cho workload CPU-bound. Với API chủ yếu chờ I/O, request concurrency hoặc queue wait có thể phản ánh saturation tốt hơn. Với worker, tuổi job cũ nhất thường quan trọng hơn chỉ CPU.
+
+Không tăng `maxReplicas` mà bỏ qua database connection budget. Scale-out app có thể làm database mất ổn định nhanh hơn trước.
+
+## Database connection budget và query optimization
+
+### Tính tổng pool trên mọi process
+
+Giả sử 8 app replicas, mỗi pool tối đa 20 connections, và 4 workers mỗi pool 10 connections:
+
+```text
+Tổng cấu hình = 8 × 20 + 4 × 10 = 200 connections
 ```
 
----
+Database còn cần chỗ cho admin, migrations, monitoring và dự phòng sự cố. Trong rolling deploy, số process có thể tăng tạm thời; budget phải tính cả cửa sổ này.
 
-### Bước 4: Caching Layer — giảm 10x database load
+Pool lớn không đồng nghĩa throughput lớn. Nó có thể làm nhiều queries tranh CPU, I/O và locks hơn. Đo pool wait, active queries và database saturation để chọn giới hạn; không áp một công thức theo CPU cores như đáp án cho mọi database.
 
-```d2 title="Bước 4: Caching Layer — giảm 10x database load"
-shape: sequence_diagram
-Client: "Client"
-App: "App Server"
-Redis: "Redis Cache"
-DB: "PostgreSQL"
-Client -> App: "GET /products/popular"
-App -> Redis: "GET products:popular"
-phase1: "Nếu: Cache HIT" {
-  Redis -> App: "cached data (< 1ms)" {style.stroke-dash: 4}
-  App -> Client: "200 OK" {style.stroke-dash: 4}
-}
-phase2: "Ngược lại: Cache MISS" {
-  Redis -> App: "null" {style.stroke-dash: 4}
-  App -> DB: "SELECT ... (10-50ms)"
-  DB -> App: "result" {style.stroke-dash: 4}
-  App -> Redis: "SET products:popular TTL=60s"
-  App -> Client: "200 OK" {style.stroke-dash: 4}
-}
+Pooler như PgBouncer có thể giảm số server-side connections. Tuy nhiên, transaction pooling ảnh hưởng tính năng dựa vào session state. Kiểm tra driver, prepared statements và usage thực tế trước khi đổi mode.
+
+### Tìm query gây tổng chi phí lớn
+
+`pg_stat_statements`, khi đã được cài và cấu hình, giúp xác định query tốn nhiều tổng thời gian hoặc được gọi quá nhiều. Một query 10 ms chạy hàng trăm nghìn lần có thể quan trọng hơn một query 2 giây hiếm gặp.
+
+Dùng `EXPLAIN`, statistics và workload thật để kiểm tra index/query rewrite. Đọc cả lock wait và transaction duration; query nhìn nhanh khi chạy riêng vẫn có thể chờ rất lâu dưới concurrency.
+
+## Read replica chỉ giải quyết phần đọc có thể tách
+
+Replica nhận dữ liệu từ primary. Với replication bất đồng bộ, nó có thể chậm hơn nguồn. Đưa mọi `SELECT` sang replica có thể khiến user không thấy đơn vừa tạo hoặc quyết định nghiệp vụ dựa trên inventory cũ.
+
+Phân loại query theo hợp đồng đọc:
+
+| Loại đọc | Nơi đọc gợi ý |
+| --- | --- |
+| Dashboard chấp nhận lag | Replica nếu đo được freshness |
+| Đọc ngay sau write quan trọng | Primary hoặc cơ chế chờ version đủ mới |
+| Kiểm tra invariant trước mutation | Cùng consistency boundary của write |
+| Báo cáo nặng | Replica/warehouse riêng nếu isolation thực sự đủ |
+
+Annotation `@Transactional(readOnly = true)` không tự tạo read/write routing. Việc lấy connection, proxy transaction và lazy connection phải khớp với routing implementation. Kiểm thử server thực sự nhận query thay vì suy ra chỉ từ annotation.
+
+Replica không giải quyết write bottleneck và vẫn tiêu thụ tài nguyên để replay write. Khi primary nghẽn do lock contention, thêm read replica có thể không tạo lợi ích đáng kể.
+
+## Cache giảm phần đọc lặp lại, không xóa bài toán correctness
+
+Nếu giả định 90% lookup của một tập query được phục vụ từ cache, số lookup rơi xuống database cho tập đó còn khoảng 10%. Điều này không có nghĩa tổng database load hay latency giảm đúng 10 lần: cache miss còn có chi phí khác, và write/queries không cache vẫn tồn tại.
+
+Chọn cache key có tenant, identity hoặc version khi response phụ thuộc những yếu tố đó. Định nghĩa TTL, invalidation và hành vi khi cache down. Cache dữ liệu quyền truy cập cần quy tắc revoke; không đánh đồng nó với catalog công khai.
+
+Trước khi rollout, thử cold cache và hot-key expiry. Nếu database chỉ sống được khi hit rate luôn trên 99%, mất một cache node có thể trở thành sự cố toàn hệ thống. Thêm single-flight, rate limit hoặc degraded mode trước khi cần dùng tới chúng.
+
+## Queue tách thời điểm xử lý, không tạo capacity miễn phí
+
+Gửi email, xử lý ảnh hay import có thể chuyển ra khỏi request path. API ghi nhận công việc rồi trả trạng thái; worker xử lý sau. Queue hấp thụ burst nhưng backlog vẫn tăng nếu tốc độ nhận lớn hơn tốc độ xử lý trong thời gian dài.
+
+Sơ đồ dưới đây dùng outbox để tránh khoảng trống giữa commit đơn hàng và gửi công việc. Outbox là bản ghi cần phát được lưu cùng transaction với dữ liệu nghiệp vụ.
+
+```d2 title="Ghi nghiệp vụ trước, gửi công việc đáng tin cậy sau" interactive=false
+direction: right
+api: "Order API"
+db: "Database: order và outbox" {shape: cylinder}
+relay: "Outbox relay"
+queue: "Durable queue"
+worker: "Email worker"
+api -> db: "Một local transaction"
+db -> relay: "Đọc event đã commit"
+relay -> queue
+queue -> worker: "Có thể redeliver"
 ```
 
-**Spring Boot caching với Redis:**
+Relay có thể publish trùng nếu crash giữa gửi và đánh dấu đã gửi. Worker phải idempotent, tức thử lại cùng công việc không tạo thêm effect ngoài ý muốn. Email provider hay payment API cần idempotency riêng nếu effect nằm ngoài database của worker.
 
-```java
-@Service
-public class ProductService {
+Giới hạn concurrency theo downstream capacity; queue length giảm nhanh nhưng database online sập không phải cải thiện. Đặt SLO theo queue age và thời gian hoàn tất, có retry budget, dead-letter handling và fairness giữa tenant.
 
-    @Cacheable(value = "products", key = "#id", unless = "#result == null")
-    public Product findById(Long id) {
-        return productRepository.findById(id).orElse(null);
-    }
+## Sharding và microservices cần lý do riêng
 
-    @CacheEvict(value = "products", key = "#product.id")
-    public Product update(Product product) {
-        return productRepository.save(product);
-    }
+**Sharding** chia dữ liệu lên nhiều nơi sở hữu khác nhau để tăng capacity hoặc đáp ứng placement requirement. Nó mang theo key selection, query fan-out, cross-shard transaction và migration. Không có user-count threshold nào chứng minh chắc chắn cần hoặc không cần sharding.
 
-    @Cacheable(value = "popular-products", key = "'top-' + #limit")
-    @Transactional(readOnly = true)
-    public List<Product> findPopular(int limit) {
-        return productRepository.findTopByOrderBySoldDesc(limit);
-    }
-}
-```
+Tương tự, microservices có thể giúp ownership và independent deployment, nhưng tăng network failure, tracing và contract management. Số lượng engineer không phải ngưỡng kỹ thuật tự động. Tách service khi boundary và nhu cầu triển khai/scale độc lập đủ rõ, không chỉ vì sản phẩm đạt 50.000 users.
 
-```yaml
-# application.yml
-spring:
-  cache:
-    type: redis
-    redis:
-      time-to-live: 60s      # TTL mặc định
-      cache-null-values: false
-```
+Các ràng buộc như data residency hoặc một workload cực nặng có thể biện minh cho thiết kế phân tán sớm. Ngược lại, modular monolith có thể tiếp tục phù hợp ở traffic lớn nếu capacity và quy trình vận hành đáp ứng. Kết luận phải dựa vào workload và yêu cầu, không dựa vào một ví dụ thành công của công ty khác.
 
-**Cache gì, không cache gì:**
+## Rollout theo giả thuyết và đo lại
 
-| Nên cache | Không nên cache |
-|-----------|----------------|
-| User profile | Real-time balance/inventory |
-| Product listing | Payment transactions |
-| Config/feature flags | One-time tokens (OTP) |
-| API response aggregate | Data thay đổi mỗi request |
-| Session data | Security-sensitive data |
+Mỗi thay đổi cần một giả thuyết có thể kiểm tra. Ví dụ: “Pool wait chiếm phần lớn request time; giảm query count sẽ tăng throughput trước khi thêm app replicas.” Chọn một nhóm endpoint, đo baseline, thay đổi nhỏ rồi so kết quả.
 
-> **Target: cache hit rate ≥ 90%.** Nếu chỉ 30% → kiểm tra TTL quá ngắn, cache key quá chi tiết (per-user thay vì shared), hoặc cache đang bị evict vì thiếu memory.
+Quy trình thực dụng:
 
----
+1. Ghi baseline latency/error/saturation và dataset, cache state, traffic mix.
+2. Thử thay đổi trên môi trường có workload đại diện.
+3. Canary một phần traffic, có rollback và capacity cho đường cũ.
+4. Kiểm tra mất một node, dependency chậm và retry storm trong phạm vi thử an toàn.
+5. Đo lại bottleneck; gỡ một nút nghẽn thường làm lộ nút tiếp theo.
 
-### Bước 5: Async Processing — không để user chờ task nặng
+Cần thấy cả service-level metric lẫn metric theo endpoint/tenant. Average toàn fleet có thể che một tenant bị nghẽn hoặc một shard nóng. Threshold alert phải gắn với SLO và thời gian xử lý sự cố của đội, không sao chép một mức CPU cố định cho mọi workload.
 
-```d2 title="Tách xử lý nặng khỏi request path"
-direction: down
-request: "User Request"
-app: "App Server\nValidate, save order, publish event"
-request -> app
-response: "Response ngay\nKhoảng 200 ms"
-app -> response
-app -> topic: "Kafka\\norder-events: Async"
-topic -> email: "Email Worker"
-topic -> inventory: "Inventory Worker"
-topic -> analytics: "Analytics Worker"
-```
+Đầu ra của capacity planning nên là một bảng có workload dự báo, capacity đã thử, giới hạn downstream và trigger cho bước tiếp theo. Đó là cơ sở để tăng từ 1.000 lên 50.000 users một cách có kiểm soát; không phải một roadmap bắt buộc mọi hệ thống đều lần lượt thêm Redis, replica rồi Kafka.
 
-```java
-// Producer — publish event sau khi tạo order
-@Service
-@RequiredArgsConstructor
-public class OrderService {
+## Tài liệu tham khảo và bài liên quan
 
-    private final KafkaTemplate<String, OrderEvent> kafkaTemplate;
+- [Google SRE: Monitoring Distributed Systems](https://sre.google/sre-book/monitoring-distributed-systems/).
+- [Kubernetes Horizontal Pod Autoscaling](https://kubernetes.io/docs/tasks/run-application/horizontal-pod-autoscale/).
+- [PostgreSQL pg_stat_statements](https://www.postgresql.org/docs/current/pgstatstatements.html).
+- [PgBouncer configuration](https://www.pgbouncer.org/config.html).
 
-    @Transactional
-    public Order createOrder(CreateOrderRequest req) {
-        Order order = orderRepository.save(Order.from(req));
-
-        // Async — user không chờ email, inventory update, analytics
-        kafkaTemplate.send("order-events",
-            order.getId().toString(),
-            new OrderEvent(order.getId(), OrderEventType.CREATED));
-
-        return order;  // Response ngay cho user
-    }
-}
-
-// Consumer — xử lý background
-@Component
-public class OrderEventConsumer {
-
-    @KafkaListener(topics = "order-events", groupId = "email-service")
-    public void handleOrderEvent(OrderEvent event) {
-        if (event.type() == OrderEventType.CREATED) {
-            emailService.sendOrderConfirmation(event.orderId());
-        }
-    }
-}
-```
-
----
-
-### Những thứ KHÔNG cần ở 50K users
-
-| Không cần | Lý do |
-|-----------|-------|
-| Database sharding | 50K users ≈ vài triệu rows — PostgreSQL xử lý thoải mái |
-| Microservices | Tăng complexity 10x, team < 20 người không cần |
-| Service mesh (Istio) | Over-engineering cho quy mô này |
-| Multi-region | Trừ khi users phân tán toàn cầu |
-| NoSQL migration | PostgreSQL + proper indexing đủ dùng |
-| CQRS/Event sourcing | Trừ khi domain thực sự phức tạp |
-
-> **Instagram case study:** 30 triệu users, 3 engineers, PostgreSQL monolith, Django, không sharding. Họ chỉ thêm read replica + Redis + Memcached. Bài học: **đừng giải quyết vấn đề bạn chưa có.**
-
----
-
-### Monitoring — phát hiện bottleneck tiếp theo
-
-```yaml
-# Prometheus alerts cho hệ thống 50K users
-groups:
-  - name: scaling-alerts
-    rules:
-      # App tier
-      - alert: HighCPUUsage
-        expr: |
-          avg(rate(container_cpu_usage_seconds_total{namespace="production"}[5m]))
-            by (pod) > 0.8
-        for: 10m
-        annotations:
-          summary: "Pod {{ $labels.pod }} CPU > 80% — cân nhắc scale out"
-
-      # Database
-      - alert: HighDBConnections
-        expr: |
-          pg_stat_activity_count{datname="production"}
-            / pg_settings_max_connections > 0.7
-        for: 5m
-        annotations:
-          summary: "DB connections > 70% max — cân nhắc connection pooling hoặc read replica"
-
-      # Slow queries
-      - alert: SlowQueries
-        expr: |
-          rate(pg_stat_statements_mean_exec_time_seconds{datname="production"}[5m]) > 0.5
-        for: 5m
-        annotations:
-          summary: "Avg query time > 500ms — check slow query log"
-
-      # Cache
-      - alert: LowCacheHitRate
-        expr: |
-          redis_keyspace_hits_total
-            / (redis_keyspace_hits_total + redis_keyspace_misses_total) < 0.85
-        for: 15m
-        annotations:
-          summary: "Cache hit rate < 85% — review caching strategy"
-
-      # Kafka consumer lag
-      - alert: HighConsumerLag
-        expr: kafka_consumergroup_lag_sum > 10000
-        for: 10m
-        annotations:
-          summary: "Kafka consumer lag > 10K — cần thêm consumer instances"
-```
-
----
-
-## Bẫy thường gặp
-
-❌ **"50K users thì phải chuyển sang microservices"**
-→ Tại sao sai: Microservices là giải pháp cho organizational scaling (50+ engineers), không phải traffic scaling. Một startup có bài học đau thương: tách monolith thành 12 microservices, response time từ 100ms lên 3 giây, error rate tăng 40x, AWS bill gấp 3.
-✅ Đúng hơn: Monolith + horizontal scaling + caching xử lý được hàng triệu users trước khi cần microservices.
-
-❌ **"Sharding database ngay từ đầu để chuẩn bị cho tương lai"**
-→ Tại sao sai: Sharding là giải pháp cuối cùng, mang theo complexity khổng lồ — cross-shard query, distributed transaction, rebalancing. PostgreSQL single instance xử lý tốt tới hàng chục triệu rows.
-✅ Đúng hơn: Optimize query + index → read replica → caching → vertical scaling DB. Sharding chỉ khi write volume thực sự quá tải.
-
-❌ **"Thêm server trước khi đo bottleneck"**
-→ Tại sao sai: Nếu bottleneck ở database, thêm 10 app server chỉ có nghĩa 10 server cùng chờ 1 database chậm. Giống mở thêm 10 làn đường trước một cây cầu 2 làn.
-✅ Đúng hơn: Luôn đo trước — `kubectl top`, CloudWatch, `pg_stat_statements`. Tìm đúng tầng bottleneck rồi mới fix.
-
-❌ **"Session lưu trong server memory cũng được, dùng sticky session"**
-→ Tại sao sai: Sticky session (session affinity) phá vỡ load balancing, tạo hotspot, và khi server die → tất cả session mất. Twitter từng gặp vấn đề users bị logout random vì lý do này.
-✅ Đúng hơn: Stateless server + shared session store (Redis/ElastiCache). Bất kỳ server nào cũng handle được bất kỳ request nào.
-
----
-
-## Câu hỏi follow-up
-
-### 1. Ở 50K users, connection pool của database nên config bao nhiêu?
-
-Rule of thumb: `connections = (core_count * 2) + effective_spindle_count`. Với db.r6g.xlarge (4 vCPU): ~10 connections optimal per pool. 5 app pods → tổng 50 connections — PostgreSQL default max_connections = 100 nên vẫn thoải mái. Quan trọng: nếu cần tăng thêm, dùng PgBouncer connection pooling thay vì tăng `max_connections` — mỗi PostgreSQL connection tốn ~10 MB RAM, 500 connections = 5 GB chỉ cho connection overhead.
-
-### 2. Cache invalidation xử lý như thế nào khi user update data?
-
-Ba chiến lược phổ biến: (1) **TTL-based** — set TTL 60s, chấp nhận stale data tối đa 60s, đơn giản nhất và đủ cho hầu hết use case; (2) **Write-through** — write vào DB đồng thời update cache, consistent nhưng phức tạp hơn; (3) **Cache-aside + evict on write** — write thì xoá cache entry, request tiếp theo cache miss và rebuild. Phổ biến nhất là (3) — dùng `@CacheEvict` trong Spring Boot. Chọn chiến lược nào phụ thuộc vào mức độ stale data chấp nhận được — product listing stale 60s OK, account balance thì không.
-
-### 3. Nếu tiếp tục scale lên 500K users thì bước tiếp theo là gì?
-
-CDN cho static assets (JS, CSS, images) → giảm bandwidth và latency đáng kể. Database: thêm read replica thứ 2, partitioning bảng lớn (orders by month). Caching: nâng Redis lên cluster mode để sharding data qua nhiều node. Nếu team > 20 engineers → bắt đầu tách 1-2 bounded context thành service riêng (payment, notification) — nhưng vẫn không phải "full microservices". Mỗi bước phải có data justify: đo bottleneck trước khi thêm infra.
-
-### 4. Làm sao biết monolith đã đến giới hạn và cần tách service?
-
-Hai tín hiệu chính: (1) **Organizational** — team > 30 engineers, merge conflict liên tục, deploy phải coordinate quá nhiều team, release cycle chậm vì phụ thuộc chéo; (2) **Technical** — có component cần scale khác biệt hoàn toàn (image processing cần GPU mà API thì không, hoặc 1 module chiếm 80% CPU). Nếu chưa có cả 2 tín hiệu → monolith vẫn là lựa chọn đúng. Đừng tách service vì "best practice" — tách vì pain thật.
-
----
-
-## Xem thêm
-
-- [Cluster, Sharding, Replication, Primary/Replica là gì?](/system-design/01-distributed-system-terms)
-- [Page 60ms ở Singapore nhưng 6s ở Mỹ — xử lý như thế nào?](/system-design/02-geo-latency-60ms-vs-6s)
+<Cards>
+  <Card title="Chọn cache và thiết kế cache failure" href="/caching/01-redis-vs-memcached" />
+  <Card title="Latency theo vùng" href="/system-design/02-geo-latency-60ms-vs-6s" />
+  <Card title="CQRS và read model" href="/system-design/04-cqrs" />
+</Cards>

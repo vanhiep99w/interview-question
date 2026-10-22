@@ -4,7 +4,7 @@ import './globals.css';
 
 export const metadata = {
   title: 'Interview Questions',
-  description: 'Bộ câu hỏi phỏng vấn kỹ thuật — JavaScript, React, Node.js, Database, System Design',
+  description: 'Bài học kỹ thuật chuyên sâu — thuật toán, Java, database, web, bảo mật và system design; giải thích cơ chế, ví dụ và trade-off.',
   icons: { icon: '/favicon.svg' },
 };
 

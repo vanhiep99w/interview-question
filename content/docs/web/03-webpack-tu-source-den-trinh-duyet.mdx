@@ -3,7 +3,6 @@ title: "Webpack: từ source code đến trình duyệt"
 description: "Hiểu Webpack qua một project React + TypeScript chạy được: mở source theo từng file, đọc config, lần theo build và thử tách chunk."
 ---
 
-# Webpack: từ source code đến trình duyệt
 
 Muốn hiểu Webpack, hãy bắt đầu bằng **một project chạy được**, không phải một danh sách tùy chọn cấu hình rời rạc.
 
@@ -14,6 +13,33 @@ Ví dụ xuyên suốt là ứng dụng React có nút đếm. Bài viết giả
 Bấm **Source code ở góc dưới bên phải** để mở drawer, hoặc bấm tên file trong bài để tới đúng đoạn code. Bạn có thể đọc và cuộn bài bên cạnh source, chuyển file, chọn phiên bản, copy file hoặc copy link. Bấm **Thu source**, **×** hoặc **Esc** để thu drawer; mở lại sẽ giữ file vừa xem.
 
 **Chưa dùng Vue, router hay Module Federation.** Các phần đó nằm trong [Module Federation: microfrontend React và Vue](/web/04-module-federation-react-vue-microfrontend).
+
+## Mục lục
+
+- [1. Nhìn kết quả trước khi đọc config](#1-nhìn-kết-quả-trước-khi-đọc-config)
+  - [Mỗi file trả lời một câu hỏi](#mỗi-file-trả-lời-một-câu-hỏi)
+- [2. Chạy ví dụ trên máy](#2-chạy-ví-dụ-trên-máy)
+  - [Lệnh đó thực sự chạy gì?](#lệnh-đó-thực-sự-chạy-gì)
+- [3. HTML và code React nối với nhau thế nào?](#3-html-và-code-react-nối-với-nhau-thế-nào)
+  - [`App.tsx` chứa gì?](#apptsx-chứa-gì)
+  - [Tại sao HTML source không có script?](#tại-sao-html-source-không-có-script)
+- [4. Đọc config Webpack theo thứ tự](#4-đọc-config-webpack-theo-thứ-tự)
+  - [4.1. `entry`: bắt đầu đọc source từ đâu?](#41-entry-bắt-đầu-đọc-source-từ-đâu)
+  - [4.2. `resolve`: import đang trỏ tới file nào?](#42-resolve-import-đang-trỏ-tới-file-nào)
+  - [4.3. `module.rules`: chuyển đổi nội dung thế nào?](#43-modulerules-chuyển-đổi-nội-dung-thế-nào)
+  - [4.4. `output`: tạo file ở đâu và tên gì?](#44-output-tạo-file-ở-đâu-và-tên-gì)
+  - [4.5. Những phần bao quanh pipeline](#45-những-phần-bao-quanh-pipeline)
+- [5. TypeScript có config riêng để làm gì?](#5-typescript-có-config-riêng-để-làm-gì)
+- [6. Dev và build khác nhau ở đâu?](#6-dev-và-build-khác-nhau-ở-đâu)
+  - [6.1. Mở output thật để đối chiếu](#61-mở-output-thật-để-đối-chiếu)
+  - [6.2. Vì sao từ tám file source lại có các file này?](#62-vì-sao-từ-tám-file-source-lại-có-các-file-này)
+- [7. Ba thay đổi nhỏ để tự kiểm chứng](#7-ba-thay-đổi-nhỏ-để-tự-kiểm-chứng)
+- [8. Hiểu `bootstrap` và chunk qua phiên bản thứ hai](#8-hiểu-bootstrap-và-chunk-qua-phiên-bản-thứ-hai)
+  - [8.1. So sánh output trước và sau khi tách bootstrap](#81-so-sánh-output-trước-và-sau-khi-tách-bootstrap)
+  - [8.2. Runtime biết tên file và tải chunk bằng cách nào?](#82-runtime-biết-tên-file-và-tải-chunk-bằng-cách-nào)
+  - [Vì sao tách rồi mà vẫn tải ngay?](#vì-sao-tách-rồi-mà-vẫn-tải-ngay)
+- [9. Muốn sửa một thứ, mở file nào?](#9-muốn-sửa-một-thứ-mở-file-nào)
+- [Tài liệu tham khảo](#tài-liệu-tham-khảo)
 
 ## 1. Nhìn kết quả trước khi đọc config
 
@@ -508,12 +534,18 @@ Nếu static server trước đó vẫn dùng cổng 4173, hãy dừng nó trư�
 
 Mở DevTools → **Network** → bật **Disable cache** → reload:
 
-```text
-index.html
-  └── main.<hash>.js
-        ├── bootstrap.<hash>.js
-        └── có thể có chunk dependencies mang tên ID số
+```d2 title="HTML khởi động entry, entry tải bootstrap" interactive=false
+direction: right
+html: index.html
+main: "main.<hash>.js"
+bootstrap: "bootstrap.<hash>.js"
+deps: "Dependency chunks nếu được tách"
+html -> main: "script được inject"
+main -> bootstrap: "dynamic import"
+main -> deps: "chunk loading theo output graph"
 ```
+
+Đây là quan hệ tải ở runtime, không phải một cây thư mục. Cạnh tải dependency cụ thể phụ thuộc output graph; dùng build report và Network để kiểm chứng.
 
 Số chunk phụ thuộc graph và tối ưu. File `327.<hash>.js` mang chunk ID, không phải thiếu source `327.tsx`.
 

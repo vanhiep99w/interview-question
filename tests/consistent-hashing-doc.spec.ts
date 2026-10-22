@@ -77,7 +77,7 @@ test('rewritten lesson preserves its route and complete manual TOC', async ({ pa
   expect(toc.links).toEqual(toc.headings);
   expect(toc.broken).toEqual([]);
   for (const href of [
-    '/system-design/01-distributed-system-terms/',
+    '/database/01-sql-vs-nosql/',
     '/caching/01-redis-vs-memcached/',
     '/system-design/03-scale-1k-to-50k-users/',
   ]) expect((await request.get(href)).ok(), href).toBeTruthy();

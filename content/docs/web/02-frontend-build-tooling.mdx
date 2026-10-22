@@ -3,11 +3,10 @@ title: "Frontend build tooling: pipeline và từng công cụ"
 description: "Tài liệu phân biệt compiler, type checker, bundler, minifier, build tool, package manager và task orchestrator; đi sâu vào từng công cụ và cách kết hợp."
 ---
 
-# Frontend build tooling: pipeline và từng công cụ
 
 Tài liệu này giúp bạn hiểu **mỗi công cụ đứng ở đâu, thực sự làm gì, không làm gì và khi nào nên dùng**. Ví dụ sử dụng JavaScript, TypeScript và React; các nguyên tắc về module, bundling và caching vẫn áp dụng cho những frontend framework khác.
 
-Đây là tài liệu hướng dẫn, không phải bộ câu hỏi phỏng vấn. Có thể đọc theo ba lượt:
+Có thể đọc theo ba lượt, tùy vào phần pipeline bạn đang cần hiểu:
 
 1. **Nắm nền tảng:** phần 1–3 giải thích các tầng và toàn bộ pipeline.
 2. **Hiểu từng công cụ:** phần 4–9 đi sâu vào package manager, compiler, bundler, build tool, CSS tooling và monorepo tooling.
@@ -18,6 +17,74 @@ Tài liệu này giúp bạn hiểu **mỗi công cụ đứng ở đâu, thực
 Các thay đổi quan trọng được đối chiếu với tài liệu chính thức ngày **14/10/2026**, đặc biệt là **Vite 8** và **Next.js 16**. Không áp dụng mặc định mới cho dự án đang dùng major version cũ. Các cấu hình bên dưới là ví dụ độc lập, không yêu cầu cài toàn bộ công cụ vào cùng một project.
 
 </Callout>
+
+## Mục lục
+
+- [1. Vì sao frontend cần build tooling](#1-vì-sao-frontend-cần-build-tooling)
+- [2. Bản đồ các loại công cụ](#2-bản-đồ-các-loại-công-cụ)
+  - [2.1. Phân loại theo nhiệm vụ, không theo tên sản phẩm](#21-phân-loại-theo-nhiệm-vụ-không-theo-tên-sản-phẩm)
+  - [2.2. Compiler và transpiler không phải hai phe đối lập](#22-compiler-và-transpiler-không-phải-hai-phe-đối-lập)
+  - [2.3. Build tool không đồng nghĩa với bundler](#23-build-tool-không-đồng-nghĩa-với-bundler)
+  - [2.4. `npm run build` không nói lên bundler nào đang chạy](#24-npm-run-build-không-nói-lên-bundler-nào-đang-chạy)
+- [3. Đi qua một build pipeline cụ thể](#3-đi-qua-một-build-pipeline-cụ-thể)
+  - [3.1. Các file của ví dụ và nơi ứng dụng bắt đầu](#31-các-file-của-ví-dụ-và-nơi-ứng-dụng-bắt-đầu)
+  - [3.2. Entry: file được chọn làm điểm bắt đầu](#32-entry-file-được-chọn-làm-điểm-bắt-đầu)
+  - [3.3. Parsing và transformation](#33-parsing-và-transformation)
+  - [3.4. Type checking là một nhiệm vụ riêng](#34-type-checking-là-một-nhiệm-vụ-riêng)
+  - [3.5. Xây dependency graph và bundling](#35-xây-dependency-graph-và-bundling)
+  - [3.6. Code splitting](#36-code-splitting)
+  - [3.7. Tree shaking, dead-code elimination và minification](#37-tree-shaking-dead-code-elimination-và-minification)
+  - [3.8. Browser target không đồng nghĩa với polyfill](#38-browser-target-không-đồng-nghĩa-với-polyfill)
+  - [3.9. CSS, assets và output](#39-css-assets-và-output)
+  - [3.10. Source maps, dev server và HMR](#310-source-maps-dev-server-và-hmr)
+- [4. Package managers và runtime](#4-package-managers-và-runtime)
+  - [4.1. npm](#41-npm)
+  - [4.2. pnpm](#42-pnpm)
+  - [4.3. Yarn](#43-yarn)
+  - [4.4. Node.js và sự chồng lấn chức năng](#44-nodejs-và-sự-chồng-lấn-chức-năng)
+- [5. Compilers, transformers và type checker](#5-compilers-transformers-và-type-checker)
+  - [5.1. Babel](#51-babel)
+  - [5.2. SWC](#52-swc)
+  - [5.3. TypeScript compiler — `tsc`](#53-typescript-compiler--tsc)
+  - [5.4. Oxc](#54-oxc)
+- [6. Bundlers: đi sâu vào từng công cụ](#6-bundlers-đi-sâu-vào-từng-công-cụ)
+  - [6.1. Webpack](#61-webpack)
+  - [6.2. Rollup](#62-rollup)
+  - [6.3. esbuild](#63-esbuild)
+  - [6.4. Rspack](#64-rspack)
+  - [6.5. Rolldown](#65-rolldown)
+  - [6.6. Turbopack](#66-turbopack)
+  - [6.7. So sánh nhanh tầng bundler](#67-so-sánh-nhanh-tầng-bundler)
+- [7. Build tools: pipeline và developer experience](#7-build-tools-pipeline-và-developer-experience)
+  - [7.1. Vite](#71-vite)
+  - [7.2. Parcel](#72-parcel)
+  - [7.3. Rsbuild](#73-rsbuild)
+  - [7.4. So sánh Vite, Parcel và Rsbuild](#74-so-sánh-vite-parcel-và-rsbuild)
+- [8. Minifiers và CSS tooling](#8-minifiers-và-css-tooling)
+  - [8.1. Terser](#81-terser)
+  - [8.2. Sass](#82-sass)
+  - [8.3. PostCSS](#83-postcss)
+  - [8.4. Lightning CSS](#84-lightning-css)
+- [9. Task orchestration cho nhiều package](#9-task-orchestration-cho-nhiều-package)
+  - [9.1. Vì sao cần một tầng khác bundler](#91-vì-sao-cần-một-tầng-khác-bundler)
+  - [9.2. Turborepo](#92-turborepo)
+  - [9.3. Nx](#93-nx)
+- [10. Cách chọn và kết hợp công cụ](#10-cách-chọn-và-kết-hợp-công-cụ)
+  - [10.1. Những so sánh đúng tầng](#101-những-so-sánh-đúng-tầng)
+  - [10.2. Những tổ hợp điển hình](#102-những-tổ-hợp-điển-hình)
+  - [10.3. Chọn theo nhu cầu](#103-chọn-theo-nhu-cầu)
+- [11. Bài thực hành: quan sát pipeline bằng Vite](#11-bài-thực-hành-quan-sát-pipeline-bằng-vite)
+  - [11.1. Chạy project mẫu có sẵn](#111-chạy-project-mẫu-có-sẵn)
+  - [11.2. Đối chiếu source trước khi build](#112-đối-chiếu-source-trước-khi-build)
+  - [11.3. Quan sát development](#113-quan-sát-development)
+  - [11.4. Quan sát production output](#114-quan-sát-production-output)
+  - [11.5. Quan sát sự khác nhau giữa type checking và build](#115-quan-sát-sự-khác-nhau-giữa-type-checking-và-build)
+- [12. Đo hiệu năng và debug đúng tầng](#12-đo-hiệu-năng-và-debug-đúng-tầng)
+  - [12.1. Không gộp mọi thứ thành một con số “build nhanh”](#121-không-gộp-mọi-thứ-thành-một-con-số-build-nhanh)
+  - [12.2. Xác định toolchain thực tế](#122-xác-định-toolchain-thực-tế)
+  - [12.3. Tìm bottleneck thay vì đổi tool ngay](#123-tìm-bottleneck-thay-vì-đổi-tool-ngay)
+- [13. Checklist các lỗi dễ nhầm](#13-checklist-các-lỗi-dễ-nhầm)
+- [14. Tóm tắt để ghi nhớ](#14-tóm-tắt-để-ghi-nhớ)
 
 ## 1. Vì sao frontend cần build tooling
 
@@ -1127,33 +1194,14 @@ Một cặp không hoàn toàn cùng tầng vẫn có thể liên quan đến qu
 
 ### 10.2. Những tổ hợp điển hình
 
-```text
-React SPA
-  npm/pnpm/Yarn
-      └── Vite 8
-            ├── Rolldown + Oxc
-            └── React integration plugin
-      └── TypeScript checker chạy qua script riêng
+| Kiểu dự án | Điều phối | Build/transform bên dưới | Type checking |
+| --- | --- | --- | --- |
+| React SPA | Package manager scripts và Vite 8 | Rolldown, Oxc, React integration plugin | Script riêng được chạy rõ ràng |
+| Ecosystem Webpack/Rspack | Package manager scripts và Rsbuild | Rspack, SWC theo cấu hình | Checker/plugin được bật rõ ràng |
+| Next.js 16 app | Next.js CLI qua package scripts | Turbopack mặc định, SWC và framework transforms | Các checks của framework và scripts dự án |
+| Monorepo | Workspaces; Nx hoặc Turborepo điều phối task graph | Mỗi app/library có toolchain riêng | Task riêng, đưa vào graph CI |
 
-Application trong ecosystem Webpack/Rspack
-  npm/pnpm/Yarn
-      └── Rsbuild
-            └── Rspack + SWC
-      └── Type checker/plugin được bật rõ ràng
-
-Next.js 16 app
-  npm/pnpm/Yarn
-      └── Next.js CLI
-            ├── Turbopack mặc định
-            ├── SWC và các framework transforms
-            └── Type/build checks của framework
-
-Monorepo
-  Workspaces + package manager
-      └── Nx hoặc Turborepo
-            ├── Vite/Next.js/Rsbuild cho apps
-            └── tsc/Rollup/Rolldown cho libraries
-```
+Đọc bảng từ trái sang phải để phân biệt công cụ gọi task và công cụ thực sự transform source. Nx/Turborepo không thay Vite hay TypeScript compiler; chúng điều phối và cache các task đã khai báo.
 
 Không cần chạy nhiều bundlers cho cùng một output chỉ vì chúng đều phổ biến. Mỗi tầng nên có trách nhiệm rõ và tránh parse/transform/minify lặp lại không cần thiết.
 
