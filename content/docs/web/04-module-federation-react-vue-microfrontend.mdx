@@ -178,27 +178,7 @@ Không nên hiểu `remoteEntry.js` là một file bundle chứa hết catalog. 
 
 Khi <SourceRef project="module-federation-react-vue" file="shell/src/remote.ts" region="load-remote">remote loader</SourceRef> gọi import, luồng xử lý về cơ bản như sau:
 
-> Playback dưới đây minh họa thứ tự các bước do tác giả chọn; không gửi request thật, không mô phỏng concurrency và tốc độ phát không phải latency. Bạn có thể chạy hoặc xem từng bước.
-
-```d2 title="Từ import đến lúc Vue được mount" mode=flow interactive=true
-# @flow
-# scenarios:
-#   - id: main
-#     label: "Kịch bản minh họa"
-#     steps:
-#       - edge: "(Host -> HRT)[0]"
-#         description: "React VueHost → Webpack runtime của host: import vueSub/mount"
-#       - edge: "(HRT -> Server)[0]"
-#         description: "Webpack runtime của host → Server remote: GET remoteEntry.js"
-#       - edge: "(HRT -> Remote)[0]"
-#         description: "Webpack runtime của host → Vue container: init share scope, get ./mount"
-#       - edge: "(Remote -> Server)[0]"
-#         description: "Vue container → Server remote: Tải chunks còn thiếu"
-#       - edge: "(Remote -> Host)[0]"
-#         description: "Vue container → React VueHost: protocolVersion, mountVueSub"
-#       - edge: "(Host -> Host)[0]"
-#         description: "React VueHost → React VueHost: await mountVueSub(element, options)"
-# @endflow
+```d2 title="Từ import đến lúc Vue được mount"
 shape: sequence_diagram
 Host: "React VueHost"
 HRT: "Webpack runtime của host"
