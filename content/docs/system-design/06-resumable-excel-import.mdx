@@ -409,7 +409,37 @@ React nhớ importId=imp_123
 → FE chỉ upload 4, 6, 7, 8, 9, 10
 ```
 
-```d2 title="7. Resume sau refresh hoặc mất mạng"
+> Playback dưới đây minh họa thứ tự các bước do tác giả chọn; không gửi request thật, không mô phỏng concurrency và tốc độ phát không phải latency. Bạn có thể chạy hoặc xem từng bước.
+
+```d2 title="7. Resume sau refresh hoặc mất mạng" mode=flow interactive=true
+# @flow
+# scenarios:
+#   - id: main
+#     label: "Kịch bản minh họa"
+#     steps:
+#       - edge: "(FE -> API)[0]"
+#         description: "React after refresh → Import API: GET /imports/{id}/resume"
+#       - edge: "(API -> DB)[0]"
+#         description: "Import API → PostgreSQL: Read import + confirmed part manifest"
+#       - edge: "(API -> S3)[0]"
+#         description: "Import API → Object Storage: ListParts(uploadId) for reconciliation"
+#       - edge: "(S3 -> API)[0]"
+#         description: "Object Storage → Import API: parts known by storage"
+#       - edge: "(API -> DB)[1]"
+#         description: "Import API → PostgreSQL: Reconcile missing callback records if safe"
+#       - edge: "(API -> FE)[0]"
+#         description: "Import API → React after refresh: partSize, totalParts, confirmedParts"
+#       - edge: "(FE -> FE)[0]"
+#         description: "React after refresh → React after refresh: User re-selects same local file"
+#       - edge: "(FE -> FE)[1]"
+#         description: "React after refresh → React after refresh: Verify name, size, fingerprint"
+#       - edge: "(FE -> API)[1]"
+#         description: "React after refresh → Import API: POST /presign for missing part numbers"
+#       - edge: "(API -> FE)[1]"
+#         description: "Import API → React after refresh: signed URLs"
+#       - edge: "(FE -> S3)[0]"
+#         description: "React after refresh → Object Storage: upload only missing parts"
+# @endflow
 shape: sequence_diagram
 FE: "React after refresh"
 API: "Import API"

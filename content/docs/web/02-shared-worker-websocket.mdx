@@ -238,7 +238,33 @@ Dùng `sync_subscriptions` chứa toàn bộ tập topic thường dễ làm ide
 
 Luồng chính:
 
-```d2 title="Message giữa worker và realtime server"
+> Playback dưới đây minh họa thứ tự các bước do tác giả chọn; không gửi request thật, không mô phỏng concurrency và tốc độ phát không phải latency. Bạn có thể chạy hoặc xem từng bước.
+
+```d2 title="Message giữa worker và realtime server" mode=flow interactive=true
+# @flow
+# scenarios:
+#   - id: main
+#     label: "Kịch bản minh họa"
+#     steps:
+#       - edge: "(A -> W)[0]"
+#         description: "Tab A → SharedWorker: REGISTER + SUBSCRIBE orders"
+#       - edge: "(W -> S)[0]"
+#         description: "SharedWorker → Realtime Server: mở WebSocket"
+#       - edge: "(W -> S)[1]"
+#         description: "SharedWorker → Realtime Server: sync_subscriptions [orders]"
+#       - edge: "(B -> W)[0]"
+#         description: "Tab B → SharedWorker: REGISTER + SUBSCRIBE notifications"
+#       - edge: "(W -> S)[2]"
+#         description: "SharedWorker → Realtime Server: sync_subscriptions [orders, notifications]"
+#       - edge: "(S -> W)[0]"
+#         description: "Realtime Server → SharedWorker: event topic=orders seq=42"
+#       - edge: "(W -> A)[0]"
+#         description: "SharedWorker → Tab A: EVENT orders seq=42"
+#       - edge: "(B -> W)[1]"
+#         description: "Tab B → SharedWorker: DISCONNECT"
+#       - edge: "(W -> S)[3]"
+#         description: "SharedWorker → Realtime Server: sync_subscriptions [orders]"
+# @endflow
 shape: sequence_diagram
 A: "Tab A"
 B: "Tab B"
@@ -378,7 +404,23 @@ Browser `WebSocket` constructor không cho JavaScript tùy ý đặt header `Aut
 
 Flow khuyến nghị cho ứng dụng web dùng session cookie:
 
-```d2 title="8. Authentication: đừng nhét access token dài hạn vào URL"
+```d2 title="8. Authentication: đừng nhét access token dài hạn vào URL" mode=flow interactive=true
+# @flow
+# scenarios:
+#   - id: main
+#     label: "Kịch bản minh họa"
+#     steps:
+#       - edge: "(W -> H)[0]"
+#         description: "SharedWorker → HTTPS API: POST /api/realtime/ticket + HttpOnly cookie"
+#       - edge: "(H -> W)[0]"
+#         description: "HTTPS API → SharedWorker: one-time ticket, TTL 30s"
+#       - edge: "(W -> R)[0]"
+#         description: "SharedWorker → Realtime Gateway: WSS handshake ?ticket=..."
+#       - edge: "(R -> R)[0]"
+#         description: "Realtime Gateway → Realtime Gateway: consume ticket + validate Origin"
+#       - edge: "(R -> W)[0]"
+#         description: "Realtime Gateway → SharedWorker: 101 Switching Protocols"
+# @endflow
 shape: sequence_diagram
 W: "SharedWorker"
 H: "HTTPS API"
