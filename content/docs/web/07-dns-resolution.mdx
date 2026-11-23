@@ -1,0 +1,177 @@
+---
+title: "DNS từ trình duyệt đến máy chủ có thẩm quyền"
+description: "Theo dấu một lượt tra google.com: máy nào giữ bản ghi, máy nào chỉ đường, cache rút ngắn đường đi ra sao và cách tự kiểm chứng bằng dig."
+---
+
+Bạn mở `https://google.com/search?q=dns`. Để mở kết nối mới, trình duyệt cần một địa chỉ mạng cho `google.com`. Nó không gửi cả URL cho DNS: `/search` và `q=dns` thuộc yêu cầu HTTP sau đó. Điều thú vị là máy trả địa chỉ cho laptop của bạn thường **không phải máy quản lý tên miền**. Thậm chí lần này nó có thể trả lời mà không hỏi Google.
+
+Muốn hiểu được cả lần tra đầu tiên lẫn lần tra kế tiếp, hãy theo dõi hai thứ riêng biệt: **ai có quyền công bố bản ghi**, và **ai đang có một bản sao còn dùng được**.
+
+## Mục lục
+
+- [Điểm xuất phát trên laptop](#điểm-xuất-phát-trên-laptop)
+- [Ba lời đáp cho một lượt tra cứu](#ba-lời-đáp-cho-một-lượt-tra-cứu)
+- [Cache giữ cả địa chỉ lẫn đường đi](#cache-giữ-cả-địa-chỉ-lẫn-đường-đi)
+- [Đổi bản ghi và những câu trả lời cũ](#đổi-bản-ghi-và-những-câu-trả-lời-cũ)
+- [Từ bản ghi đến kết nối HTTPS](#từ-bản-ghi-đến-kết-nối-https)
+- [Đọc một lượt tra thực bằng dig](#đọc-một-lượt-tra-thực-bằng-dig)
+- [Tài liệu đối chiếu](#tài-liệu-đối-chiếu)
+
+## Điểm xuất phát trên laptop
+
+Giả sử trình duyệt chưa có kết nối phù hợp để dùng lại. Nó có thể đã nhớ địa chỉ của `google.com` trong **cache** (bộ nhớ đệm). Nếu chưa, một đường đi phổ biến là gọi chức năng phân giải tên của hệ điều hành. Cache ở đây phục vụ nhiều ứng dụng: nếu trình duyệt và một ứng dụng khác cùng nhờ hệ điều hành tra `google.com`, kết quả lần đầu có thể phục vụ cả lần sau. Không phải cứ mở tab mới là một gói DNS lại rời laptop.
+
+Khi cần hỏi ra mạng, phần mềm phía máy khách, gọi là **stub resolver**, thường giao việc cho một **recursive resolver**. Laptop nhờ nó tìm đến cùng: trả dữ liệu, xác nhận không có dữ liệu phù hợp, hoặc báo lỗi. Từ *recursive* mô tả trách nhiệm đó, không phải số máy chủ mà nó phải liên hệ.
+
+Laptop biết hỏi ai nhờ cấu hình mạng. Chẳng hạn, khi bạn vào Wi-Fi, router có thể dùng DHCP để cấp địa chỉ IP và thông báo địa chỉ DNS. Địa chỉ DNS đó có thể là chính router: nó nhận truy vấn rồi chuyển tiếp tới resolver của nhà mạng. VPN có thể đặt resolver khác cho tên nội bộ. Trình duyệt bật Secure DNS cũng có thể tự chọn resolver thay vì đi qua đường phân giải của hệ điều hành. Vì vậy, trình duyệt và một tiện ích dòng lệnh trên cùng laptop chưa chắc đang hỏi cùng nơi.
+
+DNS truyền thống thường gửi truy vấn qua UDP đến cổng 53; nếu phản hồi bị cắt ngắn, client có thể hỏi lại qua TCP cổng 53. DNS over HTTPS (DoH) chuyển thông điệp DNS trong HTTPS, còn DNS over TLS (DoT) dùng một kết nối TLS riêng. Hai cách này mã hóa chặng tới resolver; chúng không biến resolver thành nơi sở hữu bản ghi.
+
+## Ba lời đáp cho một lượt tra cứu
+
+Đọc `google.com.` từ phải sang trái. Dấu chấm cuối là **root**, gốc của cây tên. Bên dưới là `com`, một tên miền cấp cao nhất (*top-level domain*, TLD). Bên dưới `com` mới là `google`. Một **zone** là phần cây tên mà một bên chịu trách nhiệm công bố dữ liệu. Bên quản lý zone cha có thể **ủy quyền** một nhánh cho zone con: thay vì chứa hết dữ liệu của nhánh đó, cha công bố phải hỏi máy chủ nào tiếp theo.
+
+Giả sử laptop cần bản ghi `A` (địa chỉ IPv4) của `google.com.`. Resolver tự tra cứu, chưa có kết quả hay chỉ dẫn phù hợp, nhưng có danh sách địa chỉ khởi đầu để liên hệ root (*root hints*). Nó sẽ nhận ba lời đáp có ý nghĩa khác nhau:
+
+1. **Root chỉ tới `.com`.** Root trả về một *referral* (lời chỉ dẫn) gồm các bản ghi `NS` nêu tên máy chủ phụ trách `.com`. Địa chỉ máy chủ tên có thể đi kèm để resolver liên hệ được. Root không chuyển gói tin của laptop xuống `.com`; chính resolver đọc lời chỉ dẫn rồi gửi truy vấn kế tiếp.
+2. **Máy chủ `.com` chỉ tới `google.com`.** Lần này danh sách `NS` chứa những tên như `ns1.google.com.`. Có một vòng luẩn quẩn: muốn hỏi `ns1.google.com` thì cần IP của nó, nhưng chính nó lại nằm dưới nhánh vừa được ủy quyền. Zone cha kèm địa chỉ của máy chủ tên để resolver đặt được câu hỏi đầu tiên. Địa chỉ đi kèm đó gọi là **glue**. Đây là IP để hỏi DNS, **không phải** IP để mở website.
+3. **Máy chủ phụ trách `google.com` trả dữ liệu.** Resolver hỏi một trong các máy chủ vừa tìm được. Đây là **authoritative name server** (máy chủ có thẩm quyền): nó công bố dữ liệu của zone thay vì dựa vào cache của người khác. Với truy vấn đang xét, câu trả lời chứa bản ghi `A`. Resolver có thể lưu kết quả rồi trả nó về laptop.
+
+Sơ đồ dưới đây cho phép đối chiếu cùng một truy vấn trong ba trạng thái cache. Mỗi mũi tên là một lần hỏi hoặc đáp; thời gian phát không phải độ trễ mạng.
+
+```d2 mode=flow layout=dagre title="Ba đường tra cùng một bản ghi A"
+# @flow
+# scenarios:
+#   - id: cold
+#     label: Chưa có chỉ dẫn
+#     steps:
+#       - edge: "(client -> resolver)[0]"
+#         description: Laptop nhờ resolver tìm IPv4 cho google.com.
+#       - edge: "(resolver -> root)[0]"
+#         description: Resolver dùng root hints để bắt đầu từ gốc.
+#       - edge: "(root -> resolver)[0]"
+#         description: Root giới thiệu các máy chủ của .com.
+#       - edge: "(resolver -> tld)[0]"
+#         description: Resolver liên hệ một máy chủ của .com.
+#       - edge: "(tld -> resolver)[0]"
+#         description: Máy chủ .com trả NS của google.com cùng glue.
+#       - edge: "(resolver -> auth)[0]"
+#         description: Resolver hỏi bản ghi A tại máy chủ của zone.
+#       - edge: "(auth -> resolver)[0]"
+#         description: Máy chủ có thẩm quyền trả IPv4.
+#       - edge: "(resolver -> client)[0]"
+#         description: Resolver trả kết quả cho laptop.
+#   - id: delegation
+#     label: Còn nhớ máy chủ tên
+#     steps:
+#       - edge: "(client -> resolver)[0]"
+#         description: Laptop cần IPv4 như lần trước.
+#       - edge: "(resolver -> auth)[0]"
+#         description: Đã biết máy chủ nào phụ trách và địa chỉ của nó nên resolver hỏi thẳng.
+#       - edge: "(auth -> resolver)[0]"
+#         description: Máy chủ của zone trả dữ liệu hiện tại.
+#       - edge: "(resolver -> client)[0]"
+#         description: Laptop nhận kết quả mà không cần chờ tra lại từ root.
+#   - id: hit
+#     label: Còn nhớ bản ghi A
+#     steps:
+#       - edge: "(client -> resolver)[0]"
+#         description: Laptop không có bản ghi nhưng resolver vẫn còn.
+#       - edge: "(resolver -> client)[0]"
+#         description: Resolver trả dữ liệu còn hạn ngay từ cache.
+# @endflow
+direction: right
+client: Laptop
+resolver: Recursive resolver
+root: Root
+tld: .com
+auth: DNS của google.com
+client -> resolver: Tra IPv4
+resolver -> root: Tìm .com
+root -> resolver: NS của .com
+resolver -> tld: Tìm google.com
+tld -> resolver: NS và glue
+resolver -> auth: Hỏi A
+auth -> resolver: Bản ghi A
+resolver -> client: IPv4
+```
+
+Nhìn vào bên gửi của từng mũi tên: laptop yêu cầu một **recursive lookup**, còn resolver thường dùng các **iterative query** (tự hỏi tiếp theo lời chỉ dẫn). Chỉ resolver cần nhìn thấy cả hành trình. Đây là mô hình theo vai trò, không phải cam kết về số gói tin: resolver có thể thử máy chủ khác khi timeout, hoặc chỉ tiết lộ phần tên cần thiết ở mỗi tầng thay vì gửi tên đầy đủ cho root.
+
+## Cache giữ cả địa chỉ lẫn đường đi
+
+Giả sử lần tra đầu vừa kết thúc. Resolver có hai loại thông tin đáng giữ: địa chỉ website, và các bản ghi giúp tìm máy chủ tên. Mỗi tập bản ghi có **TTL** (*time to live*) riêng, tính bằng giây. TTL cho biết cache thông thường được phép tái sử dụng dữ liệu trong bao lâu, không bảo đảm dữ liệu sẽ nằm trong cache đến hết hạn.
+
+| Dữ liệu còn dùng được tại resolver | Nơi cần hỏi tiếp để lấy IPv4 |
+| --- | --- |
+| Bản ghi `A` của `google.com` | Không cần hỏi ra ngoài; trả kết quả từ cache. |
+| Hết hạn `A`, còn `NS` của `google.com` và địa chỉ máy chủ tên | Hỏi thẳng máy chủ có thẩm quyền của `google.com`. |
+| Chỉ còn biết cách liên hệ máy chủ `.com` | Hỏi `.com` để lấy lại chỉ dẫn cho `google.com`. |
+| Không còn chỉ dẫn phù hợp | Bắt đầu lại từ root. |
+
+Cache của resolver còn được chia sẻ giữa nhiều client. Bạn có thể chưa từng vào Google trên laptop này, nhưng resolver đã có câu trả lời nhờ lượt tra của máy khác. **Lần đầu ở trình duyệt không đồng nghĩa với lần đầu ở resolver.**
+
+## Đổi bản ghi và những câu trả lời cũ
+
+Giả sử lúc 10:00 một resolver nhận địa chỉ cũ với TTL 300 giây. Lúc 10:01 bạn đổi bản ghi tại nguồn. Nếu giữ cache như bình thường, resolver đó vẫn có thể trả địa chỉ cũ cho tới 10:05. Một resolver chưa từng hỏi lại có thể thấy địa chỉ mới ngay lúc 10:01 nếu máy chủ có thẩm quyền mà nó hỏi đã cập nhật. Không có một tín hiệu toàn cầu bảo mọi cache xóa bản ghi cùng lúc.
+
+Vì vậy, nếu chủ động chuyển dịch vụ sang IP mới, hãy hạ TTL **trước** thời điểm chuyển và chờ TTL cũ trôi qua. Hạ TTL ngay lúc đổi IP không rút ngắn thời hạn của những bản sao đã phát đi. Nếu có thể, giữ địa chỉ cũ phục vụ trong giai đoạn chuyển tiếp; một kết nối đã mở cũng không tự di chuyển theo bản ghi mới.
+
+Không chỉ địa chỉ mới được cache. Nếu bạn hỏi một tên chưa tồn tại, kết quả `NXDOMAIN` có thể được lưu tạm (*negative caching*). Tạo đúng tên đó ngay sau lần thử không nhất thiết làm resolver thấy nó ngay. Cần phân biệt ba trường hợp khi đọc kết quả:
+
+| Kết quả | Diễn giải |
+| --- | --- |
+| `NXDOMAIN` | Tên được trả lời là không tồn tại, không chỉ là thiếu IPv4. |
+| `NOERROR` nhưng không có dữ liệu cho loại đã hỏi (*NODATA*) | Ví dụ tên có bản ghi `A` nhưng không có `AAAA` (IPv6). Khác với referral: referral chỉ ra máy chủ cần hỏi tiếp. |
+| `SERVFAIL` | Máy chủ không hoàn tất được việc trả lời, chẳng hạn do lỗi xác thực DNSSEC. Không thể từ đó kết luận tên không tồn tại. |
+
+Với câu trả lời âm có bản ghi `SOA` (thông tin quản lý zone), thời hạn cache âm dựa trên giá trị nhỏ hơn giữa TTL của `SOA` và trường `MINIMUM` trong đó. Khi vừa tạo tên mới mà vẫn gặp `NXDOMAIN`, hãy so sánh câu trả lời từ resolver với câu trả lời trực tiếp từ máy chủ có thẩm quyền trước khi sửa lại bản ghi.
+
+## Từ bản ghi đến kết nối HTTPS
+
+Ở trên mình chỉ theo một bản ghi `A`. Trong thực tế, trình duyệt có thể cần cả `AAAA`. Một tên có thể có nhiều địa chỉ; hai resolver cũng có thể nhận kết quả khác nhau vì dịch vụ phân phối lưu lượng theo mạng hoặc vị trí. Một biến thể khác là `CNAME`: chẳng hạn `www.example.com` là bí danh của `site.example.net`. Nếu chỉ mới nhận tên đích chứ chưa có địa chỉ, resolver cần phân giải tiếp tên đích. Không thể kết nối TCP tới một `CNAME` như thể nó là IP.
+
+Khi chọn được địa chỉ, trình duyệt mới có điểm đến cho kết nối. Với HTTPS qua HTTP/2, nó thường mở TCP rồi thương lượng TLS; với HTTP/3, nó dùng QUIC trên UDP và thiết lập TLS trong QUIC. Dù kết nối tới IP nào, trình duyệt vẫn kiểm tra chứng thư cho **tên trong URL**. DNS trả được IP không có nghĩa là cổng 443 đang mở, chứng thư hợp lệ hay `/search` sẽ trả HTTP 200. Đó là những bước khác nhau để khoanh vùng lỗi.
+
+## Đọc một lượt tra thực bằng dig
+
+Nếu máy có công cụ `dig` của BIND, bắt đầu bằng lệnh sau. Dấu chấm cuối giữ cho `google.com.` là một tên đầy đủ. Đừng dùng `+short` ở bước này: nó bỏ mất những trường giúp bạn hiểu ai đang trả lời.
+
+```bash
+dig google.com. A +noall +comments +answer
+```
+
+Đây là hai dòng trích từ một lần chạy, không phải IP hay TTL cố định:
+
+```text
+;; flags: qr rd ra; QUERY: 1, ANSWER: 1, AUTHORITY: 0, ADDITIONAL: 1
+google.com.             88      IN      A       142.250.199.78
+```
+
+Đọc dòng cuối từ trái sang phải: tên, TTL còn lại (88 giây), lớp `IN` (Internet), loại `A`, rồi địa chỉ. `rd` nghĩa là client yêu cầu recursion; `ra` nghĩa là máy chủ cho biết nó hỗ trợ recursion. **Hai cờ này không chứng minh resolver đã hỏi root**, cũng không cho biết cache hit hay miss. `dig` đang hỏi theo cấu hình DNS mà công cụ sử dụng, không đọc cache riêng của trình duyệt.
+
+Tiếp theo, thay vì yêu cầu tìm đến cùng, hãy đọc lời đáp của từng tầng. `@` chọn máy chủ nhận truy vấn; `+norecurse` tắt yêu cầu recursion. Các lệnh dùng tên máy chủ cho dễ đọc nên bản thân `dig` cần tìm IP của máy chủ đó trước. Nếu muốn tự lần theo đúng chỉ dẫn, thay tên sau `@` ở bước kế bằng địa chỉ trong phần `ADDITIONAL` của bước trước.
+
+```bash
+dig @a.root-servers.net com. NS +norecurse +noall +authority +additional
+dig @a.gtld-servers.net google.com. A +norecurse +noall +authority +additional
+dig @ns1.google.com google.com. A +norecurse +noall +comments +answer
+```
+
+Ở lệnh thứ hai, trong một lần chạy, hai dòng sau nằm ở **hai phần khác nhau** của phản hồi:
+
+```text
+google.com.             172800  IN      NS      ns1.google.com.
+ns1.google.com.         172800  IN      A       216.239.32.10
+```
+
+Dòng `NS` trong `AUTHORITY` chỉ người phụ trách. Dòng `A` trong `ADDITIONAL` cung cấp địa chỉ để liên hệ người đó. Hãy nhìn **tên bên trái**: IPv4 ở đây thuộc `ns1.google.com.`, không thuộc `google.com.`. Ở lệnh thứ ba, bạn mới thấy `google.com. IN A` (có TTL giữa tên và `IN`) trong `ANSWER`, kèm cờ `aa` cho biết đây là câu trả lời có thẩm quyền.
+
+Bạn cũng có thể chạy `dig +trace google.com. A` để `dig` tự lần theo các lời chỉ dẫn. Đây là **đường tra do `dig` thực hiện**, không phải bản ghi lịch sử của lượt truy cập vừa rồi trên trình duyệt. Nếu truy vấn qua resolver hoạt động nhưng `+trace` bị timeout, hãy kiểm tra mạng có cho phép gửi DNS trực tiếp ra ngoài không. Hai thao tác đó cần hai đường mạng khác nhau.
+
+## Tài liệu đối chiếu
+
+- [RFC 1034, mục 4.3.2 và 5.3.3](https://www.rfc-editor.org/rfc/rfc1034.html#section-4.3.2): cách máy chủ tạo câu trả lời và cách resolver chọn nơi hỏi tiếp.
+- [IANA — Root Files](https://www.iana.org/domains/root/files): phân biệt danh sách root hints dùng để khởi đầu với dữ liệu ủy quyền trong root zone.
+- [RFC 2308, mục 5](https://www.rfc-editor.org/rfc/rfc2308.html#section-5): dữ liệu nào quyết định thời hạn cache của câu trả lời âm.
+- [BIND 9 — hướng dẫn dig](https://bind9.readthedocs.io/en/stable/manpages.html#dig-dns-lookup-utility): tra ý nghĩa các tùy chọn và phần của phản hồi khi tự chạy lại.
