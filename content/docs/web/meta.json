@@ -6,6 +6,7 @@
     "02-shared-worker-websocket",
     "03-webpack-tu-source-den-trinh-duyet",
     "04-module-federation-react-vue-microfrontend",
-    "05-vite-vs-webpack"
+    "05-vite-vs-webpack",
+    "06-tree-shaking-class-vs-function"
   ]
 }

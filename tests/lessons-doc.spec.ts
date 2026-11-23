@@ -17,7 +17,7 @@ const lessons = [
 test('all authored and exported lessons satisfy the content contract', () => {
   expect(execFileSync(process.execPath, ['scripts/check-content.mjs', '--export'], {
     encoding: 'utf8', timeout: 30_000,
-  })).toContain('Content contract passed: 24 lessons');
+  })).toContain('Content contract passed: 25 lessons');
 });
 
 for (const route of lessons) {

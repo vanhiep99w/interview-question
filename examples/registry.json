@@ -199,5 +199,40 @@
         ]
       }
     ]
+  },
+  {
+    "id": "tree-shaking-class-lab",
+    "title": "Tree shaking · class và export function",
+    "defaultSnapshot": "lab",
+    "snapshots": [
+      {
+        "id": "lab",
+        "title": "Source chạy được",
+        "root": "examples/tree-shaking-class-lab",
+        "defaultFile": "src/class/api.js",
+        "files": [
+          "package.json",
+          "measure.mjs",
+          "src/class/api.js",
+          "src/class/main.js",
+          "src/private-fields/api.js",
+          "src/private-fields/main.js",
+          "src/static-class/api.js",
+          "src/static-class/main.js",
+          "src/object/api.js",
+          "src/object/main.js",
+          "src/object-dynamic/api.js",
+          "src/object-dynamic/main.js",
+          "src/functions/api.js",
+          "src/functions/main.js",
+          "src/namespace/api.js",
+          "src/namespace/main.js",
+          "src/namespace-dynamic/api.js",
+          "src/namespace-dynamic/main.js",
+          "src/client-functions/api.js",
+          "src/client-functions/main.js"
+        ]
+      }
+    ]
   }
 ]

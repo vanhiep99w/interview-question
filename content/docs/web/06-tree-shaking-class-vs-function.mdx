@@ -1,0 +1,457 @@
+---
+title: "Tree shaking và minify: vì sao class giữ lại method không dùng"
+description: "Đo một API client viết bằng class, object và export function qua esbuild, Rollup, Vite và terser để thấy bundler cắt được gì, minifier đổi tên được gì."
+---
+
+Bạn bật minify, mở bundle production ra xem và vẫn đọc được nguyên văn `getComments`, `deletePost`, `searchUsers`. Trang này không gọi hàm nào trong số đó. Vậy tại sao chúng vẫn nằm trong file gửi xuống trình duyệt, và tại sao tên của chúng không bị rút thành một chữ cái như các biến khác?
+
+Câu trả lời nằm ở cách viết module chứ không nằm ở cấu hình build. Bài này lấy một API client có mười thao tác, viết lại theo sáu cách, rồi build bằng bốn toolchain để xem từng cách để lại gì trong bundle. Cuối bài bạn sẽ biết khi nào nên tách class thành `export function`, và khi nào giữ class là đúng.
+
+<Callout type="info" title="Phạm vi và số đo">
+
+Mọi con số trong bài là kết quả chạy lab đi kèm với **esbuild 0.28.2**, **Rollup 4.68.8**, **terser 5.51.4** và **Vite 8.3.8** trên Node.js 26.9.0. webpack không nằm trong phép đo. Số byte tuyệt đối sẽ khác với code của bạn; điều cần mang về là phần nào bị giữ lại và vì sao.
+
+Bạn cần quen `import`/`export` và biết bundler làm gì. Nếu chưa phân biệt tree shaking với minification, đọc trước [phần tương ứng trong bản đồ build tooling](/web/02-frontend-build-tooling#37-tree-shaking-dead-code-elimination-và-minification).
+
+</Callout>
+
+## Mục lục
+
+- [Một API client mà trang chỉ dùng hai method](#một-api-client-mà-trang-chỉ-dùng-hai-method)
+- [Minify xong, bundle còn lại những gì?](#minify-xong-bundle-còn-lại-những-gì)
+  - [Tên nào được đổi, tên nào bị giữ](#tên-nào-được-đổi-tên-nào-bị-giữ)
+  - [Vì sao minifier không đổi tên property?](#vì-sao-minifier-không-đổi-tên-property)
+- [Vì sao tree shaking không cắt được method?](#vì-sao-tree-shaking-không-cắt-được-method)
+- [Tách thành export function thì khác gì?](#tách-thành-export-function-thì-khác-gì)
+  - [Kết quả đo trên bốn toolchain](#kết-quả-đo-trên-bốn-toolchain)
+- [Private field, static method và mangle property có cứu được class không?](#private-field-static-method-và-mangle-property-có-cứu-được-class-không)
+  - [`#private` đổi được tên nhưng không cắt được method](#private-đổi-được-tên-nhưng-không-cắt-được-method)
+  - [Class toàn static method vẫn là một khối](#class-toàn-static-method-vẫn-là-một-khối)
+  - [`mangle.properties` rút tên nhưng không bỏ code](#mangleproperties-rút-tên-nhưng-không-bỏ-code)
+- [Gom các hàm vào một object thì sao?](#gom-các-hàm-vào-một-object-thì-sao)
+  - [Object literal được giữ nguyên khối](#object-literal-được-giữ-nguyên-khối)
+  - [Một lần truy cập động là giữ lại tất cả](#một-lần-truy-cập-động-là-giữ-lại-tất-cả)
+  - [Muốn viết `api.getUser()` thì dùng namespace import](#muốn-viết-apigetuser-thì-dùng-namespace-import)
+- [Khi nào class vẫn là lựa chọn đúng?](#khi-nào-class-vẫn-là-lựa-chọn-đúng)
+  - [Giữ state trong một object nhỏ, để thao tác là hàm rời](#giữ-state-trong-một-object-nhỏ-để-thao-tác-là-hàm-rời)
+- [Tự chạy lại phép đo](#tự-chạy-lại-phép-đo)
+- [Đọc tiếp và tài liệu đối chiếu](#đọc-tiếp-và-tài-liệu-đối-chiếu)
+
+## Một API client mà trang chỉ dùng hai method
+
+Lab có một module `api.js` với mười thao tác gọi API: `getUser`, `getPost`, `getComments`, `getAlbums`, `getPhotos`, `getTodos`, `createPost`, `updatePost`, `deletePost` và `searchUsers`. Cách viết quen thuộc nhất là gom chúng vào một class giữ `baseUrl`:
+
+```js
+export class ApiClient {
+  constructor(baseUrl) {
+    this.baseUrl = baseUrl;
+  }
+
+  async request(path, init) {
+    const response = await fetch(this.baseUrl + path, init);
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    return response.json();
+  }
+
+  getUser(id) {
+    return this.request(`/users/${id}`);
+  }
+
+  getPost(id) {
+    return this.request(`/posts/${id}`);
+  }
+
+  // ... tám method còn lại có cùng hình dạng
+}
+```
+
+Trang đang xét chỉ cần hai thao tác đầu:
+
+```js
+import { ApiClient } from './api.js';
+
+const BASE_URL = 'https://api.example.test';
+const api = new ApiClient(BASE_URL);
+
+console.log(await api.getUser(1), await api.getPost(2));
+```
+
+Tám method còn lại không được gọi ở đâu cả. Kỳ vọng tự nhiên là bundle production chỉ chứa `getUser`, `getPost` và `request`. Bạn có thể mở <SourceRef project="tree-shaking-class-lab" file="src/class/api.js">toàn bộ class trong lab</SourceRef> để xem đủ mười method.
+
+## Minify xong, bundle còn lại những gì?
+
+Build entry trên bằng esbuild rồi nén tiếp bằng terser, bundle nặng **872 byte**. Đây là nội dung thật của file đó; mình chỉ thêm xuống dòng cho dễ đọc:
+
+```js
+var t=new class{
+constructor(t){this.baseUrl=t}
+async request(t,s){const e=await fetch(this.baseUrl+t,s);if(!e.ok)throw new Error(`HTTP ${e.status}`);return e.json()}
+getUser(t){return this.request(`/users/${t}`)}
+getPost(t){return this.request(`/posts/${t}`)}
+getComments(t){return this.request(`/posts/${t}/comments`)}
+getAlbums(t){return this.request(`/users/${t}/albums`)}
+getPhotos(t){return this.request(`/albums/${t}/photos`)}
+getTodos(t){return this.request(`/users/${t}/todos`)}
+createPost(t){return this.request("/posts",{method:"POST",body:JSON.stringify(t)})}
+updatePost(t){return this.request(`/posts/${t.id}`,{method:"PUT",body:JSON.stringify(t)})}
+deletePost(t){return this.request(`/posts/${t}`,{method:"DELETE"})}
+searchUsers(t){return this.request(`/users?q=${encodeURIComponent(t)}`)}
+}("https://api.example.test");
+console.log(await t.getUser(1),await t.getPost(2));
+```
+
+Có hai điều không như kỳ vọng. Cả mười method vẫn còn nguyên, kể cả tám method không ai gọi. Và tên của chúng không bị rút gọn. Hai hiện tượng này do hai công cụ khác nhau gây ra, nên cần tách ra để hiểu.
+
+### Tên nào được đổi, tên nào bị giữ
+
+Nhìn lại output, minifier đã đổi tên khá nhiều thứ:
+
+| Trong source | Trong bundle | Loại tên |
+| --- | --- | --- |
+| `ApiClient` | biến mất, class thành biểu thức vô danh | Tên khai báo ở top-level |
+| `api`, `BASE_URL` | `t`, hoặc inline thẳng vào chỗ dùng | Biến ở top-level |
+| `id`, `path`, `init`, `response` | `t`, `s`, `e` | Tham số và biến cục bộ |
+| `this.baseUrl` | `this.baseUrl` | Property |
+| `getUser`, `deletePost`, `request`... | giữ nguyên | Property (method trên prototype) |
+
+Quy luật khá rõ: **tên biến bị đổi, tên property thì không**. Method của class cũng là property, chỉ là property nằm trên `ApiClient.prototype`.
+
+### Vì sao minifier không đổi tên property?
+
+Biến cục bộ, tham số và khai báo ở top-level của một module có phạm vi đóng. Minifier nhìn thấy mọi chỗ dùng tên đó ngay trong file, nên đổi `response` thành `e` ở tất cả các chỗ là an toàn tuyệt đối.
+
+Property thì khác, vì JavaScript cho phép truy cập property bằng một chuỗi chỉ biết lúc chạy:
+
+```js
+const action = new URLSearchParams(location.search).get('action');
+await api[action](1); // action có thể là "getUser", "deletePost", hay bất kỳ chuỗi nào
+```
+
+Nếu minifier đổi `deletePost` thành `d`, đoạn trên hỏng mà không có lỗi nào lúc build. Chuỗi `"deletePost"` còn có thể đến từ JSON của server, từ `Object.keys()`, từ một thư viện khác nhận object này làm tham số. Minifier không thể chứng minh là không có chỗ nào như vậy, nên mặc định nó để yên toàn bộ tên property.
+
+## Vì sao tree shaking không cắt được method?
+
+Tên bị giữ là chuyện của minifier. Còn tám method thừa vẫn nằm đó là chuyện của tree shaking, tức bước bundler loại code không được dùng.
+
+Tree shaking làm việc ở mức **khai báo top-level của module**: một `function`, một `class`, một `const`. Bundler lần theo `import`/`export` để biết khai báo nào được tham chiếu, rồi bỏ những khai báo không ai chạm tới. Nó không nhìn vào bên trong một khai báo để cắt từng phần.
+
+Với cách viết class, `api.js` chỉ có đúng một khai báo là `ApiClient`. Trang có dùng `ApiClient`, nên cả khai báo được giữ, kèm theo mọi thứ bên trong nó.
+
+```d2 title="Bundler giữ hoặc bỏ theo từng khai báo top-level"
+direction: down
+main: "main.js\nchỉ gọi getUser và getPost"
+class_module: "api.js viết bằng class" {
+  api_client: "class ApiClient\n1 khai báo chứa request + 10 method"
+}
+function_module: "api.js viết bằng export function" {
+  used: "getUser, getPost, request\n3 khai báo được tham chiếu"
+  unused: "8 hàm còn lại\nkhông ai tham chiếu" {
+    style.stroke-dash: 4
+  }
+}
+main -> class_module.api_client: "import { ApiClient }\ngiữ nguyên cả khối"
+main -> function_module.used: "import { getUser, getPost }\nchỉ giữ phần này"
+```
+
+Lý do bundler không cắt bên trong class cũng chính là lý do minifier không đổi tên property. Để bỏ `deletePost`, công cụ phải chứng minh không có lời gọi nào tới nó trên **mọi** instance, kể cả qua `api[action]`, qua subclass, hay qua một hàm khác nhận `api` làm tham số. Trong lab, không toolchain nào làm việc đó: esbuild, Rollup, Vite và terser đều giữ đủ mười method.
+
+## Tách thành export function thì khác gì?
+
+Nếu đơn vị cắt là khai báo top-level, cách sửa là biến mỗi thao tác thành một khai báo riêng. `baseUrl` không còn nằm trên `this` nữa mà được truyền vào làm tham số. Diff dưới đây rút gọn còn ba trong mười thao tác; bảy thao tác kia đổi theo đúng mẫu đó.
+
+```code-diff
+title: api.js từ class sang export function
+language: javascript
+view: split
+before:
+  label: src/class/api.js (rút gọn)
+  code: |-
+    export class ApiClient {
+      constructor(baseUrl) {
+        this.baseUrl = baseUrl;
+      }
+
+      async request(path, init) {
+        const response = await fetch(this.baseUrl + path, init);
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.json();
+      }
+
+      getUser(id) {
+        return this.request(`/users/${id}`);
+      }
+
+      getPost(id) {
+        return this.request(`/posts/${id}`);
+      }
+
+      getComments(postId) {
+        return this.request(`/posts/${postId}/comments`);
+      }
+    }
+after:
+  label: src/functions/api.js (rút gọn)
+  code: |-
+    async function request(baseUrl, path, init) {
+      const response = await fetch(baseUrl + path, init);
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      return response.json();
+    }
+
+    export function getUser(baseUrl, id) {
+      return request(baseUrl, `/users/${id}`);
+    }
+
+    export function getPost(baseUrl, id) {
+      return request(baseUrl, `/posts/${id}`);
+    }
+
+    export function getComments(baseUrl, postId) {
+      return request(baseUrl, `/posts/${postId}/comments`);
+    }
+```
+
+Phía gọi đổi từ `api.getUser(1)` thành `getUser(BASE_URL, 1)` và import đúng hai hàm cần dùng. Build lại bằng `esbuild --minify`, toàn bộ bundle là:
+
+```js
+async function r(t,e,i){let o=await fetch(t+e,i);if(!o.ok)throw new Error(`HTTP ${o.status}`);return o.json()}
+function s(t,e){return r(t,`/users/${e}`)}
+function n(t,e){return r(t,`/posts/${e}`)}
+var u="https://api.example.test";
+console.log(await s(u,1),await n(u,2));
+```
+
+Tám hàm không dùng đã biến mất. `getUser` thành `s`, `getPost` thành `n`, `request` thành `r`. Cả hai vấn đề được giải quyết cùng lúc, vì giờ mỗi thao tác là một **biến top-level** chứ không còn là property: bundler cắt được, minifier đổi tên được.
+
+### Kết quả đo trên bốn toolchain
+
+Bảng dưới ghi kích thước bundle theo byte, dạng `chưa nén / sau gzip -9`:
+
+| Cách viết `api.js` | esbuild + terser | `esbuild --minify` | Rollup + terser | `vite build` |
+| --- | --- | --- | --- | --- |
+| `class ApiClient` | 872 / 383 | 882 / 397 | 874 / 383 | 866 / 378 |
+| Mười `export function` | 248 / 202 | 266 / 202 | 254 / 208 | 262 / 198 |
+
+Trước khi gzip, bản dùng function nhỏ hơn khoảng 70% ở cả bốn toolchain. Sau gzip, khoảng cách còn chừng 47%, vì mười method của ví dụ gần giống hệt nhau và gzip nén phần lặp đó rất tốt. Code thật ít lặp hơn nên đừng lấy tỉ lệ này làm dự đoán cho dự án của bạn.
+
+Còn một lợi ích không hiện trong số byte tải về: trình duyệt không phải parse phần code không bao giờ chạy.
+
+## Private field, static method và mangle property có cứu được class không?
+
+Trước khi viết lại cả module, bạn sẽ muốn thử vài cách giữ nguyên class. Lab đo cả ba cách thường được nghĩ tới.
+
+### `#private` đổi được tên nhưng không cắt được method
+
+Private name (`#baseUrl`, `#request`) không thể truy cập bằng chuỗi từ bên ngoài class; `api['#baseUrl']` là một property khác hoàn toàn. Nhờ vậy minifier biết chắc mọi chỗ dùng nằm trong thân class và đổi tên được:
+
+```js
+var t=new class{#t;constructor(t){this.#t=t}async#s(t,s){const e=await fetch(this.#t+t,s); ...
+getUser(t){return this.#s(`/users/${t}`)}
+getComments(t){return this.#s(`/posts/${t}/comments`)}
+```
+
+`#baseUrl` thành `#t`, `#request` thành `#s`. Nhưng mười method public vẫn còn đủ và vẫn giữ tên. Bundle giảm từ 872 xuống 809 byte, tức chỉ tiết kiệm phần tên. Đây là <SourceRef project="tree-shaking-class-lab" file="src/private-fields/api.js">biến thể private-fields trong lab</SourceRef>.
+
+### Class toàn static method vẫn là một khối
+
+Một phản xạ khác là bỏ state đi, biến class thành "namespace" với các `static` method và gọi `Api.getUser(BASE_URL, 1)`. Kết quả là 923 byte, còn lớn hơn class ban đầu. Static method vẫn là property, lần này nằm trên chính object `Api`, nên không có gì thay đổi về bản chất. Nếu class của bạn không giữ state, đây là dấu hiệu rõ nhất rằng nó nên là các `export function`.
+
+### `mangle.properties` rút tên nhưng không bỏ code
+
+terser có tuỳ chọn `mangle.properties` cho phép đổi tên cả property. Bật nó trên bundle class, kích thước giảm từ 872 xuống 766 byte: `getUser` thành `o`, `deletePost` thành `l`, `this.baseUrl` thành `this.t`. Nhưng thân của tám method thừa vẫn nằm nguyên, vì đổi tên không phải là loại bỏ.
+
+<Callout type="warn" title="Đừng bật mangle.properties để chữa bundle">
+
+Tuỳ chọn này đổi tên property trên toàn bộ code, không riêng class của bạn. Mọi chỗ truy cập bằng chuỗi, mọi key trong JSON trao đổi với server, mọi object truyền cho thư viện ngoài đều có thể hỏng lúc chạy mà build không báo gì. Tài liệu terser mở đầu phần này bằng cảnh báo rằng nó sẽ làm hỏng code nếu bạn không hiểu rõ cách nó hoạt động. Muốn dùng an toàn phải giới hạn bằng `regex` hoặc `reserved` cho một quy ước đặt tên riêng, và lợi ích thu được vẫn chỉ là vài ký tự mỗi tên.
+
+</Callout>
+
+Tóm lại ba cách trên chỉ tác động vào tên. Phần chiếm dung lượng là thân các method thừa, và chỉ có tách khai báo mới bỏ được chúng.
+
+## Gom các hàm vào một object thì sao?
+
+Nhiều codebase không dùng class mà export một object chứa các hàm, để phía gọi vẫn viết được `api.getUser(...)`:
+
+```js
+export const api = {
+  getUser(baseUrl, id) {
+    return request(baseUrl, `/users/${id}`);
+  },
+
+  getPost(baseUrl, id) {
+    return request(baseUrl, `/posts/${id}`);
+  },
+
+  // ... tám hàm còn lại
+};
+```
+
+Về mặt tree shaking, cách này gần với class hơn là với `export function`. `api` là **một** khai báo `const`, và mười hàm là mười property của nó.
+
+### Object literal được giữ nguyên khối
+
+Với cấu hình mặc định, cả bốn toolchain giữ đủ mười hàm cùng tên key:
+
+| Cách viết | esbuild + terser | `esbuild --minify` | Rollup + terser | `vite build` |
+| --- | --- | --- | --- | --- |
+| `export const api = { ... }` | 711 / 365 | 773 / 369 | 713 / 364 | 765 / 360 |
+| Mười `export function` (để so sánh) | 248 / 202 | 266 / 202 | 254 / 208 | 262 / 198 |
+
+Có một ngoại lệ đáng biết. Khi cho terser chạy hai lượt nén (`compress.passes: 2`), bundle object giảm từ 711 xuống 240 byte. Ở lượt đầu terser thay `api.getUser` bằng chính hàm đó; sang lượt hai nó thấy object không còn ai dùng và bỏ đi. Đây là tối ưu của minifier trên một object mà nó chứng minh được là không thoát ra ngoài, không phải tree shaking của bundler. `esbuild --minify` và `vite build` trong lab không làm bước này.
+
+### Một lần truy cập động là giữ lại tất cả
+
+Tối ưu vừa nói rất dễ mất. Chỉ cần một chỗ truy cập bằng key động:
+
+```js
+const action = new URLSearchParams(location.search).get('action');
+console.log(await api[action](BASE_URL, 1));
+```
+
+Lúc này terser không còn biết key nào được dùng. Với hai lượt nén, bundle vẫn là 734 byte và đủ mười hàm. Truyền `api` cho một hàm khác, spread nó, hay `Object.keys(api)` cũng cho kết quả tương tự.
+
+Vậy nên đừng thiết kế module dựa vào việc minifier "có thể" gỡ được object. Nó phụ thuộc cấu hình số lượt nén, phụ thuộc minifier, và một dòng code ở nơi khác có thể âm thầm vô hiệu hoá nó.
+
+### Muốn viết `api.getUser()` thì dùng namespace import
+
+Nếu thứ bạn thích ở object là cú pháp `api.getUser(...)`, có cách giữ cú pháp đó mà không mất tree shaking: vẫn viết `export function`, và import cả namespace.
+
+```js
+import * as api from './api.js';
+
+console.log(await api.getUser(BASE_URL, 1), await api.getPost(BASE_URL, 2));
+```
+
+`api` ở đây không phải object do bạn tạo ra. Nó là module namespace, và `api.getUser` là truy cập tĩnh mà bundler hiểu như một named import. Trong lab, bundle của biến thể này **giống từng byte** với bản import từng tên, ở cả bốn toolchain.
+
+Giới hạn vẫn là truy cập động. Viết `api[action]` trên namespace buộc bundler dựng một object thật chứa đủ mười export, và bundle tăng lên 920 đến 1101 byte, lớn hơn cả bản class.
+
+## Khi nào class vẫn là lựa chọn đúng?
+
+Những gì ở trên không có nghĩa là class có vấn đề. Nó chỉ đúng trong một tình huống hẹp: code chạy trên trình duyệt, module có nhiều thao tác, và mỗi trang chỉ dùng một phần nhỏ. Ra ngoài tình huống đó thì cán cân đổi khác.
+
+Mình chuyển sang `export function` khi class thực chất chỉ là cái túi gom hàm: không có state, hoặc state chỉ là cấu hình như `baseUrl`. Thư viện dùng chung cho nhiều trang cũng thuộc nhóm này, vì mỗi nơi tiêu thụ sẽ trả giá cho phần mình không dùng.
+
+Mình giữ class trong các trường hợp sau:
+
+- **Code không gửi xuống trình duyệt.** Backend, CLI, script build không có ai tải bundle, nên vài trăm byte method thừa không phải chi phí.
+- **Có state và vòng đời thật.** Connection pool, cache có TTL, state machine, hàng đợi retry: dữ liệu và hành vi gắn chặt với nhau, và thường cần nhiều instance độc lập.
+- **Phần lớn method đều được dùng.** Nếu trang gọi tám trên mười method thì không còn gì đáng kể để cắt.
+- **Nền tảng yêu cầu class.** Subclass của `Error`, custom element kế thừa `HTMLElement`.
+- **Class nhỏ.** Ví dụ trong bài chênh nhau chưa tới 200 byte sau gzip. Con số đó hiếm khi đáng để đổi một thiết kế đang dễ đọc.
+
+Câu hỏi nên đặt ra là "thứ này có state và vòng đời riêng không?", thay vì "class hay function?".
+
+### Giữ state trong một object nhỏ, để thao tác là hàm rời
+
+Truyền `baseUrl` vào từng lời gọi thì ổn với một tham số. Khi có thêm token, timeout, header mặc định, danh sách tham số sẽ phình ra. Lúc đó có thể gom state vào một object dữ liệu thuần và để mỗi thao tác là một hàm nhận object đó:
+
+```js
+export function createClient(baseUrl, token) {
+  return { baseUrl, token };
+}
+
+async function request(client, path, init = {}) {
+  const response = await fetch(client.baseUrl + path, {
+    ...init,
+    headers: { ...init.headers, Authorization: `Bearer ${client.token}` },
+  });
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  return response.json();
+}
+
+export function getUser(client, id) {
+  return request(client, `/users/${id}`);
+}
+```
+
+Phía gọi tạo client một lần rồi truyền nó đi:
+
+```js
+import { createClient, getUser, getPost } from './api.js';
+
+const client = createClient('https://api.example.test', 'demo-token');
+
+console.log(await getUser(client, 1), await getPost(client, 2));
+```
+
+Biến thể này trong lab nặng 350 byte với esbuild + terser (262 byte sau gzip), và tám thao tác không dùng vẫn bị loại hoàn toàn. Bạn giữ được một nơi chứa cấu hình mà không buộc mọi thao tác phải đi theo nó vào bundle. Firebase JS SDK chuyển sang kiểu API này ở bản modular, với lý do được nêu trong tài liệu nâng cấp là để tree shaking hoạt động.
+
+Cái giá là mất `this` và mất chỗ tự nhiên để override hành vi bằng kế thừa. Nếu client cần giữ state thay đổi theo thời gian, ví dụ tự refresh token, object đó bắt đầu có vòng đời riêng và một class nhỏ chỉ lo phần state lại là lựa chọn hợp lý; các thao tác API vẫn có thể là hàm rời nhận nó làm tham số.
+
+## Tự chạy lại phép đo
+
+Toàn bộ source và script đo nằm trong repository `interview-question`. Script build chín biến thể bằng bốn toolchain, in bảng kích thước, và ghi từng bundle vào `dist/` để bạn mở ra đọc.
+
+<SourceRef project="tree-shaking-class-lab" file="measure.mjs" variant="button">Mở toàn bộ source · Tree shaking lab</SourceRef>
+
+Lab pin chính xác phiên bản bốn công cụ trong <SourceRef project="tree-shaking-class-lab" file="package.json">package.json</SourceRef> nhưng không commit lockfile, nên dependency gián tiếp có thể khác giữa các lần cài. Output dưới đây là kết quả mình chạy trên Node.js 26.9.0.
+
+```terminal-session
+title: Đo kích thước bundle của từng cách viết
+context:
+  kind: local
+  label: Node.js 26.9.0
+  cwd: interview-question/examples/tree-shaking-class-lab
+steps:
+  - id: install
+    title: Cài bốn công cụ build
+    command: npm install
+    expected: Cài esbuild, rollup, terser và vite đúng phiên bản ghi trong package.json.
+  - id: measure
+    title: Build chín biến thể và kiểm tra các nhận định trong bài
+    command: npm test
+    outputs:
+      - stream: stdout
+        text: |-
+          Bundle size in bytes: raw / gzip -9
+          ┌───────────────────┬──────────────────┬──────────────────┬─────────────────┬──────────────┐
+          │ (index)           │ esbuild + terser │ esbuild --minify │ rollup + terser │ vite build   │
+          ├───────────────────┼──────────────────┼──────────────────┼─────────────────┼──────────────┤
+          │ class             │ '872 / 383'      │ '882 / 397'      │ '874 / 383'     │ '866 / 378'  │
+          │ private-fields    │ '809 / 377'      │ '819 / 388'      │ '811 / 376'     │ '803 / 370'  │
+          │ static-class      │ '923 / 382'      │ '925 / 386'      │ '922 / 376'     │ '917 / 372'  │
+          │ object            │ '711 / 365'      │ '773 / 369'      │ '713 / 364'     │ '765 / 360'  │
+          │ object-dynamic    │ '734 / 388'      │ '800 / 397'      │ '736 / 386'     │ '792 / 386'  │
+          │ functions         │ '248 / 202'      │ '266 / 202'      │ '254 / 208'     │ '262 / 198'  │
+          │ namespace         │ '248 / 202'      │ '266 / 202'      │ '254 / 208'     │ '262 / 198'  │
+          │ namespace-dynamic │ '1046 / 500'     │ '1058 / 509'     │ '920 / 417'     │ '1101 / 528' │
+          │ client-functions  │ '350 / 262'      │ '397 / 273'      │ '366 / 256'     │ '393 / 271'  │
+          └───────────────────┴──────────────────┴──────────────────┴─────────────────┴──────────────┘
+          Extra terser options on the esbuild bundle: raw / gzip -9
+          ┌──────────────────────────────────────────┬─────────────┐
+          │ (index)                                  │ Values      │
+          ├──────────────────────────────────────────┼─────────────┤
+          │ class, terser default                    │ '872 / 383' │
+          │ class, terser mangle.properties          │ '766 / 349' │
+          │ object, terser default (1 pass)          │ '711 / 365' │
+          │ object, terser compress.passes=2         │ '240 / 198' │
+          │ object-dynamic, terser compress.passes=2 │ '734 / 388' │
+          └──────────────────────────────────────────┴─────────────┘
+          All checks passed.
+    expected: Dòng cuối là "All checks passed."; nếu một phiên bản công cụ mới thay đổi hành vi, assert tương ứng sẽ báo lỗi.
+    exitCode: 0
+```
+
+`npm test` chạy `measure.mjs --check`. Ngoài việc in bảng, nó assert các nhận định chính của bài: class và object truy cập động giữ đủ tám tên method thừa, bản function không còn tên nào trong số đó, và namespace import cho bundle trùng với named import. Nếu chỉ muốn xem số, dùng `npm run measure`.
+
+Sau khi chạy, mở `dist/class/esbuild-terser.js` và `dist/functions/esbuild-minify.js` cạnh nhau. Đọc trực tiếp hai file đó thuyết phục hơn bất kỳ bảng số nào.
+
+Để áp dụng vào dự án của bạn, bắt đầu từ bundle chứ đừng từ source: build production, tìm trong output tên một method mà bạn biết trang đó không gọi. Nếu nó còn đó, lần ngược về module chứa nó và xem nó là property của một class hay object nào. Chỉ tách những module vừa lớn vừa được dùng một phần; các class còn lại cứ để yên.
+
+## Đọc tiếp và tài liệu đối chiếu
+
+<Cards>
+  <Card title="Frontend build tooling" href="/web/02-frontend-build-tooling" description="Tree shaking, dead-code elimination và minification nằm ở đâu trong pipeline." />
+  <Card title="webpack từ source đến trình duyệt" href="/web/03-webpack-tu-source-den-trinh-duyet" description="Đọc output thật của một bản build để biết bundle chứa những gì." />
+  <Card title="Vite và webpack" href="/web/05-vite-vs-webpack" description="Production build của hai toolchain và cách kiểm tra chunks." />
+</Cards>
+
+Tài liệu chính thức để đối chiếu khi dự án dùng phiên bản khác:
+
+- [Rollup: tree shaking dựa trên phân tích tĩnh `import`/`export`](https://rollupjs.org/introduction/#tree-shaking).
+- [esbuild: tree shaking và các điều kiện để code được coi là không dùng](https://esbuild.github.io/api/#tree-shaking).
+- [terser: đổi tên property bằng `--mangle-props` và cảnh báo đi kèm](https://terser.org/docs/cli-usage/#cli-mangling-property-names---mangle-props).
+- [webpack: tree shaking và `sideEffects`](https://webpack.js.org/guides/tree-shaking/).
+- [MDN: namespace import `import * as name`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/import#namespace_import).
+- [Firebase: nâng cấp lên modular API](https://firebase.google.com/docs/web/modular-upgrade).
