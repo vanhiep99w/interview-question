@@ -18,7 +18,17 @@
 /* Use the full desktop width between the sidebar and table of contents. */
 @media (min-width: 80rem) {
   #nd-docs-layout {
-    --fd-layout-width: 100vw;
+    --fd-layout-width: 100%;
+  }
+
+  #nd-docs-layout[data-sidebar-collapsed='true'] {
+    /* Reclaim the collapsed sidebar track so content and TOC sit close to both edges. */
+    --fd-layout-width: calc(100% + var(--fd-sidebar-width));
+  }
+
+  #nd-docs-layout[data-sidebar-collapsed='true'] article#nd-page,
+  #nd-docs-layout[data-sidebar-collapsed='true'] #nd-page article {
+    padding-top: 4rem;
   }
 }
 

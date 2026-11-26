@@ -1,0 +1,447 @@
+---
+title: "Transactional Outbox, CDC và Debezium: tách bạch Pattern, Kỹ thuật và Công cụ"
+description: "Phân biệt ba tầng trừu tượng hay bị đánh đồng trong hệ thống phân tán: Transactional Outbox là pattern, CDC là kỹ thuật, Debezium là công cụ — cùng cách chọn tổ hợp phù hợp theo bài toán."
+---
+
+Trong nhiều buổi review thiết kế, chỉ cần ai đó nhắc tới việc phát event sau khi lưu dữ liệu, cuộc thảo luận thường rẽ sang hai câu nói quen thuộc: *"Dùng Outbox là phải dựng thêm Kafka Connect với Debezium"* hoặc *"Đã chạy Debezium rồi thì tạo thêm bảng Outbox làm gì cho thừa?"*. Cả hai nhận định đó đều có phần hợp lý về mặt cảm giác, nhưng sai ở gốc rễ: chúng gộp ba thứ thuộc ba tầng trừu tượng khác nhau thành một khối duy nhất.
+
+**Transactional Outbox** là một *pattern*, **CDC** (*Change Data Capture*) là một *kỹ thuật* (cơ chế thu thập thay đổi), còn **Debezium** là một *công cụ* cụ thể. Khi tách bạch được ba lớp này, bạn sẽ thấy mình có thể chọn đúng thứ cần thiết cho quy mô hiện tại thay vì kéo cả một cụm hạ tầng nặng về chỉ để giải quyết một bài toán nhỏ.
+
+<Callout type="info" title="Kiến thức nền và phạm vi">
+Bạn cần quen với transaction trong database quan hệ và message broker cơ bản. **Dual-write** là thao tác ghi vào hai hệ thống độc lập (ví dụ database và Kafka) trong cùng một luồng xử lý mà không có giao dịch nguyên tử chung. **At-least-once** nghĩa là sự kiện có thể được gửi lặp trong lúc phục hồi lỗi, nên bên nhận phải **idempotent** (xử lý lặp cùng sự kiện mà không làm sai trạng thái). Các con số về tải hay độ trễ trong bài đều là giả định minh họa, không phải benchmark production.
+</Callout>
+
+## Mục lục
+
+- [Vì sao ba khái niệm này hay bị gộp làm một?](#vì-sao-ba-khái-niệm-này-hay-bị-gộp-làm-một)
+- [Tầng 1: Transactional Outbox là một Pattern](#tầng-1-transactional-outbox-là-một-pattern)
+  - [Bài toán dual-write và ranh giới mà Outbox bảo vệ](#bài-toán-dual-write-và-ranh-giới-mà-outbox-bảo-vệ)
+  - [Outbox chỉ giải quyết tính nguyên tử lúc ghi, không quy định cách gửi](#outbox-chỉ-giải-quyết-tính-nguyên-tử-lúc-ghi-không-quy-định-cách-gửi)
+- [Outbox không bắt buộc dùng CDC: khi nào Polling là đủ?](#outbox-không-bắt-buộc-dùng-cdc-khi-nào-polling-là-đủ)
+  - [Cơ chế Polling Publisher với khóa dòng an toàn](#cơ-chế-polling-publisher-với-khóa-dòng-an-toàn)
+  - [Điểm mạnh và giới hạn của Polling Publisher](#điểm-mạnh-và-giới-hạn-của-polling-publisher)
+  - [Khi nào nên chuyển từ Polling sang Log-based CDC?](#khi-nào-nên-chuyển-từ-polling-sang-log-based-cdc)
+- [Tầng 2: CDC là một Kỹ thuật — và cần nói rõ "Log-based CDC"](#tầng-2-cdc-là-một-kỹ-thuật--và-cần-nói-rõ-log-based-cdc)
+  - [Ba dạng CDC và vì sao Log-based chiếm ưu thế](#ba-dạng-cdc-và-vì-sao-log-based-chiếm-ưu-thế)
+  - [Đối chiếu đường đi: Polling Publisher và Log-based CDC](#đối-chiếu-đường-đi-polling-publisher-và-log-based-cdc)
+  - [Những cái giá ít được nhắc tới của Log-based CDC](#những-cái-giá-ít-được-nhắc-tới-của-log-based-cdc)
+- [CDC không bắt buộc dùng Debezium](#cdc-không-bắt-buộc-dùng-debezium)
+- [Tầng 3: Debezium là Công cụ — và không chỉ dùng cho Outbox](#tầng-3-debezium-là-công-cụ--và-không-chỉ-dùng-cho-outbox)
+  - [Những bài toán dùng Debezium trực tiếp không cần Outbox](#những-bài-toán-dùng-debezium-trực-tiếp-không-cần-outbox)
+  - [Cạm bẫy rò rỉ schema: vì sao microservices vẫn hay ghép Outbox với Debezium?](#cạm-bẫy-rò-rỉ-schema-vì-sao-microservices-vẫn-hay-ghép-outbox-với-debezium)
+- [Chọn tổ hợp nào theo quy mô và bài toán?](#chọn-tổ-hợp-nào-theo-quy-mô-và-bài-toán)
+- [Bài liên quan](#bài-liên-quan)
+
+## Vì sao ba khái niệm này hay bị gộp làm một?
+
+Trong hệ sinh thái microservices hiện đại, bộ ba **Outbox + Log-based CDC + Debezium** xuất hiện cạnh nhau quá thường xuyên. Vì chúng ghép với nhau rất khớp, người đọc dễ vô tình coi ba tên gọi này là một gói buộc chặt.
+
+Thực tế, mối quan hệ giữa chúng là **nhiều–nhiều**, không phải một–một. Sơ đồ dưới đây đặt từng thành phần về đúng tầng của nó để thấy rõ ranh giới thay thế giữa các lớp.
+
+```d2 title="Ba tầng độc lập: Pattern, Kỹ thuật và Công cụ" interactive=false
+direction: right
+
+pattern: "Tầng 1: Pattern / Bài toán" {
+  outbox: "Transactional Outbox\n(Chống dual-write,\ngiữ sạch event contract)"
+  sync: "State Sync\n(Search, Cache, DWH,\nZero-downtime migration)"
+}
+
+technique: "Tầng 2: Kỹ thuật vận chuyển" {
+  polling: "Polling Publisher\n(Query định kỳ bảng outbox)"
+  log_cdc: "Log-based CDC\n(Đọc WAL / Binlog)"
+}
+
+tool: "Tầng 3: Công cụ triển khai" {
+  worker: "App Worker / Cron\n(SQL + SKIP LOCKED)"
+  debezium: "Debezium\n(Kafka Connect / Server)"
+  others: "Maxwell, AWS DMS,\nSequin, PeerDB, Flink CDC,\nNative Streams"
+}
+
+pattern.outbox -> technique.polling: "Đủ dùng ở tải nhỏ–vừa"
+pattern.outbox -> technique.log_cdc: "Tải cao / lag thấp"
+pattern.sync -> technique.log_cdc: "Đồng bộ trạng thái bảng"
+
+technique.polling -> tool.worker
+technique.log_cdc -> tool.debezium
+technique.log_cdc -> tool.others
+```
+
+Nhìn theo chiều ngang, bạn có thể rút ra ngay ba nguyên tắc tách biệt:
+
+- **Outbox không bắt buộc dùng CDC:** bảng outbox hoàn toàn có thể được đọc bởi một worker polling định kỳ.
+- **CDC không bắt buộc dùng Debezium:** đọc transaction log là cơ chế của database, và có nhiều công cụ khác khai thác cơ chế này.
+- **Debezium không chỉ dùng cho Outbox:** nó sinh ra để bắt mọi thay đổi dữ liệu ở database, phục vụ nhiều bài toán đồng bộ ngoài domain event.
+
+| Khái niệm | Bản chất | Câu hỏi nó trả lời | Có thể thay bằng gì? | Hiểu nhầm phổ biến |
+| --- | --- | --- | --- | --- |
+| **Transactional Outbox** | Pattern | Làm sao ghi DB và tạo event một cách nguyên tử, không mất hoặc dư event? | 2PC (hiếm dùng vì chậm/phức tạp), hoặc Event Sourcing | "Muốn dùng Outbox phải dựng Kafka + Debezium" |
+| **CDC** | Kỹ thuật / Cơ chế | Làm sao phát hiện và trích xuất các thay đổi `INSERT`/`UPDATE`/`DELETE` từ DB? | Polling Publisher (riêng với bảng Outbox) hoặc batch ETL | Đánh đồng CDC với duy nhất Debezium |
+| **Debezium** | Công cụ (implementation) | Chạy phần mềm nào để đọc WAL/binlog và đẩy ra downstream? | Maxwell, AWS DMS, Sequin, PeerDB, Flink CDC, Change Streams | "Debezium chỉ để đọc bảng Outbox" |
+
+Tách được bảng này ra rồi, ta đi vào từng tầng để xem nó thực sự giải quyết cái gì và gãy ở đâu.
+
+## Tầng 1: Transactional Outbox là một Pattern
+
+### Bài toán dual-write và ranh giới mà Outbox bảo vệ
+
+Giả sử bạn có một Order Service dùng PostgreSQL. Khi khách đặt đơn, service cần làm hai việc: lưu đơn hàng vào bảng `orders`, và phát một sự kiện `OrderPlaced` sang message broker để Billing Service và Notification Service xử lý tiếp.
+
+Nếu bạn viết thẳng lệnh ghi database rồi gọi `broker.publish(...)` ngay trong cùng handler, hệ thống rơi vào lỗi **dual-write** vì PostgreSQL và message broker không chia sẻ chung một transaction:
+
+- **Trường hợp 1 (mất event):** Database vừa `COMMIT` thành công thì process crash hoặc mạng tới broker đứt. Đơn hàng đã tồn tại trong DB, nhưng không service nào khác nhận được `OrderPlaced`.
+- **Trường hợp 2 (event ma):** Bạn đảo thứ tự, gọi `broker.publish(...)` trước khi `COMMIT`, nhưng lệnh ghi DB sau đó gặp lỗi constraint và `ROLLBACK`. Downstream nhận được thông báo về một đơn hàng chưa từng tồn tại.
+
+Transactional Outbox giải quyết vấn đề này bằng một ý tưởng rất thẳng thắn: **không gọi broker trong lúc xử lý request**. Thay vào đó, service ghi cả dữ liệu nghiệp vụ (`orders`) lẫn bản ghi sự kiện (`outbox_events`) vào **cùng một local ACID transaction** của chính database đó.
+
+```code-diff
+title: Từ dual-write rủi ro sang Transactional Outbox
+language: typescript
+view: split
+before:
+  label: Dual-write (có cửa sổ lỗi)
+  code: |-
+    async function placeOrder(input: OrderInput) {
+      const order = await db.transaction(async (tx) => {
+        return tx.orders.insert(input);
+      });
+
+      // Nếu process crash hoặc mạng lỗi ở dòng này,
+      // đơn đã commit nhưng event biến mất vĩnh viễn.
+      await broker.publish('order.placed', {
+        orderId: order.id,
+        total: order.total,
+      });
+
+      return order;
+    }
+after:
+  label: Transactional Outbox (nguyên tử lúc ghi)
+  code: |-
+    async function placeOrder(input: OrderInput) {
+      return db.transaction(async (tx) => {
+        const order = await tx.orders.insert(input);
+
+        // Ghi vào cùng local transaction:
+        // hoặc cả hai cùng commit, hoặc cả hai cùng rollback.
+        await tx.outboxEvents.insert({
+          eventId: crypto.randomUUID(),
+          aggregateType: 'Order',
+          aggregateId: order.id,
+          eventType: 'OrderPlaced',
+          payload: { orderId: order.id, total: order.total },
+        });
+
+        return order;
+      });
+    }
+```
+
+Điểm mấu chốt nằm ở ranh giới transaction: vì cả `orders` và `outbox_events` nằm trong cùng một database, cơ chế ACID bảo đảm hoặc cả hai dòng cùng xuất hiện sau `COMMIT`, hoặc cả hai cùng biến mất khi `ROLLBACK`. Request đặt đơn không còn phụ thuộc vào trạng thái sống chết của broker nữa.
+
+### Outbox chỉ giải quyết tính nguyên tử lúc ghi, không quy định cách gửi
+
+Đến lúc transaction commit xong, sự kiện mới chỉ nằm yên trong bảng `outbox_events`. Bạn vẫn cần một tiến trình tách biệt — thường gọi là **Message Relay** — để đọc các bản ghi đó và đẩy ra broker.
+
+Bản thân pattern Transactional Outbox **không hề quy định** Message Relay phải hoạt động bằng cách nào. Bạn có thể cho một worker query bảng `outbox_events` định kỳ (Polling Publisher), hoặc đọc trực tiếp từ transaction log của database (Log-based CDC). Cả hai đều là triển khai hợp lệ của cùng một pattern.
+
+<Callout type="warn" title="Outbox không tự mang lại exactly-once đầu cuối">
+Outbox đóng kín khoảng hở giữa database commit và việc tạo ra event, nhưng không xóa bỏ trùng lặp trên đường truyền. Message Relay có thể gửi thành công event lên broker rồi crash trước khi kịp lưu checkpoint (hoặc cập nhật `published_at`). Khi khởi động lại, nó sẽ gửi lại event đó. Do đó, mọi downstream consumer vẫn phải thiết kế **idempotent**. Xem chi tiết cơ chế chống trùng ở bài [CQRS: tách mô hình đọc và ghi](/system-design/04-cqrs#at-least-once-delivery-và-idempotent-consumer).
+</Callout>
+
+## Outbox không bắt buộc dùng CDC: khi nào Polling là đủ?
+
+Khi nghe tới Outbox, nhiều đội lập tức nghĩ phải triển khai Kafka Connect, cấu hình PostgreSQL logical replication rồi viết transform cho Debezium. Với một hệ thống đang xử lý vài chục đến vài trăm đơn mỗi giây, làm vậy chẳng khác nào mua xe đầu kéo để chở vài thùng hàng trong nội thành.
+
+Trong phần lớn giai đoạn đầu của sản phẩm, **Polling Publisher** — một background worker định kỳ query bảng `outbox_events` — là lựa chọn mình khuyên dùng mặc định.
+
+### Cơ chế Polling Publisher với khóa dòng an toàn
+
+Điểm dễ sai nhất khi tự viết Polling Publisher là chạy nhiều worker song song: nếu hai worker cùng chạy `SELECT * FROM outbox_events WHERE published_at IS NULL LIMIT 100`, cả hai sẽ lấy trùng đúng 100 dòng giống hệt nhau và bắn lặp toàn bộ batch.
+
+Trên PostgreSQL (hoặc MySQL 8+), bạn giải quyết bài toán này gọn gàng bằng hai công cụ có sẵn của database: một **partial index** (chỉ mục chỉ lập cho các dòng chưa gửi) và mệnh đề `FOR UPDATE SKIP LOCKED` (khóa các dòng mình lấy và tự động bỏ qua dòng đang bị worker khác giữ). Đoạn SQL dưới đây minh họa cách một worker nhận việc và chốt trạng thái.
+
+```code-walkthrough
+title: Truy vấn Polling Publisher an toàn cho nhiều worker song song
+language: sql
+snapshots:
+  - id: polling
+    title: outbox_polling.sql
+    code: |-
+      -- 1. Partial index chỉ giữ các dòng chưa publish để tránh quét toàn bảng
+      CREATE INDEX idx_outbox_pending
+        ON outbox_events (created_at, event_id)
+        WHERE published_at IS NULL;
+
+      -- 2. Worker nhận một batch và bỏ qua dòng đang bị worker khác khóa
+      BEGIN;
+
+      SELECT event_id, aggregate_id, event_type, payload
+      FROM outbox_events
+      WHERE published_at IS NULL
+      ORDER BY created_at, event_id
+      LIMIT 100
+      FOR UPDATE SKIP LOCKED;
+
+      -- (Ứng dụng đẩy batch 100 event sang broker tại đây,
+      --  hoặc claim bằng trạng thái PROCESSING trước khi gọi mạng)
+
+      -- 3. Đánh dấu đã gửi cho các event publish thành công
+      UPDATE outbox_events
+      SET published_at = NOW()
+      WHERE event_id = ANY($1::uuid[]);
+
+      COMMIT;
+steps:
+  - id: index
+    snapshot: polling
+    title: Giữ index nhỏ bằng partial index
+    description: Bảng outbox có thể tích lũy hàng triệu dòng lịch sử. Điều kiện WHERE published_at IS NULL giúp index chỉ chứa các dòng đang chờ gửi, giữ thời gian truy vấn ổn định.
+    ranges: [[1, 4]]
+  - id: skip-locked
+    snapshot: polling
+    title: Lấy batch theo thứ tự mà không chặn lẫn nhau
+    description: FOR UPDATE SKIP LOCKED cho phép nhiều relay worker chạy song song; worker B tự động nhảy qua 100 dòng worker A đang giữ thay vì đứng đợi lock.
+    ranges: [[9, 14]]
+  - id: mark-done
+    snapshot: polling
+    title: Chốt trạng thái sau khi broker xác nhận
+    description: Chỉ cập nhật published_at sau khi broker đã ack. Nếu worker crash giữa lúc gọi broker và lúc UPDATE, các dòng đó tự nhả khóa khi transaction rollback và sẽ được gửi lại (at-least-once).
+    ranges: [[19, 24]]
+```
+
+<Callout type="info" title="Lưu ý về thời gian giữ transaction khi poll">
+Trong ví dụ trên, nếu bạn gọi mạng ra broker khi vẫn giữ `BEGIN ... COMMIT` mở, broker chậm sẽ biến transaction thành một [long-running transaction](/database/05-long-running-transaction) và giữ connection DB quá lâu. Ở tải lớn hơn, hãy tách thành hai bước ngắn: giao dịch 1 chuyển trạng thái sang `IN_PROGRESS` kèm `locked_until` rồi `COMMIT` ngay; gọi broker ngoài transaction; giao dịch 2 cập nhật `PUBLISHED`. Nhờ `locked_until`, nếu worker chết giữa chừng, worker khác vẫn thu hồi được dòng bị treo sau khi hết hạn lease.
+</Callout>
+
+### Điểm mạnh và giới hạn của Polling Publisher
+
+Điểm hấp dẫn nhất của Polling Publisher là **tổng chi phí vận hành cực thấp**. Bạn không phải dựng thêm Kafka Connect, không cần bật logical replication trên database, không lo replication slot làm đầy ổ đĩa, và bất kỳ kỹ sư backend nào cũng có thể debug hàng đợi chỉ bằng một câu `SELECT`.
+
+Đổi lại, cơ chế polling có ba giới hạn rõ rệt khi lưu lượng tăng:
+
+- **Độ trễ phụ thuộc chu kỳ quét:** Nếu poll mỗi 500 ms, trung bình mỗi event phải đợi khoảng 250 ms trước khi được nhấc lên. Giảm chu kỳ xuống 20–50 ms thì worker lại liên tục gõ vào primary DB ngay cả lúc không có đơn hàng nào.
+- **Tạo tải ghi phụ và table bloat:** Mỗi dòng outbox không chỉ bị `INSERT` một lần mà còn bị `UPDATE published_at` rồi sau đó bị `DELETE` khi dọn dẹp. Trên PostgreSQL (dùng cơ chế MVCC — mỗi lần `UPDATE` tạo ra một phiên bản dòng mới), vòng đời `INSERT → UPDATE → DELETE` với tần suất cao làm bảng và index phình nhanh (*bloat*), kéo theo áp lực cho `AUTOVACUUM`.
+- **Chi phí dọn dẹp lịch sử:** Nếu bạn không partition bảng outbox theo ngày/giờ để `DROP PARTITION` nhanh, lệnh `DELETE` hàng triệu dòng cũ có thể gây giật I/O.
+
+### Khi nào nên chuyển từ Polling sang Log-based CDC?
+
+Đừng đổi sang CDC chỉ vì thấy kiến trúc trông "xịn" hơn. Hãy giữ Polling cho tới khi bạn gặp ít nhất một trong các tín hiệu đo được sau đây:
+
+1. **Áp lực thật sự lên Primary DB:** Query polling, `UPDATE` trạng thái và `AUTOVACUUM` trên bảng outbox bắt đầu chiếm tỷ trọng đáng kể CPU hoặc IOPS của database chính.
+2. **Yêu cầu độ trễ chặt:** Sản phẩm yêu cầu sự kiện tới downstream trong vài chục mili-giây thay vì vài trăm mili-giây hay vài giây.
+3. **Cần bám sát thứ tự commit log mà không tăng tranh chấp khóa:** Khi bạn muốn tăng tốc độ đẩy event lên hàng nghìn hoặc hàng chục nghìn sự kiện mỗi giây, mở rộng hàng loạt polling worker sẽ làm tăng tranh chấp truy cập vào cùng một tập index.
+
+Tóm gọn: bắt đầu bằng Polling Publisher là quyết định thực dụng và lành mạnh. Chỉ chuyển sang Log-based CDC khi Polling thực sự trở thành nút thắt có số liệu chứng minh.
+
+## Tầng 2: CDC là một Kỹ thuật — và cần nói rõ "Log-based CDC"
+
+Khi nói "không dùng Polling mà chuyển sang CDC", thực chất ta đang nói tới **Change Data Capture** — kỹ thuật phát hiện mọi thay đổi dữ liệu trong database và biến chúng thành dòng sự kiện theo thời gian gần thực.
+
+Tuy nhiên, trong tài liệu kỹ thuật, cụm từ CDC thực ra bao trùm **ba cách làm khác nhau**, và phân biệt chúng giúp tránh tranh cãi không cần thiết.
+
+### Ba dạng CDC và vì sao Log-based chiếm ưu thế
+
+- **Query-based (Timestamp/Version-based) CDC:** Một tiến trình định kỳ query bảng chính theo điều kiện `WHERE updated_at > last_checkpoint`. Cách này dễ làm nhưng bỏ sót hoàn toàn các lệnh `DELETE` cứng (dòng đã biến mất khỏi bảng), không ghi nhận được các lần `UPDATE` trung gian giữa hai chu kỳ quét, và tạo thêm tải query lên bảng nghiệp vụ.
+- **Trigger-based CDC:** Bạn gắn database trigger vào bảng chính để mỗi khi có `INSERT`/`UPDATE`/`DELETE`, database tự chèn một bản ghi vào bảng audit/changelog. Cách này bắt được cả `DELETE`, nhưng trigger chạy **đồng bộ bên trong chính transaction nghiệp vụ**, làm chậm mọi thao tác ghi và khó bảo trì khi schema thay đổi.
+- **Log-based CDC (Transaction Log Tailing):** Mọi database quan hệ hiện đại vốn đã phải ghi tuần tự mọi thay đổi xuống một nhật ký nội bộ để phục hồi sau sự cố và đồng bộ replica — đó là **WAL** (*Write-Ahead Log*) ở PostgreSQL hay **binlog** (ở chế độ `ROW`) ở MySQL. Log-based CDC chỉ việc đọc lại chính luồng log có sẵn này.
+
+Đó là lý do khi so sánh "Outbox dùng Polling hay CDC", người trong nghề gần như luôn ngầm hiểu CDC là **Log-based CDC**. Nó giải quyết gọn các nhược điểm của hai cách trên: không chạy thêm câu `SELECT` hay trigger lên bảng nghiệp vụ, bắt đủ cả `INSERT`/`UPDATE`/`DELETE` cùng giá trị trước và sau thay đổi, giữ đúng thứ tự commit và thường đạt độ trễ rất thấp.
+
+### Đối chiếu đường đi: Polling Publisher và Log-based CDC
+
+Trình phát dưới đây đặt hai cơ chế cạnh nhau trên cùng một hệ thống để bạn nhìn rõ sự khác biệt ở chặng giữa database và event broker. Tốc độ chạy của điểm sáng chỉ để dễ theo dõi từng bước, không phản ánh độ trễ đo thật.
+
+```d2 mode=flow layout=dagre title="Hai đường đẩy dữ liệu từ bảng Outbox ra Event Broker: Polling và Log-based CDC"
+# @flow
+# scenarios:
+#   - id: polling
+#     label: Polling Publisher
+#     steps:
+#       - edge: "(api -> db)[0]"
+#         description: Order API ghi bảng orders và bảng outbox_events trong cùng một local ACID transaction.
+#       - edge: "(worker -> db)[0]"
+#         description: Polling Worker định kỳ chạy SELECT ... WHERE published_at IS NULL FOR UPDATE SKIP LOCKED.
+#       - edge: "(db -> worker)[0]"
+#         description: Database trả về một batch các dòng outbox chưa gửi.
+#       - edge: "(worker -> broker)[0]"
+#         description: Worker gửi batch sự kiện sang Event Broker và chờ broker xác nhận.
+#       - edge: "(worker -> db)[1]"
+#         description: Worker chạy UPDATE outbox_events SET published_at = NOW() để chốt đã gửi.
+#   - id: log_cdc
+#     label: Log-based CDC
+#     steps:
+#       - edge: "(api -> db)[0]"
+#         description: Order API ghi bảng orders và outbox_events trong cùng một local ACID transaction.
+#       - edge: "(db -> wal)[0]"
+#         description: PostgreSQL ghi tuần tự bản ghi commit xuống Write-Ahead Log (WAL) như cơ chế nội bộ sẵn có.
+#       - edge: "(wal -> cdc)[0]"
+#         description: CDC Connector đọc luồng thay đổi từ replication slot trên WAL mà không query bảng outbox_events.
+#       - edge: "(cdc -> broker)[0]"
+#         description: Connector chuyển đổi bản ghi outbox thành domain event và đẩy sang Event Broker.
+# @endflow
+direction: right
+
+api: "Order API"
+db: "PostgreSQL\norders + outbox_events" {
+  shape: cylinder
+  icon: ../../diagrams/assets/postgresql.svg
+}
+wal: "Transaction Log\n(WAL)"
+worker: "Polling Worker"
+cdc: "CDC Connector"
+broker: "Event Broker"
+
+api -> db: "1 tx: INSERT orders + outbox"
+worker -> db: "SELECT ... SKIP LOCKED"
+db -> worker: "Batch pending rows"
+worker -> broker: "Publish events"
+worker -> db: "UPDATE published_at"
+db -> wal: "Append commit log"
+wal -> cdc: "Stream WAL changes"
+cdc -> broker: "Publish routed events"
+```
+
+Nhìn vào hai kịch bản, điểm ăn tiền của Log-based CDC lộ ra rất rõ: thay vì liên tục quay ngược lại hỏi và `UPDATE` bảng `outbox_events`, CDC đi xuôi theo luồng ghi tuần tự của WAL. Bạn thậm chí có thể `DELETE` ngay dòng outbox sau khi `INSERT` trong cùng transaction (hoặc chỉ giữ ngắn hạn) nếu connector đọc được event `INSERT` từ log, giảm mạnh dung lượng bảng outbox.
+
+### Những cái giá ít được nhắc tới của Log-based CDC
+
+Log-based CDC giảm tải cho bảng nghiệp vụ, nhưng **không miễn phí**. Nó chuyển độ phức tạp từ tầng ứng dụng sang tầng hạ tầng database:
+
+- **Nguy cơ đầy ổ đĩa vì Replication Slot (PostgreSQL):** PostgreSQL giữ lại toàn bộ các file WAL chưa được replication slot tiêu thụ. Nếu CDC connector bị dừng suốt cuối tuần mà bạn không đặt giới hạn `max_slot_wal_keep_size` và không có cảnh báo slot lag, phân vùng đĩa của primary DB có thể đầy cứng và làm sập toàn bộ hệ thống ghi.
+- **Snapshot ban đầu (Initial Snapshot) và Schema Evolution:** Khi bật CDC lần đầu cho một bảng lớn, connector cần chụp snapshot dữ liệu hiện có mà không làm đơ giao dịch đang chạy. Về sau, mỗi lần chạy `ALTER TABLE` đổi kiểu cột hoặc đổi cấu trúc bảng, bạn phải kiểm tra xem CDC connector và downstream schema có tương thích hay không.
+- **Thêm thành phần phải giám sát:** Bạn phải theo dõi replication lag, tiến độ offset, trạng thái connector, quyền truy cập replication ở DB, và có quy trình phục hồi khi connector rớt slot.
+
+Nói ngắn gọn: Log-based CDC cực mạnh cho độ trễ thấp và thông lượng cao, nhưng nó đòi hỏi kỷ luật vận hành database nghiêm túc hơn hẳn một vòng lặp polling.
+
+## CDC không bắt buộc dùng Debezium
+
+Vì Debezium quá phổ biến trong cộng đồng Kafka, nhiều người mặc nhiên nghĩ muốn làm Log-based CDC là phải cài Debezium. Thực tế, đọc WAL hay binlog là giao thức mở của database, nên bạn có khá nhiều lựa chọn công cụ tùy vào database đang dùng, hạ tầng cloud và bài toán cụ thể.
+
+| Công cụ / Cơ chế | Nguồn DB tiêu biểu | Đích đến điển hình | Khi nào hợp lý hơn Debezium? |
+| --- | --- | --- | --- |
+| **Debezium** | PostgreSQL, MySQL, SQL Server, Oracle, MongoDB... | Kafka (qua Kafka Connect), hoặc Kinesis, Pulsar, Pub/Sub, Redis Streams, NATS (qua Debezium Server) | Hệ thống đa DB, đã dùng Kafka, cần hệ sinh thái SMT (như Outbox Event Router) và cộng đồng lớn |
+| **Maxwell's Daemon** | MySQL / MariaDB | Kafka, Kinesis, RabbitMQ, Pub/Sub, Redis | Chỉ dùng MySQL, muốn một tiến trình gọn đọc binlog xuất JSON thẳng mà không dựng cụm Kafka Connect |
+| **AWS DMS** | RDS/Aurora, PostgreSQL, MySQL, Oracle, SQL Server... | S3, Kinesis, Redshift, DB đích trên AWS | Chạy trên AWS, ưu tiên dịch vụ managed cho migration hoặc CDC đơn giản, không muốn tự nuôi cụm connector |
+| **Sequin** | PostgreSQL | Webhook, Kafka, SQS, Redis, RabbitMQ, NATS... | Dùng PostgreSQL, cần routing, lọc dòng và backfill đơn giản ngay trên logical replication |
+| **PeerDB** | PostgreSQL | BigQuery, Snowflake, ClickHouse, S3, Kafka | Tối ưu riêng cho bài toán đồng bộ dữ liệu khối lượng lớn từ PostgreSQL sang Data Warehouse |
+| **Flink CDC** | MySQL, PostgreSQL, Oracle, MongoDB... | Apache Flink → Iceberg, StarRocks, Elasticsearch... | Cần vừa đọc CDC vừa join/aggregate nhiều bảng theo thời gian thực ngay trong Flink mà không qua lớp trung gian |
+| **Native Streams / Logical Replication** | PostgreSQL (`pgoutput`), MongoDB Change Streams, DynamoDB Streams | Ứng dụng tự đọc trực tiếp | Bài toán hẹp trong một database duy nhất (như DynamoDB hoặc MongoDB có sẵn stream managed), không cần thêm middleware |
+
+Cũng cần lưu ý một chi tiết hay bị bỏ sót ngay với chính Debezium: bạn **không bắt buộc phải chạy cụm Kafka Connect** mới dùng được Debezium. **Debezium Server** là một ứng dụng độc lập cho phép đọc WAL/binlog rồi đẩy thẳng sang AWS Kinesis, Google Pub/Sub, RabbitMQ, Redis Streams hay Pulsar; thậm chí **Debezium Engine** còn nhúng được trực tiếp như một thư viện vào ứng dụng Java nếu bạn chỉ cần một tiến trình đơn giản.
+
+Tóm lại: hãy chọn công cụ CDC theo **database gốc, đích đến và đội ngũ vận hành đang có**, đừng mặc định cứ nghe "CDC" là dựng nguyên một cụm Kafka Connect.
+
+## Tầng 3: Debezium là Công cụ — và không chỉ dùng cho Outbox
+
+Sai lầm ngược lại với việc "gắn chặt Outbox với Debezium" là cho rằng *"Debezium chỉ sinh ra để phục vụ Outbox"*. Thực tế, Debezium là một nền tảng Log-based CDC tổng quát: bảng nào có thay đổi trong transaction log thì nó đều đọc và phát thành luồng sự kiện được.
+
+Cách phân biệt quan trọng nhất khi dùng Debezium nằm ở câu hỏi: **bạn nên trỏ Debezium thẳng vào bảng nghiệp vụ, hay bắt buộc đi qua bảng Outbox?** Hãy chuyển đổi qua lại hai tab trong sơ đồ dưới đây để đối chiếu hai mô hình sử dụng này.
+
+```d2 mode=tabs title="Hai cách dùng Debezium: CDC trực tiếp cho State Sync và Outbox + CDC cho Domain Events"
+direction: right
+
+api: "Order API"
+pg: "PostgreSQL" {
+  shape: cylinder
+  icon: ../../diagrams/assets/postgresql.svg
+}
+wal: "WAL"
+dbz: "Debezium"
+broker: "Event Broker"
+
+api -> pg
+pg -> wal: "Commit log"
+wal -> dbz: "Logical replication"
+dbz -> broker
+
+scenarios: {
+  "CDC trực tiếp (State Sync)": {
+    pg: "PostgreSQL\n(products, orders)"
+    dbz: "Debezium\n(Row-level change)"
+    es: "Elasticsearch\n(Search Index)"
+    redis: "Redis\n(Cache Invalidation)" {
+      icon: ../../diagrams/assets/redis.svg
+    }
+    dwh: "Data Warehouse\n(Analytics)"
+
+    broker -> es: "Upsert / Delete doc"
+    broker -> redis: "Evict stale key"
+    broker -> dwh: "Append raw rows"
+  }
+  "Outbox + Debezium (Domain Events)": {
+    pg: "PostgreSQL\n(orders + outbox_events)"
+    dbz: "Debezium\n(+ Outbox Event Router SMT)"
+    billing: "Billing Service"
+    notif: "Notification Service"
+
+    broker -> billing: "OrderPlaced v1"
+    broker -> notif: "OrderPlaced v1"
+  }
+}
+```
+
+### Những bài toán dùng Debezium trực tiếp không cần Outbox
+
+Khi hệ thống đích thực sự cần **bản sao trạng thái của dữ liệu bảng** (*state sync*), đọc trực tiếp bảng nghiệp vụ bằng Debezium vừa gọn vừa tránh phải sửa code ứng dụng để ghi thêm bảng outbox:
+
+- **Đồng bộ sang Search Engine (Elasticsearch / OpenSearch):** Khi bảng `products` thêm món mới hoặc đổi giá, Debezium bắn ngay thay đổi sang worker cập nhật chỉ mục tìm kiếm. Ứng dụng không phải nhúng logic đồng bộ Elasticsearch vào từng API sửa sản phẩm.
+- **Đổ dữ liệu sang Data Warehouse / Lakehouse:** Đội phân tích dữ liệu cần bản sao đầy đủ của các bảng OLTP (bao gồm cả lịch sử `UPDATE`/`DELETE`) vào BigQuery, Snowflake, ClickHouse hay Iceberg. CDC thay thế các job ETL quét nặng database lúc nửa đêm bằng một luồng cập nhật liên tục, ít ảnh hưởng tới giao dịch của người dùng.
+- **Cache Invalidation (vô hiệu hóa cache):** Một lỗi rất hay gặp là có ba đường sửa dữ liệu (API chính, công cụ admin nội bộ, và batch job sửa lỗi) nhưng chỉ hai đường nhớ xóa key trên Redis. Khi gắn CDC theo dõi bảng nguồn, mọi thay đổi đã commit trong database đều kích hoạt tín hiệu xóa hoặc làm mới cache — bất kể thay đổi đến từ đâu.
+- **Audit Log và Zero-downtime Migration (Strangler Fig):** Khi tách một module khỏi hệ thống monolith cũ sang service mới, bạn có thể dùng Debezium kéo liên tục dữ liệu từ database cũ sang database mới trong lúc hai hệ thống chạy song song, cho tới khi sẵn sàng chuyển hoàn toàn lưu lượng.
+
+### Cạm bẫy rò rỉ schema: vì sao microservices vẫn hay ghép Outbox với Debezium?
+
+Nếu Debezium đọc thẳng bảng `orders` tiện như vậy, sao khi trao đổi giữa các microservice với nhau người ta lại cố tình bày thêm bảng `outbox_events` rồi mới cho Debezium đọc?
+
+Có hai lý do rất thực tế:
+
+1. **Chống phụ thuộc chặt vào internal database schema:** Cấu trúc bảng `orders` là chi tiết nội bộ của Order Service. Nếu Billing Service và Shipping Service tiêu thụ trực tiếp sự kiện dòng của bảng `orders`, chỉ cần team Order đổi tên cột `total_price` thành `subtotal_cents`, hoặc tách địa chỉ giao hàng sang bảng riêng `order_addresses`, toàn bộ các service khác sẽ gãy theo. Lúc đó database biến thành một "API ẩn" không thể tái cấu trúc.
+2. **Sự kiện dòng (row-level) không đồng nghĩa sự kiện nghiệp vụ (domain event):** Một hành động đặt đơn thường ghi đồng thời vào ba bảng: `orders`, `order_items` và `order_discounts`. CDC đọc trực tiếp sẽ phát ra nhiều sự kiện mảnh rời rạc của từng dòng, buộc phía nhận phải tự ghép lại và đoán xem nghiệp vụ gì vừa xảy ra. Ngược lại, bảng Outbox cho phép Order Service phát đúng một **domain event** hoàn chỉnh, có phiên bản rõ ràng (ví dụ `OrderPlaced` kèm `schema_version: 1`) và chỉ chứa những trường được cam kết trong contract.
+
+Đó chính là lý do **Outbox + Debezium** trở thành cặp bài trùng nổi tiếng trong microservices: **Outbox** giữ vai trò định nghĩa biên giới và hợp đồng sự kiện sạch giữa các *bounded context* (ranh giới miền nghiệp vụ của từng service), còn **Debezium** — kèm plugin có sẵn là **Outbox Event Router SMT** (*Single Message Transform*, bộ biến đổi bản ghi ngay trong luồng) — đảm nhận phần vận chuyển nhanh từ WAL ra đúng topic theo `aggregate_type` và `aggregate_id`.
+
+Nói ngắn gọn: **dùng CDC trực tiếp khi đích đến cần bản sao dữ liệu bảng; ghép thêm Outbox khi đích đến là một service độc lập cần hợp đồng sự kiện nghiệp vụ ổn định.**
+
+## Chọn tổ hợp nào theo quy mô và bài toán?
+
+Thay vì học thuộc một công thức duy nhất, bạn có thể chọn tổ hợp theo đúng câu hỏi nghiệp vụ và sức vận hành của đội ngũ:
+
+| Bài toán cụ thể | Tổ hợp nên chọn | Vì sao chọn cách này? |
+| --- | --- | --- |
+| Phát domain event giữa các service, tải nhỏ–vừa (ví dụ dưới vài trăm event/giây), team nhỏ | **Outbox + Polling Publisher** (`SKIP LOCKED` + partial index) | Ít thành phần hạ tầng nhất, dễ debug, không gánh rủi ro replication slot |
+| Phát domain event tải cao, cần độ trễ thấp, team đã có Kafka / năng lực vận hành DB | **Outbox + Log-based CDC** (Debezium + Outbox Router SMT hoặc tương đương) | Giữ event contract sạch nhờ Outbox, bỏ tải polling + `UPDATE` lên primary DB nhờ WAL |
+| Đồng bộ bảng sang Elasticsearch, Data Warehouse, hoặc Cache Invalidation | **Log-based CDC trực tiếp** (Debezium, Sequin, PeerDB, AWS DMS... tùy stack) | Đích đến cần trạng thái bảng, không cần bày thêm bảng Outbox nếu không đổi ngữ nghĩa nghiệp vụ |
+| Chạy trong cùng một database, không cần đẩy dữ liệu ra ngoài | **Không dùng cả Outbox lẫn CDC** | Một local ACID transaction là đủ; thêm async pipeline chỉ làm tăng độ trễ và độ phức tạp |
+| Ghi log/metric best-effort (chấp nhận thỉnh thoảng rơi vài bản ghi) | **Gửi trực tiếp bất đồng bộ / fire-and-forget** | Chi phí bảo đảm không mất dữ liệu lớn hơn giá trị của chính dữ liệu đó |
+
+Nếu buộc phải chọn một lộ trình mặc định cho hệ thống mới phát triển, mình chọn **bắt đầu với Outbox + Polling Publisher** cho bài toán phát domain event. Thiết kế này giữ đúng ranh giới kiến trúc ngay từ ngày đầu (mọi thứ đã ghi vào bảng `outbox_events` có schema rõ ràng). Sau này khi lượng event tăng lên mức khiến polling gây áp lực lên database, bạn chỉ cần thay phần **Message Relay** bằng Debezium hoặc một công cụ Log-based CDC khác — **toàn bộ code nghiệp vụ ghi vào bảng outbox gần như không phải viết lại**.
+
+## Bài liên quan
+
+<Cards>
+  <Card
+    title="CQRS: tách mô hình đọc và ghi, giữ đúng dữ liệu"
+    href="/system-design/04-cqrs"
+    description="Cách Outbox kết hợp với at-least-once delivery, idempotent consumer và projection rebuild trong kiến trúc CQRS."
+  />
+  <Card
+    title="Thiết kế webhook delivery: tin cậy, cô lập lỗi và replay an toàn"
+    href="/system-design/05-webhook-delivery-system"
+    description="Áp dụng Transactional Outbox để không làm rơi sự kiện thanh toán trước khi giao webhook tới khách hàng."
+  />
+  <Card
+    title="Tư duy thiết kế Notification System: từ 10 người đến hàng triệu người dùng"
+    href="/system-design/07-notification-system"
+    description="Tách đường ghi nghiệp vụ khỏi luồng fan-out hàng triệu thông báo bằng Outbox và event broker."
+  />
+  <Card
+    title="Column nullable có sử dụng index được không?"
+    href="/database/02-index-on-nullable-column"
+    description="Vì sao partial index với điều kiện WHERE published_at IS NULL giữ cho bảng Outbox quét nhanh dù dữ liệu lịch sử rất lớn."
+  />
+  <Card
+    title="Long-running Transaction trong PostgreSQL và MySQL"
+    href="/database/05-long-running-transaction"
+    description="Hiểu vì sao không nên giữ transaction mở trong lúc gọi mạng ra message broker ở Polling Publisher."
+  />
+</Cards>

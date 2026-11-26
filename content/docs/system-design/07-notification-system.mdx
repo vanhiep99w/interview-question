@@ -1,0 +1,339 @@
+---
+title: "Tư duy thiết kế Notification System: từ 10 người đến hàng triệu người dùng"
+description: "Phân tích kiến trúc hệ thống Notification ở góc độ tư duy thiết kế và các bẫy thực tế ngoài production: fan-out có checkpoint, cô lập ưu tiên, chống Self-DDoS, idempotency hai lớp, SMS Pumping và Email Reputation."
+---
+
+Hình dung một creator có 1 triệu subscribers vừa bấm đăng video mới. Gửi một thông báo tới một người rất dễ — chỉ là một lời gọi API. Nhưng khi con số nhảy lên 1 triệu, làm sao gửi hết số thông báo đó mà không làm treo tính năng đăng video, không khiến mã OTP đăng nhập bị kẹt phía sau, và không tự đánh sập chính hệ thống của mình khi hàng trăm nghìn người cùng bấm mở?
+
+Bài này tập trung vào **tư duy phân tích kiến trúc và các đánh đổi thực tế**: đi từ cách làm đơn giản nhất, chỉ ra chính xác chỗ nó gãy, rồi lần lượt bóc tách những cái bẫy ngoài production mà các bài giới thiệu ngắn thường bỏ qua. Mình cố ý bỏ qua code triển khai dài dòng và bảng tính dung lượng chi tiết để giữ mạch lập luận gọn và dễ nắm bản chất.
+
+<Callout type="info" title="Cần bản thiết kế chi tiết 17 bước (Capacity, SQL/ER, Java/React, AWS & Cost)?">
+Bài viết này tập trung vào góc nhìn phân tích và các điểm dễ gãy trong thực tế. Nếu bạn muốn xem trọn bộ **System Design Blueprint 17 bước** (ước lượng tải chi tiết, schema SQL + ER Diagram, code Java/Spring Boot & React, sơ đồ AWS EKS và bảng chi phí hàng tháng), hãy xem thêm tại [Notification System — System Design Practice](https://system-design-practice.pages.dev/notification-system/).
+
+Một vài thuật ngữ dùng xuyên suốt bài: **Fan-out** là việc nhân bản một sự kiện gốc thành nhiều tác vụ gửi tới từng người nhận. **At-least-once** nghĩa là hệ thống bảo đảm thử gửi tối thiểu một lần trong giới hạn retry, nên trùng lặp có thể xảy ra. **Idempotency** là thiết kế giúp xử lý lặp cùng một yêu cầu không tạo thêm tác động ngoài ý muốn.
+</Callout>
+
+## Mục lục
+
+- [Nút thắt đầu tiên: tách việc đăng video khỏi việc gửi thông báo](#nút-thắt-đầu-tiên-tách-việc-đăng-video-khỏi-việc-gửi-thông-báo)
+- [Bức tranh kiến trúc sau khi tách lớp](#bức-tranh-kiến-trúc-sau-khi-tách-lớp)
+- [Fan-out hàng triệu người không đơn giản là một vòng lặp](#fan-out-hàng-triệu-người-không-đơn-giản-là-một-vòng-lặp)
+  - [Sharded fan-out và checkpoint để không mất dấu giữa chừng](#sharded-fan-out-và-checkpoint-để-không-mất-dấu-giữa-chừng)
+  - [Sao không dùng luôn Topic Broadcast của FCM cho gọn?](#sao-không-dùng-luôn-topic-broadcast-của-fcm-cho-gọn)
+- [Hai lớp cô lập bắt buộc: tách kênh và tách độ ưu tiên](#hai-lớp-cô-lập-bắt-buộc-tách-kênh-và-tách-độ-ưu-tiên)
+  - [Tách pipeline theo kênh giao hàng (Bulkhead)](#tách-pipeline-theo-kênh-giao-hàng-bulkhead)
+  - [Tách theo độ ưu tiên để chống noisy neighbor](#tách-theo-độ-ưu-tiên-để-chống-noisy-neighbor)
+- [Nghịch lý tốc độ: gửi nhanh quá lại tự đánh sập chính mình](#nghịch-lý-tốc-độ-gửi-nhanh-quá-lại-tự-đánh-sập-chính-mình)
+- [Xử lý lỗi: vùng mù của mạng, Idempotency hai lớp và TTL](#xử-lý-lỗi-vùng-mù-của-mạng-idempotency-hai-lớp-và-ttl)
+  - [Chống trùng nội bộ chưa đủ để thành Exactly-once](#chống-trùng-nội-bộ-chưa-đủ-để-thành-exactly-once)
+  - [Phân loại lỗi, Backoff có Jitter, TTL và Dead Letter Queue](#phân-loại-lỗi-backoff-có-jitter-ttl-và-dead-letter-queue)
+- [Gửi ít đi để hiệu quả hơn: lọc thông minh trước khi gọi provider](#gửi-ít-đi-để-hiệu-quả-hơn-lọc-thông-minh-trước-khi-gọi-provider)
+- [Năm cái bẫy production hiếm khi xuất hiện trên bảng trắng phỏng vấn](#năm-cái-bẫy-production-hiếm-khi-xuất-hiện-trên-bảng-trắng-phỏng-vấn)
+- [Bắt đầu từ đâu để không bị over-engineer?](#bắt-đầu-từ-đâu-để-không-bị-over-engineer)
+- [Đọc sâu hơn và bài liên quan](#đọc-sâu-hơn-và-bài-liên-quan)
+
+## Nút thắt đầu tiên: tách việc đăng video khỏi việc gửi thông báo
+
+Ở phiên bản ngây thơ nhất, khi creator bấm đăng video, backend lưu metadata vào database, lấy danh sách subscribers rồi gọi thẳng nhà cung cấp Push hoặc Email trong cùng request đó. Với kênh nhỏ 10 người đăng ký, cách này chạy gọn gàng.
+
+Khi kênh có 1 triệu subscribers, thiết kế đồng bộ gãy ở hai điểm rõ rệt. Thứ nhất, request đăng video bị trói chặt vào tốc độ và độ ổn định của nhà cung cấp bên thứ ba — chỉ cần FCM hay dịch vụ email chập chờn là creator tưởng mình không đăng được bài. Thứ hai, ngay cả khi một worker xử lý lạc quan tới 1.000 thông báo mỗi giây, riêng một video đã ngốn gần **17 phút**; trong lúc đó hàng chục creator khác tiếp tục đăng bài và hàng đợi cứ thế dồn ứ.
+
+Bước nâng cấp đầu tiên không phải là "thêm thật nhiều server cho Upload API", mà là **tách hẳn nghiệp vụ chính khỏi luồng giao thông báo** với hai nguyên tắc:
+
+1. **Upload API chỉ phát đúng một sự kiện gọn** chứa `{creator_id, video_id}`, tuyệt đối không tự tạo 1 triệu job trong request upload.
+2. **Dùng Transactional Outbox** để lưu thông tin video và ghi sự kiện thông báo trong cùng một database transaction. Nhờ vậy, bạn tránh được lỗi *dual-write* — không còn cảnh video đã lưu thành công nhưng server crash trước khi kịp đẩy sự kiện vào message queue khiến 1 triệu người không bao giờ nhận được thông báo.
+
+## Bức tranh kiến trúc sau khi tách lớp
+
+Khi đã tách được điểm khởi phát, toàn bộ đường đi của thông báo chia thành bốn lớp rõ ràng: ghi sự kiện nguyên tử, mở rộng và lọc danh sách người nhận, xếp hàng tách biệt theo độ ưu tiên và kênh, rồi giao cho các nhóm worker chuyên biệt gọi ra nhà cung cấp bên ngoài.
+
+```d2 title="Kiến trúc tổng quan tách Publish, Fan-out và Delivery theo kênh"
+direction: right
+
+api: "Upload / Domain API"
+pg: "PostgreSQL\nBusiness DB + Outbox" {
+  shape: cylinder
+  icon: ../../diagrams/assets/postgresql.svg
+}
+broker: "Event Broker"
+fanout: "Sharded Fan-out\n& Filter Service"
+redis: "Redis\nRate Limit, Dedup\n& Presence" {
+  icon: ../../diagrams/assets/redis.svg
+}
+
+queues: "Priority & Channel Queues" {
+  push_q: "Push Queues\n(Critical / Bulk)"
+  email_q: "Email Queues\n(Trans / Bulk)"
+  sms_q: "SMS Queue\n(Critical)"
+  inapp_q: "In-app Queue"
+}
+
+workers: "Isolated Workers" {
+  push_w: "Push Workers"
+  email_w: "Email Workers"
+  sms_w: "SMS Workers"
+  inapp_w: "In-app / WS"
+}
+
+providers: "External Providers" {
+  fcm: "APNs / FCM"
+  email_p: "Email Provider"
+  sms_p: "SMS Provider"
+}
+
+dlq: "DLQ & Replay"
+status: "Delivery Status\n(Hot + Cold)" {shape: cylinder}
+
+api -> pg: "Commit nghiệp vụ\n+ 1 outbox event"
+pg -> broker: "Relay / CDC"
+broker -> fanout: "Consume 1 event"
+fanout -> redis: "Check Prefs, Cap,\nPresence, Kill Switch"
+fanout -> queues.push_q
+fanout -> queues.email_q
+fanout -> queues.sms_q
+fanout -> queues.inapp_q
+
+queues.push_q -> workers.push_w
+queues.email_q -> workers.email_w
+queues.sms_q -> workers.sms_w
+queues.inapp_q -> workers.inapp_w
+
+workers.push_w -> redis: "Rate limit & Dedup"
+workers.push_w -> providers.fcm
+workers.email_w -> providers.email_p
+workers.sms_w -> providers.sms_p
+
+workers.push_w -> status
+workers.email_w -> status
+workers.sms_w -> status
+workers.push_w -> dlq: "Hết retry"
+workers.email_w -> dlq: "Hết retry"
+workers.sms_w -> dlq: "Hết retry"
+```
+
+Mỗi hộp trong sơ đồ giải quyết một bài toán riêng: Outbox bảo vệ tính toàn vẹn dữ liệu, Broker hấp thụ đỉnh tải, Fan-out lo việc mở rộng và lọc thông minh, các hàng đợi tách biệt cô lập lỗi, còn Redis giữ những trạng thái đọc ghi tốc độ cao như giới hạn tốc độ, khóa chống trùng và trạng thái đang online của người dùng.
+
+## Fan-out hàng triệu người không đơn giản là một vòng lặp
+
+Rất nhiều bài viết nhập môn chỉ nói gọn một câu: *"Notification Service đọc subscribers theo từng batch rồi đẩy job vào queue"*. Nhưng khi gặp creator cỡ lớn (vài triệu đến hàng chục triệu subscribers), chính chỗ này lại là nút cổ chai mong manh nhất.
+
+### Sharded fan-out và checkpoint để không mất dấu giữa chừng
+
+Nếu chỉ có một consumer nhận sự kiện rồi chạy vòng lặp đọc từng trang 1.000 người từ bảng subscriptions, hai rủi ro xảy ra ngay lập tức: chạy đơn luồng quá chậm, và **nếu tiến trình crash ở người thứ 500.000 thì lần chạy lại sẽ lặp từ đầu**.
+
+Cách xử lý bền vững là **chia mảnh (sharded fan-out) kèm checkpoint**:
+
+- Chia danh sách subscribers theo các mảnh cố định (ví dụ 64 shards dựa trên hash của `subscriber_id`). Một sự kiện video mới được tách thành 64 tác vụ fan-out chạy song song trên nhiều worker.
+- Mỗi worker đọc dữ liệu bằng **keyset pagination** (`WHERE subscriber_id > last_id ORDER BY subscriber_id LIMIT 1000`), tránh dùng `OFFSET` vì `OFFSET` càng lớn truy vấn càng chậm.
+- Sau mỗi batch 1.000 người được đẩy vào queue, worker lưu lại `last_subscriber_id` làm checkpoint. Nếu pod bị khởi động lại giữa chừng, pod khác nhận tiếp đúng mảnh đó và chạy tiếp từ checkpoint — chỉ tối đa 1 batch cuối có thể bị đẩy lặp và sẽ bị lớp chống trùng chặn lại.
+
+### Sao không dùng luôn Topic Broadcast của FCM cho gọn?
+
+Đây là câu hỏi rất hay khi đi phỏng vấn: với ứng dụng di động, FCM hỗ trợ gửi một lệnh duy nhất tới cả một topic đại diện cho creator thay vì tự fan-out từng người. Nghe có vẻ quá tiện, nhưng bạn phải đổi lấy ba thứ:
+
+- **Mất kiểm soát tốc độ rải tải (pacing):** FCM xả đồng loạt rất dễ tạo đợt traffic đập ngược vào backend khi hàng trăm nghìn người cùng bấm mở video.
+- **Khó lọc theo từng người dùng:** Không áp được giờ yên tĩnh theo múi giờ (Quiet Hours), giới hạn tần suất (Frequency Capping) hay bỏ qua người đang mở sẵn ứng dụng.
+- **Không dùng chung cho Email/SMS** và thiếu dữ liệu trạng thái chi tiết từng người dùng khi cần hỗ trợ kỹ thuật.
+
+Nói ngắn gọn: **chọn sharded fan-out làm mặc định** cho thông báo gắn với tùy chọn cá nhân; chỉ dùng Topic Broadcast cho tin công cộng đồng nhất (như cảnh báo thời tiết hoặc thông báo bảo trì toàn hệ thống) nơi hạ tầng đọc đã được cache cứng ở CDN.
+
+## Hai lớp cô lập bắt buộc: tách kênh và tách độ ưu tiên
+
+Chạy thêm nhiều worker (horizontal scaling) giúp tăng sức xử lý, nhưng nếu không có vách ngăn cô lập, một sự cố nhỏ ở một góc sẽ kéo cả hệ thống chậm theo.
+
+### Tách pipeline theo kênh giao hàng (Bulkhead)
+
+Push, Email và SMS đi qua các đối tác hoàn toàn khác nhau với độ ổn định và độ trễ rất khác nhau. Nếu dùng chung một hàng đợi và một nhóm worker, chỉ cần nhà cung cấp Email chậm đột ngột từ 200 ms lên 10 giây là toàn bộ kết nối worker bị giữ cứng, kéo luôn Push Notification đứng im.
+
+Tách riêng hàng đợi, nhóm worker, cấu hình timeout và quy tắc tự động mở rộng cho từng kênh giúp cô lập bán kính ảnh hưởng. Một chi tiết quan trọng khi autoscale worker: **hãy scale theo tuổi tin nhắn trong hàng đợi (queue age / consumer lag) thay vì chỉ nhìn CPU**. Worker gửi thông báo chủ yếu chờ I/O mạng, nên CPU có thể chỉ 20% trong khi hàng đợi đã trễ nửa tiếng.
+
+### Tách theo độ ưu tiên để chống noisy neighbor
+
+Tách theo kênh vẫn chưa đủ. Hình dung một creator có 20 triệu subscribers vừa đăng video, đổ 20 triệu job vào Push Queue. Đúng lúc đó, một người dùng khác cần nhận thông báo xác thực đăng nhập hai lớp qua Push. Nếu dùng chung một hàng đợi FIFO, thông báo bảo mật đó phải xếp hàng sau 20 triệu tin video mới.
+
+Giải pháp là phân loại rõ thông báo thành ba tầng và cấp hàng đợi (cũng như nhóm worker tối thiểu) riêng cho làn ưu tiên cao nhất:
+
+| Tầng ưu tiên | Ví dụ điển hình | Kỳ vọng độ trễ | Nguyên tắc vận hành |
+| --- | --- | --- | --- |
+| **Critical** | OTP đăng nhập, cảnh báo đăng nhập lạ, biến động giao dịch | Vài giây | Hàng đợi & worker riêng, bỏ qua Quiet Hours, bảo lưu quota provider |
+| **Interactive** | Tin nhắn trực tiếp, bình luận mới, lượt nhắc tên | Vài chục giây | Tách khỏi luồng hàng loạt, ưu tiên trải nghiệm tức thì |
+| **Bulk** | Video mới từ creator lớn, bản tin định kỳ, khuyến mãi | Vài phút đến 15 phút | Chấp nhận rải tải chậm (pacing), tuân thủ Quiet Hours & Frequency Cap |
+
+## Nghịch lý tốc độ: gửi nhanh quá lại tự đánh sập chính mình
+
+Hầu hết mọi người đều nhớ rằng cần **rate limiter ở chiều gửi đi** để nhiều worker chạy song song không vượt quá hạn mức của APNs, FCM hay Twilio (thường dùng distributed Token Bucket trên Redis). Nhưng ngoài thực tế còn một cái bẫy nguy hiểm hơn ở **chiều đập ngược lại**: **Self-DDoS**.
+
+Giả sử hệ thống của bạn quá khỏe, xả hết 1 triệu push notification về một video hot chỉ trong 10 giây. Chỉ cần 10% người nhận bấm mở ngay trong 30 giây đầu, **100.000 request đồng loạt** sẽ ập thẳng vào Video API, hệ thống xác thực và CDN. Không ít sự cố sập dịch vụ ngoài đời không đến từ hacker, mà đến từ chính một chiến dịch bắn push quá nhanh.
+
+Để hóa giải nghịch lý này, cần ba thói quen đơn giản nhưng rất hiệu quả:
+
+- **Pacing (rải tải có chủ đích):** Với làn `Bulk`, chủ động kìm tốc độ xả để 1 triệu thông báo đi ra đều trong 5–15 phút thay vì bắn ồ ạt trong vài giây.
+- **Pre-warm cache trước khi xả:** Nạp sẵn metadata và thumbnail của video mới lên Redis/CDN trước khi Fan-out bắt đầu chạy.
+- **Cẩn thận với Silent Push tự gọi ngược API:** Nếu payload push chỉ chứa một ID ngắn rồi ứng dụng trên điện thoại tự động gọi API về backend để tải ảnh và chữ hiển thị, tỷ lệ gọi ngược sẽ không phải 10% người bấm mà là gần **100% thiết bị đang bật mạng**. Hãy đặt nội dung hiển thị gọn trong giới hạn ~4 KB của payload push và trỏ ảnh về CDN.
+
+## Xử lý lỗi: vùng mù của mạng, Idempotency hai lớp và TTL
+
+Khi gọi mạng ra nhà cung cấp bên ngoài, lỗi là chuyện xảy ra mỗi phút. Điểm khó nhất không phải là nhận lỗi `500`, mà là **timeout**: worker gửi yêu cầu xong nhưng không nhận được phản hồi — lúc này bạn không hề biết provider chưa nhận được hay đã gửi tới điện thoại người dùng rồi mới rớt kết nối.
+
+Trình phát dưới đây minh họa trực tiếp hai đường đi trên cùng một hệ thống: gửi thành công ngay lần đầu và kịch bản gặp timeout phải retry kèm khóa chống trùng. Tốc độ di chuyển chỉ mang tính trực quan, không phải độ trễ đo thật.
+
+```d2 mode=flow layout=dagre title="Hai kịch bản gửi Push: thành công ngay và retry sau timeout"
+# @flow
+# scenarios:
+#   - id: ok
+#     label: Gửi thành công
+#     steps:
+#       - edge: "(api -> db)[0]"
+#         description: Upload API lưu video và ghi một bản ghi outbox trong cùng transaction.
+#       - edge: "(db -> broker)[0]"
+#         description: Outbox relay đẩy sự kiện sang broker; Upload API đã trả kết quả cho creator từ trước.
+#       - edge: "(broker -> fanout)[0]"
+#         description: Sharded fan-out đọc subscribers theo checkpoint và lọc tùy chọn người dùng.
+#       - edge: "(fanout -> queue)[0]"
+#         description: Fan-out đẩy delivery job hợp lệ vào hàng đợi kênh Push.
+#       - edge: "(queue -> worker)[0]"
+#         description: Push worker nhận job, kiểm tra TTL còn hạn và xin hạn mức gửi.
+#       - edge: "(worker -> provider)[0]"
+#         description: Worker gọi APNs/FCM kèm khóa idempotency cố định của thông báo.
+#       - edge: "(provider -> worker)[0]"
+#         description: Provider trả về 202 Accepted xác nhận đã tiếp nhận.
+#       - edge: "(worker -> status)[0]"
+#         description: Worker ghi trạng thái ACCEPTED vào Delivery Status Store.
+#   - id: retry
+#     label: Timeout & Retry có Idempotency
+#     steps:
+#       - edge: "(api -> db)[0]"
+#         description: Upload API lưu video và outbox event nguyên tử.
+#       - edge: "(db -> broker)[0]"
+#         description: Outbox relay chuyển sự kiện lên broker.
+#       - edge: "(broker -> fanout)[0]"
+#         description: Fan-out tạo delivery job kèm notification_id duy nhất.
+#       - edge: "(fanout -> queue)[0]"
+#         description: Job được xếp vào Push Queue.
+#       - edge: "(queue -> worker)[0]"
+#         description: Push worker lấy job ở lần thử đầu tiên.
+#       - edge: "(worker -> provider)[0]"
+#         description: Worker gọi provider nhưng kết nối bị timeout (không rõ provider đã nhận hay chưa).
+#       - edge: "(worker -> retry_q)[0]"
+#         description: Worker hẹn thử lại qua Delayed Retry Queue với exponential backoff và jitter.
+#       - edge: "(retry_q -> worker)[0]"
+#         description: Hết thời gian chờ, worker nhận lại job và kiểm tra TTL vẫn còn hiệu lực.
+#       - edge: "(worker -> provider)[0]"
+#         description: Worker gửi lại kèm đúng Idempotency-Key cũ để giảm nguy cơ gửi trùng.
+#       - edge: "(provider -> worker)[0]"
+#         description: Provider phản hồi chấp nhận ở lần thử lại.
+#       - edge: "(worker -> status)[0]"
+#         description: Worker cập nhật trạng thái thành công cùng số lần attempt.
+# @endflow
+direction: right
+
+api: "Upload API"
+db: "PostgreSQL\n+ Outbox" {
+  shape: cylinder
+  icon: ../../diagrams/assets/postgresql.svg
+}
+broker: "Event Broker"
+fanout: "Sharded\nFan-out"
+queue: "Push Queue"
+retry_q: "Delayed\nRetry Queue"
+worker: "Push Worker"
+provider: "APNs / FCM"
+status: "Status Store" {shape: cylinder}
+
+api -> db: "Commit + Outbox"
+db -> broker: "Relay"
+broker -> fanout: "Consume"
+fanout -> queue: "Enqueue"
+queue -> worker: "Poll"
+worker -> provider: "Send (Idempotency-Key)"
+provider -> worker: "202 Accepted"
+worker -> retry_q: "Backoff + Jitter"
+retry_q -> worker: "Redeliver"
+worker -> status: "Record status"
+```
+
+### Chống trùng nội bộ chưa đủ để thành Exactly-once
+
+Đây là điểm rất hay bị hiểu nhầm. Gắn một `notification_id` duy nhất và chặn job lặp trong Redis/DB chỉ mới bảo vệ **lớp nội bộ** (chặn việc Outbox Relay hoặc Fan-out đẩy trùng 2 job giống nhau).
+
+Khi bước ra **lớp mạng ngoài**, nếu provider đã nhận lệnh gửi nhưng rớt phản hồi trước khi về tới worker, lần retry vẫn sẽ xảy ra. Vì thế bạn cần tận dụng thêm `Idempotency-Key` phía nhà cung cấp nếu họ hỗ trợ. Và quan trọng hơn, hãy trung thực về cam kết: **hệ thống notification thực tế là at-least-once**, không hứa exactly-once tuyệt đối; ứng dụng di động và hộp thư In-app cũng nên tự ẩn trùng theo `notification_id`.
+
+### Phân loại lỗi, Backoff có Jitter, TTL và Dead Letter Queue
+
+Không phải lỗi nào cũng nên retry, và không phải lúc nào còn lượt retry cũng nên gửi:
+
+- **Lỗi tạm thời (`429 Too Many Requests`, `5xx`, timeout):** Retry bằng **exponential backoff kèm jitter** (trộn độ trễ ngẫu nhiên để hàng chục nghìn job không cùng thức dậy một giây tạo *thundering herd* đánh sập provider vừa hồi phục), đồng thời tôn trọng header `Retry-After`. Lưu ý triển khai: Kafka không có delay tùy ý cho từng message như một scheduler, nên thường dùng các retry topic theo bậc thời gian (10 giây, 1 phút, 5 phút) kết hợp bảng hẹn giờ cho độ trễ dài.
+- **Lỗi vĩnh viễn (`410 Gone / Unregistered` token chết, `400` sai payload, Email Hard Bounce):** **Tuyệt đối không retry.** Hãy vô hiệu hóa token hoặc chặn địa chỉ email chết đó ngay để tránh lãng phí ở các chiến dịch sau.
+- **Kiểm tra TTL và hủy giữa chừng:** Ngay trước khi gọi provider, worker phải kiểm tra `expires_at` — một mã OTP trễ 10 phút hay thông báo livestream đã kết thúc phải bị hủy bỏ ngay thay vì vẫn cố gửi. Tương tự, nếu creator vừa xóa video khi fan-out mới đi được 20%, hệ thống cần kiểm tra một cờ hủy chiến dịch (`Kill Switch`) trong Redis để dừng lập tức phần còn lại.
+- **Dead Letter Queue (DLQ) không phải bãi rác:** Job hết lượt retry được đẩy sang DLQ (nhớ che các thông tin nhạy cảm như mã OTP trước khi lưu), gắn cảnh báo theo mã lỗi và có công cụ **replay giới hạn tốc độ** kèm kiểm tra lại TTL để việc phát lại không đè bẹp traffic trực tiếp.
+
+## Gửi ít đi để hiệu quả hơn: lọc thông minh trước khi gọi provider
+
+Mục tiêu của hệ thống không phải là bắn càng nhiều thông báo càng tốt. Nếu bạn làm phiền người dùng liên tục, họ sẽ tắt quyền thông báo của ứng dụng ngay trong cài đặt iOS/Android — lúc đó bạn mất vĩnh viễn kênh liên lạc miễn phí quan trọng nhất.
+
+Bốn lớp lọc nên đặt trước cửa gửi hàng:
+
+- **Preferences và Quiet Hours theo múi giờ:** Ngoài bật/tắt theo từng loại sự kiện và kênh, thông báo `Bulk` rơi vào khung 23h–7h sáng theo múi giờ người dùng nên được hoãn sang sáng hôm sau thay vì làm điện thoại rung giữa đêm.
+- **Frequency Capping và Digest:** Giới hạn số thông báo không khẩn mỗi người nhận trong một ngày hoặc một giờ; khi vượt ngưỡng, gom thành một bản tin tổng hợp (*"4 kênh bạn theo dõi vừa đăng video mới"*).
+- **Presence-aware routing:** Nếu người dùng đang mở sẵn ứng dụng (có kết nối WebSocket hoạt động), chỉ cần hiện banner In-app là đủ, không cần bắn thêm Push hay SMS vừa phiền vừa tốn chi phí. Với thông báo quan trọng, có thể bắn Push trước rồi chỉ chuyển sang Email/SMS nếu sau vài phút vẫn chưa thấy trạng thái đã đọc.
+- **Chi tiết sống còn của thiết bị di động:** Một người dùng có nhiều thiết bị nên quan hệ `user → device_token` luôn là 1-nhiều. Khi cập nhật liên tiếp cùng một chủ đề (ví dụ nhiều bình luận mới), hãy gắn **`collapse_key`** (FCM) hoặc **`apns-collapse-id`** (APNs) để hệ điều hành gộp lại thay vì rung liên tục. Và quan trọng nhất: **khi người dùng đăng xuất phải gỡ liên kết `device_token ↔ user_id`**, đồng thời khi tài khoản mới đăng nhập trên cùng thiết bị phải ghi đè quyền sở hữu token đó một cách nguyên tử — nếu không, người đăng nhập sau sẽ nhận trọn thông báo riêng tư của người trước.
+
+## Năm cái bẫy production hiếm khi xuất hiện trên bảng trắng phỏng vấn
+
+Khi chuyển từ bản vẽ phỏng vấn sang vận hành thật, năm vấn đề sau thường là nguyên nhân gây thiệt hại lớn nhất:
+
+<Callout type="warn" title="1. SMS Pumping (Toll Fraud) và lỗi retry đốt tiền">
+Push gần như miễn phí, nhưng SMS tính tiền thật trên từng tin nhắn. Kẻ tấn công có thể dùng bot spam endpoint OTP vào các dải số quốc tế ăn chia cước viễn thông, hoặc một lỗi vòng lặp retry ở SMS worker có thể đốt sạch ngân sách chỉ sau một đêm. Bắt buộc phải có **spend cap / budget circuit breaker**, rate limit chặt theo số điện thoại/IP/quốc gia, và theo dõi tỷ lệ xác thực OTP thành công (lượng SMS tăng vọt nhưng tỷ lệ xác thực tụt thảm là dấu hiệu tấn công rõ nhất).
+</Callout>
+
+- **2. Email Deliverability và uy tín địa chỉ IP:** Không bao giờ gửi chung một IP hoặc subdomain cho email giao dịch (OTP, hóa đơn) và email hàng loạt (video mới, khuyến mãi). Chỉ cần nhóm người nhận email hàng loạt bấm "Báo spam" là email OTP cũng rơi thẳng vào thư mục Spam. Cần tách riêng IP/subdomain, cấu hình **SPF/DKIM/DMARC**, làm **IP warm-up** cho IP mới, tự động đưa *Hard Bounce* và *Spam Complaint* vào *Suppression List*, và hỗ trợ **One-click Unsubscribe**.
+- **3. Lỗi ngầm (Silent Failures) — `200 OK` chưa chắc user đã thấy:** Provider trả `200/202` chỉ nghĩa là họ *đã nhận yêu cầu*, không chứng minh tin đã lên màn hình (email có thể rơi vào Spam, SMS bị nhà mạng chặn từ khóa, Push bị OEM Android bóp nền). Hãy tách chỉ số giao/mở theo **từng domain email (`gmail`, `outlook`), từng nhà mạng và từng hệ điều hành**, kết hợp các **tài khoản Synthetic Canary** định kỳ tự nhận thông báo để đo độ trễ đầu cuối thật.
+- **4. Tai nạn bắn nhầm từ môi trường Staging:** Rất nhiều đội từng vô tình bắn hàng trăm nghìn thông báo thử nghiệm tới khách hàng thật sau khi kéo dữ liệu production về staging. Đừng trông chờ vào sự cẩn thận của lập trình viên — hãy khóa cứng **hard allowlist** ngay ở tầng Egress Gateway của mọi môi trường non-prod (chỉ cho gửi ra email/SĐT nội bộ), kết hợp **Canary 0.1%** và **Kill Switch** cho các chiến dịch lớn.
+- **5. Tránh làm nổ OLTP Database chính vì Delivery Status:** Không lặp lại nội dung payload vào từng dòng trạng thái giao hàng (lưu nội dung chiến dịch một lần, dòng delivery chỉ tham chiếu ID). Đồng thời tách bảng trạng thái nóng ngắn ngày (dùng partition theo ngày hoặc NoSQL có TTL 14–30 ngày) khỏi kho lưu trữ phân tích dài hạn, không để hàng tỷ dòng lịch sử đè lên database nghiệp vụ chính.
+
+## Bắt đầu từ đâu để không bị over-engineer?
+
+Một hệ thống vài chục nghìn người dùng không cần dựng ngay Kafka 6 broker, sharded fan-out 64 mảnh và hệ thống pacing phức tạp từ ngày đầu. Chìa khóa là giữ đúng ranh giới thiết kế (Outbox, tách tầng ưu tiên, khóa idempotency, Staging allowlist) nhưng chọn công cụ vừa sức theo giai đoạn:
+
+| Giai đoạn | Khi nào áp dụng | Lựa chọn hợp lý |
+| --- | --- | --- |
+| **Khởi đầu (MVP)** | Dưới vài trăm nghìn thông báo/ngày | Database sẵn có + bảng Outbox, managed queue (SQS/RabbitMQ) tách `Critical` và `Bulk`, một nhóm worker gọn gọi FCM/APNs/SES/Twilio |
+| **Mở rộng** | Hàng triệu thông báo/ngày, bắt đầu có creator lớn | Tách hẳn queue/worker theo từng kênh, sharded fan-out có checkpoint, Redis rate limiter + dedup, tách IP Email, partition bảng delivery status |
+| **Quy mô rất lớn** | Hàng chục đến trăm triệu thông báo/ngày | Event streaming (Kafka), pacing chống Self-DDoS tinh vi, multi-provider failover tự động, smart presence routing và budget circuit breaker |
+
+Cuối cùng, hãy cân nhắc sòng phẳng bài toán **tự xây hay mua (Build vs Buy)**: nếu thông báo không phải năng lực cốt lõi tạo khác biệt sản phẩm và đội ngũ còn mỏng, dùng dịch vụ quản lý đa kênh hoặc hạ tầng managed sẵn giúp bạn đi nhanh hơn rất nhiều. Chỉ nên tự xây đầy đủ tầng fan-out và delivery pipeline khi quy mô lớn khiến chi phí bên thứ ba trở nên đắt đỏ, hoặc bạn cần kiểm soát sâu về dữ liệu, độ trễ và tốc độ rải tải.
+
+## Đọc sâu hơn và bài liên quan
+
+<Cards>
+  <Card
+    title="Notification System — System Design Blueprint (17 bước chi tiết)"
+    href="https://system-design-practice.pages.dev/notification-system/"
+    description="Bản thiết kế đầy đủ trong system-design-practice: Capacity Estimation C1–C8, Trade-offs, Sequence & ER Diagrams, code Java/Spring Boot & React, kiến trúc AWS EKS và bảng chi phí."
+  />
+  <Card
+    title="Thiết kế webhook delivery: tin cậy, cô lập lỗi và replay an toàn"
+    href="/system-design/05-webhook-delivery-system"
+    description="Đào sâu thêm về Transactional Outbox, fair scheduling, retry state machine và cơ chế replay an toàn."
+  />
+  <Card
+    title="CQRS là gì, khi nào nên dùng và triển khai an toàn?"
+    href="/system-design/04-cqrs"
+    description="Nền tảng về Outbox pattern, at-least-once, ordering và idempotent consumer."
+  />
+  <Card
+    title="Scale từ 1.000 lên 50.000 users"
+    href="/system-design/03-scale-1k-to-50k-users"
+    description="Cách đọc bottleneck theo queue age và backpressure thay vì chỉ nhìn CPU."
+  />
+  <Card
+    title="Redis vs Memcached"
+    href="/caching/01-redis-vs-memcached"
+    description="Vì sao Redis phù hợp cho distributed rate limiting, khóa dedup và trạng thái presence."
+  />
+  <Card
+    title="Column nullable có sử dụng index được không?"
+    href="/database/02-index-on-nullable-column"
+    description="Cách dùng partial index để tối ưu quét bảng Outbox và danh sách thông báo chưa xử lý."
+  />
+</Cards>
